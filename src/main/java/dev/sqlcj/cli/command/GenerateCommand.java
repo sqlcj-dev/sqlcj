@@ -1,5 +1,6 @@
 package dev.sqlcj.cli.command;
 
+import dev.sqlcj.compiler.SqlcjCompiler;
 import dev.sqlcj.config.Config;
 import dev.sqlcj.config.ConfigLoader;
 import dev.sqlcj.config.YamlConfigLoader;
@@ -18,6 +19,8 @@ public class GenerateCommand implements Runnable {
     @Override
     public void run() {
         Config config = configLoader.load(configPath());
+        SqlcjCompiler compiler = new SqlcjCompiler();
+        compiler.compile(config);
     }
 
     private Path configPath() {
