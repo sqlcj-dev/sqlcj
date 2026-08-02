@@ -8,5 +8,6 @@ public final class SqlcjCompiler {
 
     public void compile(Config config) {
         Source source = sourceLoader.load(config);
+        System.out.printf("Loaded %d queries%n", source.queries().size());
     }
 }

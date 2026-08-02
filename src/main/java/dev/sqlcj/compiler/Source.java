@@ -1,6 +1,11 @@
 package dev.sqlcj.compiler;
 
+import dev.sqlcj.parser.Query;
+
+import java.util.List;
+
 public record Source(
-        String schema
+        String schema,
+        List<Query> queries
 ) {
 }
