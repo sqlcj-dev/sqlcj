@@ -1,0 +1,9 @@
+version: "1"
+
+sql:
+  - schema: schema.sql
+    queries: queries.sql
+
+java:
+  package: dev.sqlcj.example
+  out: generated
