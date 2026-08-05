@@ -6,9 +6,13 @@ import dev.sqlcj.config.Config;
 import dev.sqlcj.generator.CodeGenerator;
 import dev.sqlcj.generator.GeneratedFile;
 import dev.sqlcj.generator.JavaCodeGenerator;
+import dev.sqlcj.io.GeneratedFileWriter;
 import dev.sqlcj.parser.Query;
 import dev.sqlcj.sql.SqlParser;
 import net.sf.jsqlparser.statement.Statement;
+
+import java.io.IOException;
+import java.io.UncheckedIOException;
 
 public final class SqlcjCompiler {
 
@@ -16,6 +20,7 @@ public final class SqlcjCompiler {
     private final SqlParser sqlParser = new SqlParser();
     private final QueryAnalyzer queryAnalyzer = new QueryAnalyzer();
     private final CodeGenerator codeGenerator = new JavaCodeGenerator();
+    private final GeneratedFileWriter generatedFileWriter = new GeneratedFileWriter();
 
     public void compile(Config config) {
         Source source = sourceLoader.load(config);
@@ -29,5 +34,14 @@ public final class SqlcjCompiler {
         Statement statement = sqlParser.parse(query.sql());
         QueryModel model = queryAnalyzer.analyze(query, statement);
         GeneratedFile file = codeGenerator.generate(model);
+        write(file);
+    }
+
+    private void write(GeneratedFile file) {
+        try {
+            generatedFileWriter.write(file);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
     }
 }
