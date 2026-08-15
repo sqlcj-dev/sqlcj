@@ -1,5 +1,6 @@
 CREATE TABLE users
 (
-    id       BIGINT PRIMARY KEY,
-    username TEXT NOT NULL
+    id     BIGINT NOT NULL,
+    name   VARCHAR(255),
+    active BOOLEAN
 );
