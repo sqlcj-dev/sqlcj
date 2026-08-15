@@ -31,13 +31,13 @@ public final class SqlcjCompiler {
         Schema schema = schemaParser.parse(source.schema());
 
         for (Query query : source.queries()) {
-            compileQuery(query);
+            compileQuery(query, schema);
         }
     }
 
-    private void compileQuery(Query query) {
+    private void compileQuery(Query query, Schema schema) {
         Statement statement = sqlParser.parse(query.sql());
-        QueryModel model = queryAnalyzer.analyze(query, statement);
+        QueryModel model = queryAnalyzer.analyze(query, statement, schema);
         GeneratedFile file = codeGenerator.generate(model);
         write(file);
     }
