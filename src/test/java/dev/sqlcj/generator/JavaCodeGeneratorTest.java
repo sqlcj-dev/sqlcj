@@ -1,13 +1,17 @@
 package dev.sqlcj.generator;
 
+import dev.sqlcj.analysis.QueryColumn;
 import dev.sqlcj.analysis.QueryModel;
+import dev.sqlcj.analysis.QueryParameter;
 import dev.sqlcj.parser.QueryType;
+import dev.sqlcj.schema.ColumnType;
 import org.junit.jupiter.api.Test;
 
 import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JavaCodeGeneratorTest {
@@ -16,13 +20,17 @@ class JavaCodeGeneratorTest {
 
     @Test
     void shouldGenerateFilePath() {
-        GeneratedFile file = codeGenerator.generate(
-                query(
-                        "GetUser",
-                        QueryType.ONE,
-                        List.of(1)
-                )
+        QueryModel query = new QueryModel(
+                "GetUser",
+                QueryType.ONE,
+                "users",
+                List.of(
+                        new QueryColumn("id", ColumnType.BIGINT, false)
+                ),
+                List.of()
         );
+
+        GeneratedFile file = codeGenerator.generate(query);
 
         assertEquals(
                 Path.of("generated", "GetUser.java"),
@@ -32,32 +40,33 @@ class JavaCodeGeneratorTest {
 
     @Test
     void shouldGenerateClassName() {
-        GeneratedFile file = codeGenerator.generate(
-                query(
-                        "GetUser",
-                        QueryType.ONE,
-                        List.of(1)
-                )
+        QueryModel query = new QueryModel(
+                "GetUser",
+                QueryType.ONE,
+                "users",
+                List.of(),
+                List.of()
         );
 
-        assertTrue(
-                file.content().contains("public final class GetUser")
-        );
+        GeneratedFile file = codeGenerator.generate(query);
+
+        assertTrue(file.content().contains("public final class GetUser"));
     }
+
 
     @Test
     void shouldGenerateMethodName() {
-        GeneratedFile file = codeGenerator.generate(
-                query(
-                        "GetUser",
-                        QueryType.ONE,
-                        List.of(1)
-                )
+        QueryModel query = new QueryModel(
+                "GetUser",
+                QueryType.ONE,
+                "users",
+                List.of(),
+                List.of()
         );
 
-        assertTrue(
-                file.content().contains("public Object getUser")
-        );
+        GeneratedFile file = codeGenerator.generate(query);
+
+        assertTrue(file.content().contains("getUser("));
     }
 
     @Test
@@ -66,12 +75,14 @@ class JavaCodeGeneratorTest {
                 query(
                         "GetUser",
                         QueryType.ONE,
-                        List.of(1)
+                        List.of(
+                                new QueryParameter(1, ColumnType.BIGINT)
+                        )
                 )
         );
 
         assertTrue(
-                file.content().contains("Object param1")
+                file.content().contains("Long param1")
         );
     }
 
@@ -79,15 +90,18 @@ class JavaCodeGeneratorTest {
     void shouldGenerateMultipleParameters() {
         GeneratedFile file = codeGenerator.generate(
                 query(
-                        "ListUsersByIdAndUsername",
+                        "ListUsersByIdAndName",
                         QueryType.MANY,
-                        List.of(1, 2)
+                        List.of(
+                                new QueryParameter(1, ColumnType.BIGINT),
+                                new QueryParameter(2, ColumnType.VARCHAR)
+                        )
                 )
         );
 
         assertTrue(
                 file.content().contains(
-                        "Object param1, Object param2"
+                        "Long param1, String param2"
                 )
         );
     }
@@ -104,7 +118,7 @@ class JavaCodeGeneratorTest {
 
         assertTrue(
                 file.content().contains(
-                        "public Object listUsers()"
+                        "public List<Result> listUsers()"
                 )
         );
     }
@@ -115,7 +129,9 @@ class JavaCodeGeneratorTest {
                 query(
                         "GetUser",
                         QueryType.ONE,
-                        List.of(1)
+                        List.of(
+                                new QueryParameter(1, ColumnType.BIGINT)
+                        )
                 )
         );
 
@@ -132,7 +148,9 @@ class JavaCodeGeneratorTest {
                 query(
                         "GetUser",
                         QueryType.ONE,
-                        List.of(1)
+                        List.of(
+                                new QueryParameter(1, ColumnType.BIGINT)
+                        )
                 )
         );
 
@@ -141,15 +159,154 @@ class JavaCodeGeneratorTest {
         );
     }
 
+    @Test
+    void shouldGenerateResultRecord() {
+        QueryModel query = new QueryModel(
+                "GetUser",
+                QueryType.ONE,
+                "users",
+                List.of(
+                        new QueryColumn("id", ColumnType.BIGINT, false),
+                        new QueryColumn("name", ColumnType.VARCHAR, true),
+                        new QueryColumn("active", ColumnType.BOOLEAN, true)
+                ),
+                List.of()
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        String source = file.content();
+
+        assertTrue(source.contains("public record Result("));
+        assertTrue(source.contains("Long id,"));
+        assertTrue(source.contains("String name,"));
+        assertTrue(source.contains("Boolean active"));
+        assertTrue(source.contains(") {"));
+    }
+
+    @Test
+    void shouldGenerateSingleResultReturnType() {
+        QueryModel query = new QueryModel(
+                "GetUser",
+                QueryType.ONE,
+                "users",
+                List.of(
+                        new QueryColumn("id", ColumnType.BIGINT, false)
+                ),
+                List.of()
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        assertTrue(
+                file.content().contains(
+                        "public Result getUser()"
+                )
+        );
+    }
+
+    @Test
+    void shouldGenerateListResultReturnType() {
+        QueryModel query = new QueryModel(
+                "ListUsers",
+                QueryType.MANY,
+                "users",
+                List.of(
+                        new QueryColumn("id", ColumnType.BIGINT, false),
+                        new QueryColumn("name", ColumnType.VARCHAR, true)
+                ),
+                List.of()
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        assertTrue(file.content().contains("import java.util.List;"));
+
+        assertTrue(
+                file.content().contains(
+                        "public List<Result> listUsers()"
+                )
+        );
+    }
+
+    @Test
+    void shouldGenerateTypedMethodParameters() {
+        QueryModel query = new QueryModel(
+                "ListUsersByIdAndName",
+                QueryType.MANY,
+                "users",
+                List.of(
+                        new QueryColumn("id", ColumnType.BIGINT, false),
+                        new QueryColumn("name", ColumnType.VARCHAR, true)
+                ),
+                List.of(
+                        new QueryParameter(1, ColumnType.BIGINT),
+                        new QueryParameter(2, ColumnType.VARCHAR)
+                )
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        assertTrue(
+                file.content().contains(
+                        "public List<Result> listUsersByIdAndName(Long param1, String param2)"
+                )
+        );
+    }
+
+    @Test
+    void shouldGenerateSingleResultWithTypedParameter() {
+        QueryModel query = new QueryModel(
+                "GetUser",
+                QueryType.ONE,
+                "users",
+                List.of(
+                        new QueryColumn("id", ColumnType.BIGINT, false),
+                        new QueryColumn("name", ColumnType.VARCHAR, true)
+                ),
+                List.of(
+                        new QueryParameter(1, ColumnType.BIGINT)
+                )
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        assertTrue(
+                file.content().contains(
+                        "public Result getUser(Long param1)"
+                )
+        );
+    }
+
+    @Test
+    void shouldNotGenerateListImportForSingleResult() {
+        QueryModel query = new QueryModel(
+                "GetUser",
+                QueryType.ONE,
+                "users",
+                List.of(
+                        new QueryColumn("id", ColumnType.BIGINT, false)
+                ),
+                List.of()
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        assertFalse(
+                file.content().contains("import java.util.List;")
+        );
+    }
+
     private QueryModel query(
             String name,
             QueryType type,
-            List<Integer> parameters
+            List<QueryParameter> parameters
     ) {
         return new QueryModel(
                 name,
                 type,
                 "users",
+                List.of(),
                 parameters
         );
     }

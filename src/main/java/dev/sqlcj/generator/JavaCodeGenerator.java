@@ -1,12 +1,18 @@
 package dev.sqlcj.generator;
 
+import dev.sqlcj.analysis.QueryColumn;
 import dev.sqlcj.analysis.QueryModel;
+import dev.sqlcj.analysis.QueryParameter;
+import dev.sqlcj.parser.QueryType;
+import dev.sqlcj.type.DefaultTypeResolver;
+import dev.sqlcj.type.TypeResolver;
 
 import java.nio.file.Path;
 import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
 public final class JavaCodeGenerator implements CodeGenerator {
+
+    private final TypeResolver typeResolver = new DefaultTypeResolver();
 
     @Override
     public GeneratedFile generate(QueryModel query) {
@@ -22,13 +28,16 @@ public final class JavaCodeGenerator implements CodeGenerator {
 
     private String generateSource(QueryModel query) {
         return """
-            %s
+                %s
 
-            %s
+                %s
 
-            %s
-            """.formatted(
+                %s
+                
+                %s
+                """.formatted(
                 generatePackage(),
+                generateImports(query),
                 generateJavaDoc(query),
                 generateClass(query)
         );
@@ -36,6 +45,14 @@ public final class JavaCodeGenerator implements CodeGenerator {
 
     private String generatePackage() {
         return "package generated;";
+    }
+
+    private String generateImports(QueryModel query) {
+        if (query.type() == QueryType.MANY) {
+            return "import java.util.List;";
+        }
+
+        return "";
     }
 
     private String generateJavaDoc(QueryModel query) {
@@ -56,12 +73,15 @@ public final class JavaCodeGenerator implements CodeGenerator {
 
     private String generateClass(QueryModel query) {
         return """
-        public final class %s {
+                public final class %s {
 
-        %s
-        }
-        """.formatted(
+                %s
+                
+                %s
+                }
+                """.formatted(
                 query.name(),
+                indent(generateResultType(query)),
                 indent(generateMethod(query))
         );
     }
@@ -70,10 +90,40 @@ public final class JavaCodeGenerator implements CodeGenerator {
         return text.indent(4).stripTrailing();
     }
 
+    private String generateResultType(QueryModel query) {
+        return """
+                public record Result(
+                %s
+                ) {
+                }
+                """.formatted(
+                generateResultComponents(query)
+        );
+    }
+
+    private String generateResultComponents(QueryModel query) {
+        return query.columns().stream()
+                .map(this::generateResultComponent)
+                .collect(Collectors.joining(",\n"));
+    }
+
+    private String generateResultComponent(QueryColumn column) {
+        return "%s %s".formatted(
+                typeResolver.resolve(column.type()),
+                column.name()
+        ).indent(4).stripTrailing();
+    }
+
     private String generateMethodParameters(QueryModel query) {
-        return IntStream.rangeClosed(1, query.parameters().size())
-                .mapToObj(i -> "Object param" + i)
+        return query.parameters().stream()
+                .map(this::generateMethodParameter)
                 .collect(Collectors.joining(", "));
+    }
+
+    private String generateMethodParameter(QueryParameter parameter) {
+        String type = typeResolver.resolve(parameter.type());
+
+        return type + " param" + parameter.index();
     }
 
     private String generateMethod(QueryModel query) {
@@ -93,7 +143,8 @@ public final class JavaCodeGenerator implements CodeGenerator {
 
     private String generateReturnType(QueryModel query) {
         return switch (query.type()) {
-            case ONE, MANY -> "Object";
+            case ONE -> "Result";
+            case MANY -> "List<Result>";
             case EXEC -> "void";
             case EXEC_RESULT -> "void";
             case BATCH_EXEC -> "void";
