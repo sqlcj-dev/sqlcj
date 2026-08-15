@@ -45,18 +45,28 @@ class SqlcjCompilerIntegrationTest {
 
     @Test
     void shouldGenerateJavaFiles() throws IOException {
-        Path schema = tempDir.resolve("schema.sql");
-        Path queries = tempDir.resolve("queries.sql");
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
 
-        Files.writeString(schema, "");
         Files.writeString(
-                queries,
+                schemaFile,
+                """
+                        CREATE TABLE users (
+                            id BIGINT NOT NULL,
+                            name VARCHAR(255),
+                            active BOOLEAN
+                        );
+                        """
+        );
+
+        Files.writeString(
+                queriesFile,
                 """
                 -- name: GetUser :one
                 SELECT *
                 FROM users
                 WHERE id = $1;
-        
+
                 -- name: ListUsers :many
                 SELECT *
                 FROM users;
@@ -66,28 +76,38 @@ class SqlcjCompilerIntegrationTest {
         Config config = new Config(
                 List.of(
                         new SqlConfig(
-                                schema.toString(),
-                                queries.toString()
+                                schemaFile.toString(),
+                                queriesFile.toString()
                         )
                 ),
                 new JavaConfig(
-                        tempDir.toString(),
+                        tempDir.resolve("generated").toString(),
                         "generated"
                 )
         );
 
-        SqlcjCompiler sqlcjCompiler = new SqlcjCompiler();
-        sqlcjCompiler.compile(config);
+        SqlcjCompiler compiler = new SqlcjCompiler();
 
-        Path getUser = Path.of("generated", "GetUser.java");
-        assertTrue(Files.exists(getUser));
+        compiler.compile(config);
 
-        Path listUsers = Path.of("generated", "ListUsers.java");
-        assertTrue(Files.exists(listUsers));
+        Path getUserFile = Path.of("generated", "GetUser.java");
+        Path listUsersFile = Path.of("generated", "ListUsers.java");
 
-        String source = Files.readString(getUser);
-        assertTrue(source.contains("class GetUser"));
-        assertTrue(source.contains("Object getUser"));
-        assertTrue(source.contains("Object param1"));
+        assertTrue(Files.exists(getUserFile));
+        assertTrue(Files.exists(listUsersFile));
+
+        String getUser = Files.readString(getUserFile);
+        String listUsers = Files.readString(listUsersFile);
+
+        assertTrue(getUser.contains("public final class GetUser"));
+        assertTrue(getUser.contains("Long param1"));
+        assertTrue(getUser.contains("public Result getUser(Long param1)"));
+        assertTrue(getUser.contains("Long id"));
+        assertTrue(getUser.contains("String name"));
+        assertTrue(getUser.contains("Boolean active"));
+
+        assertTrue(listUsers.contains("public final class ListUsers"));
+        assertTrue(listUsers.contains("import java.util.List;"));
+        assertTrue(listUsers.contains("public List<Result> listUsers()"));
     }
 }

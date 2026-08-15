@@ -8,6 +8,9 @@ import dev.sqlcj.generator.GeneratedFile;
 import dev.sqlcj.generator.JavaCodeGenerator;
 import dev.sqlcj.io.GeneratedFileWriter;
 import dev.sqlcj.parser.Query;
+import dev.sqlcj.schema.Schema;
+import dev.sqlcj.schema.parser.DefaultSchemaParser;
+import dev.sqlcj.schema.parser.SchemaParser;
 import dev.sqlcj.sql.SqlParser;
 import net.sf.jsqlparser.statement.Statement;
 
@@ -21,18 +24,20 @@ public final class SqlcjCompiler {
     private final QueryAnalyzer queryAnalyzer = new QueryAnalyzer();
     private final CodeGenerator codeGenerator = new JavaCodeGenerator();
     private final GeneratedFileWriter generatedFileWriter = new GeneratedFileWriter();
+    private final SchemaParser schemaParser = new DefaultSchemaParser();
 
     public void compile(Config config) {
         Source source = sourceLoader.load(config);
+        Schema schema = schemaParser.parse(source.schema());
 
         for (Query query : source.queries()) {
-            compileQuery(query);
+            compileQuery(query, schema);
         }
     }
 
-    private void compileQuery(Query query) {
+    private void compileQuery(Query query, Schema schema) {
         Statement statement = sqlParser.parse(query.sql());
-        QueryModel model = queryAnalyzer.analyze(query, statement);
+        QueryModel model = queryAnalyzer.analyze(query, statement, schema);
         GeneratedFile file = codeGenerator.generate(model);
         write(file);
     }
