@@ -16,6 +16,7 @@ import net.sf.jsqlparser.statement.Statement;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.file.Path;
 
 public final class SqlcjCompiler {
 
@@ -31,20 +32,27 @@ public final class SqlcjCompiler {
         Schema schema = schemaParser.parse(source.schema());
 
         for (Query query : source.queries()) {
-            compileQuery(query, schema);
+            compileQuery(query, schema, Path.of(config.java().out()));
         }
     }
 
-    private void compileQuery(Query query, Schema schema) {
+    private void compileQuery(
+            Query query,
+            Schema schema,
+            Path outputDirectory
+    ) {
         Statement statement = sqlParser.parse(query.sql());
         QueryModel model = queryAnalyzer.analyze(query, statement, schema);
         GeneratedFile file = codeGenerator.generate(model);
-        write(file);
+        write(file, outputDirectory);
     }
 
-    private void write(GeneratedFile file) {
+    private void write(
+            GeneratedFile file,
+            Path outputDirectory
+    ) {
         try {
-            generatedFileWriter.write(file);
+            generatedFileWriter.write(file, outputDirectory);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }

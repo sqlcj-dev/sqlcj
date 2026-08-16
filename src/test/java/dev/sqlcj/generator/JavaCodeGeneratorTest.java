@@ -6,17 +6,28 @@ import dev.sqlcj.analysis.QueryParameter;
 import dev.sqlcj.parser.QueryType;
 import dev.sqlcj.schema.ColumnType;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
+import javax.tools.JavaCompiler;
+import javax.tools.ToolProvider;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JavaCodeGeneratorTest {
 
     private final CodeGenerator codeGenerator = new JavaCodeGenerator();
+
+    @TempDir
+    Path tempDir;
 
     @Test
     void shouldGenerateFilePath() {
@@ -33,7 +44,7 @@ class JavaCodeGeneratorTest {
         GeneratedFile file = codeGenerator.generate(query);
 
         assertEquals(
-                Path.of("generated", "GetUser.java"),
+                Path.of("GetUser.java"),
                 file.path()
         );
     }
@@ -76,13 +87,13 @@ class JavaCodeGeneratorTest {
                         "GetUser",
                         QueryType.ONE,
                         List.of(
-                                new QueryParameter(1, ColumnType.BIGINT)
+                                new QueryParameter(1, "id", ColumnType.BIGINT)
                         )
                 )
         );
 
         assertTrue(
-                file.content().contains("Long param1")
+                file.content().contains("Long id")
         );
     }
 
@@ -93,15 +104,15 @@ class JavaCodeGeneratorTest {
                         "ListUsersByIdAndName",
                         QueryType.MANY,
                         List.of(
-                                new QueryParameter(1, ColumnType.BIGINT),
-                                new QueryParameter(2, ColumnType.VARCHAR)
+                                new QueryParameter(1, "id", ColumnType.BIGINT),
+                                new QueryParameter(2, "name", ColumnType.VARCHAR)
                         )
                 )
         );
 
         assertTrue(
                 file.content().contains(
-                        "Long param1, String param2"
+                        "Long id, String name"
                 )
         );
     }
@@ -118,7 +129,7 @@ class JavaCodeGeneratorTest {
 
         assertTrue(
                 file.content().contains(
-                        "public List<Result> listUsers()"
+                        "public List<ListUsersResult> listUsers()"
                 )
         );
     }
@@ -130,7 +141,7 @@ class JavaCodeGeneratorTest {
                         "GetUser",
                         QueryType.ONE,
                         List.of(
-                                new QueryParameter(1, ColumnType.BIGINT)
+                                new QueryParameter(1, "id", ColumnType.BIGINT)
                         )
                 )
         );
@@ -149,7 +160,7 @@ class JavaCodeGeneratorTest {
                         "GetUser",
                         QueryType.ONE,
                         List.of(
-                                new QueryParameter(1, ColumnType.BIGINT)
+                                new QueryParameter(1, "id", ColumnType.BIGINT)
                         )
                 )
         );
@@ -177,7 +188,7 @@ class JavaCodeGeneratorTest {
 
         String source = file.content();
 
-        assertTrue(source.contains("public record Result("));
+        assertTrue(source.contains("public record GetUserResult("));
         assertTrue(source.contains("Long id,"));
         assertTrue(source.contains("String name,"));
         assertTrue(source.contains("Boolean active"));
@@ -200,7 +211,7 @@ class JavaCodeGeneratorTest {
 
         assertTrue(
                 file.content().contains(
-                        "public Result getUser()"
+                        "public GetUserResult getUser()"
                 )
         );
     }
@@ -224,7 +235,7 @@ class JavaCodeGeneratorTest {
 
         assertTrue(
                 file.content().contains(
-                        "public List<Result> listUsers()"
+                        "public List<ListUsersResult> listUsers()"
                 )
         );
     }
@@ -240,8 +251,8 @@ class JavaCodeGeneratorTest {
                         new QueryColumn("name", ColumnType.VARCHAR, true)
                 ),
                 List.of(
-                        new QueryParameter(1, ColumnType.BIGINT),
-                        new QueryParameter(2, ColumnType.VARCHAR)
+                        new QueryParameter(1, "id", ColumnType.BIGINT),
+                        new QueryParameter(2, "name", ColumnType.VARCHAR)
                 )
         );
 
@@ -249,7 +260,7 @@ class JavaCodeGeneratorTest {
 
         assertTrue(
                 file.content().contains(
-                        "public List<Result> listUsersByIdAndName(Long param1, String param2)"
+                        "public List<ListUsersByIdAndNameResult> listUsersByIdAndName(Long id, String name)"
                 )
         );
     }
@@ -265,7 +276,7 @@ class JavaCodeGeneratorTest {
                         new QueryColumn("name", ColumnType.VARCHAR, true)
                 ),
                 List.of(
-                        new QueryParameter(1, ColumnType.BIGINT)
+                        new QueryParameter(1, "id", ColumnType.BIGINT)
                 )
         );
 
@@ -273,7 +284,7 @@ class JavaCodeGeneratorTest {
 
         assertTrue(
                 file.content().contains(
-                        "public Result getUser(Long param1)"
+                        "public GetUserResult getUser(Long id)"
                 )
         );
     }
@@ -294,6 +305,417 @@ class JavaCodeGeneratorTest {
 
         assertFalse(
                 file.content().contains("import java.util.List;")
+        );
+    }
+
+    @Test
+    void shouldGenerateParameterNamesFromQueryParameters() {
+        QueryModel query = query(
+                "GetUser",
+                QueryType.ONE,
+                List.of(
+                        new QueryParameter(1, "userId", ColumnType.BIGINT),
+                        new QueryParameter(2, "enabled", ColumnType.BOOLEAN)
+                )
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        assertTrue(
+                file.content().contains(
+                        "Long userId, Boolean enabled"
+                )
+        );
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "INTEGER, Integer",
+            "BIGINT, Long",
+            "SMALLINT, Short",
+            "BOOLEAN, Boolean",
+            "VARCHAR, String",
+            "TEXT, String",
+            "DATE, LocalDate",
+            "TIMESTAMP, LocalDateTime",
+            "DECIMAL, BigDecimal"
+    })
+    void shouldGenerateJavaTypeForQueryParameter(
+            ColumnType columnType,
+            String expectedJavaType
+    ) {
+        GeneratedFile file = codeGenerator.generate(
+                query(
+                        "GetUser",
+                        QueryType.ONE,
+                        List.of(
+                                new QueryParameter(1, "value", columnType)
+                        )
+                )
+        );
+
+        assertTrue(
+                file.content().contains(
+                        expectedJavaType + " value"
+                )
+        );
+    }
+
+    @Test
+    void shouldGenerateQuerySpecificResultRecord() {
+        QueryModel query = new QueryModel(
+                "ListUsers",
+                QueryType.MANY,
+                "users",
+                List.of(
+                        new QueryColumn("id", ColumnType.BIGINT, false)
+                ),
+                List.of()
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        assertTrue(
+                file.content().contains(
+                        "public record ListUsersResult("
+                )
+        );
+    }
+
+    @Test
+    void shouldGenerateImportForLocalDate() {
+        QueryModel query = new QueryModel(
+                "GetUser",
+                QueryType.ONE,
+                "users",
+                List.of(
+                        new QueryColumn(
+                                "birthDate",
+                                ColumnType.DATE,
+                                true
+                        )
+                ),
+                List.of()
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        assertTrue(
+                file.content().contains(
+                        "import java.time.LocalDate;"
+                )
+        );
+    }
+
+    @Test
+    void shouldGenerateImportForBigDecimal() {
+        QueryModel query = new QueryModel(
+                "GetAccount",
+                QueryType.ONE,
+                "accounts",
+                List.of(
+                        new QueryColumn(
+                                "balance",
+                                ColumnType.DECIMAL,
+                                false
+                        )
+                ),
+                List.of()
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        assertTrue(
+                file.content().contains(
+                        "import java.math.BigDecimal;"
+                )
+        );
+    }
+
+    @Test
+    void shouldGenerateImportForQueryParameterType() {
+        QueryModel query = new QueryModel(
+                "FindUser",
+                QueryType.ONE,
+                "users",
+                List.of(
+                        new QueryColumn(
+                                "id",
+                                ColumnType.BIGINT,
+                                false
+                        )
+                ),
+                List.of(
+                        new QueryParameter(
+                                1,
+                                "createdAt",
+                                ColumnType.TIMESTAMP
+                        )
+                )
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        assertTrue(
+                file.content().contains(
+                        "import java.time.LocalDateTime;"
+                )
+        );
+    }
+
+    @Test
+    void shouldGenerateEachImportOnlyOnce() {
+        QueryModel query = new QueryModel(
+                "FindUsers",
+                QueryType.MANY,
+                "users",
+                List.of(
+                        new QueryColumn(
+                                "createdAt",
+                                ColumnType.TIMESTAMP,
+                                true
+                        )
+                ),
+                List.of(
+                        new QueryParameter(
+                                1,
+                                "updatedAt",
+                                ColumnType.TIMESTAMP
+                        )
+                )
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        String source = file.content();
+
+        assertEquals(
+                1,
+                source.lines()
+                        .filter(line -> line.equals("import java.time.LocalDateTime;"))
+                        .count()
+        );
+    }
+
+    @Test
+    void shouldGenerateMultipleRequiredImports() {
+        QueryModel query = new QueryModel(
+                "ListAccounts",
+                QueryType.MANY,
+                "accounts",
+                List.of(
+                        new QueryColumn(
+                                "createdAt",
+                                ColumnType.TIMESTAMP,
+                                false
+                        ),
+                        new QueryColumn(
+                                "balance",
+                                ColumnType.DECIMAL,
+                                false
+                        )
+                ),
+                List.of()
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        String source = file.content();
+
+        assertTrue(source.contains("import java.util.List;"));
+        assertTrue(source.contains("import java.time.LocalDateTime;"));
+        assertTrue(source.contains("import java.math.BigDecimal;"));
+    }
+
+    @Test
+    void shouldGenerateUnsupportedOperationExceptionMethodBody() {
+        GeneratedFile file = codeGenerator.generate(
+                query(
+                        "GetUser",
+                        QueryType.ONE,
+                        List.of()
+                )
+        );
+
+        assertTrue(
+                file.content().contains(
+                        """
+                        throw new UnsupportedOperationException("Not implemented");
+                        """
+                )
+        );
+    }
+
+    @Test
+    void shouldGenerateCompilableJavaSource() throws IOException {
+        QueryModel query = new QueryModel(
+                "ListUsers",
+                QueryType.MANY,
+                "users",
+                List.of(
+                        new QueryColumn(
+                                "id",
+                                ColumnType.BIGINT,
+                                false
+                        ),
+                        new QueryColumn(
+                                "birth_date",
+                                ColumnType.DATE,
+                                true
+                        ),
+                        new QueryColumn(
+                                "created_at",
+                                ColumnType.TIMESTAMP,
+                                true
+                        ),
+                        new QueryColumn(
+                                "balance",
+                                ColumnType.DECIMAL,
+                                true
+                        )
+                ),
+                List.of(
+                        new QueryParameter(
+                                1,
+                                "created_at",
+                                ColumnType.TIMESTAMP
+                        )
+                )
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        Path sourceDirectory = tempDir.resolve("generated");
+        Path sourceFile = sourceDirectory.resolve("ListUsers.java");
+        Path outputDirectory = tempDir.resolve("classes");
+
+        Files.createDirectories(sourceDirectory);
+        Files.createDirectories(outputDirectory);
+
+        Files.writeString(sourceFile, file.content());
+
+        JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+
+        assertNotNull(compiler);
+
+        int result = compiler.run(
+                null,
+                null,
+                null,
+                "-d",
+                outputDirectory.toString(),
+                sourceFile.toString()
+        );
+
+        assertEquals(0, result);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "INTEGER, Integer",
+            "BIGINT, Long",
+            "SMALLINT, Short",
+            "BOOLEAN, Boolean",
+            "VARCHAR, String",
+            "TEXT, String",
+            "DATE, LocalDate",
+            "TIMESTAMP, LocalDateTime",
+            "DECIMAL, BigDecimal"
+    })
+    void shouldGenerateJavaTypeForResultColumn(
+            ColumnType columnType,
+            String expectedJavaType
+    ) {
+        QueryModel query = new QueryModel(
+                "GetValue",
+                QueryType.ONE,
+                "users",
+                List.of(
+                        new QueryColumn(
+                                "value",
+                                columnType,
+                                true
+                        )
+                ),
+                List.of()
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        assertTrue(
+                file.content().contains(
+                        expectedJavaType + " value"
+                )
+        );
+    }
+
+    @Test
+    void shouldGenerateWrapperTypeForNullableColumn() {
+        QueryModel query = new QueryModel(
+                "GetUser",
+                QueryType.ONE,
+                "users",
+                List.of(
+                        new QueryColumn(
+                                "id",
+                                ColumnType.BIGINT,
+                                true
+                        )
+                ),
+                List.of()
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        assertTrue(
+                file.content().contains("Long id")
+        );
+    }
+
+    @Test
+    void shouldGenerateWrapperTypeForNonNullableColumn() {
+        QueryModel query = new QueryModel(
+                "GetUser",
+                QueryType.ONE,
+                "users",
+                List.of(
+                        new QueryColumn(
+                                "id",
+                                ColumnType.BIGINT,
+                                false
+                        )
+                ),
+                List.of()
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        assertTrue(
+                file.content().contains("Long id")
+        );
+    }
+
+    @Test
+    void shouldGenerateUniqueParameterNamesForDuplicateColumns() {
+        QueryModel query = new QueryModel(
+                "FindUsers",
+                QueryType.MANY,
+                "users",
+                List.of(
+                        new QueryColumn("id", ColumnType.BIGINT, false)
+                ),
+                List.of(
+                        new QueryParameter(1, "id", ColumnType.BIGINT),
+                        new QueryParameter(2, "id", ColumnType.BIGINT)
+                )
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        assertTrue(
+                file.content().contains(
+                        "public List<FindUsersResult> findUsers(Long id1, Long id2)"
+                )
         );
     }
 

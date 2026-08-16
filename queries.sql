@@ -1,12 +1,12 @@
 -- name: GetUser :one
 SELECT *
 FROM users
-WHERE id = $1;
+WHERE created_at = $1;
 
 -- name: ListUsers :many
-SELECT *
+SELECT id, birth_date, created_at, balance
 FROM users
-WHERE 1 = 1;
+WHERE created_at = $1
 
 -- name: ListUsersByIdAndUsername :many
 SELECT *
@@ -18,3 +18,9 @@ WHERE id = $1
 SELECT id, name
 FROM users
 WHERE id = ?;
+
+-- name: FindUsers :many
+SELECT id, name
+FROM users
+WHERE id IN ($1, $2)
+  AND (active = $3 OR name = $4);
