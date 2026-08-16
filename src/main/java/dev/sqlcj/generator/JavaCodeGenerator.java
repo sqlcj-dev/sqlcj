@@ -176,12 +176,6 @@ public final class JavaCodeGenerator implements CodeGenerator {
                 .collect(Collectors.joining(", "));
     }
 
-    private String generateMethodParameter(QueryParameter parameter) {
-        String type = typeResolver.resolve(parameter.type());
-
-        return type + " " + parameter.name();
-    }
-
     private String generateMethod(QueryModel query) {
         return """
             public %s %s(%s) {
