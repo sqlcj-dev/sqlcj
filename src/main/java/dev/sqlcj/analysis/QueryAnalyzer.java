@@ -3,10 +3,13 @@ package dev.sqlcj.analysis;
 import dev.sqlcj.parser.Query;
 import dev.sqlcj.schema.Schema;
 import net.sf.jsqlparser.expression.Expression;
-import net.sf.jsqlparser.expression.ExpressionVisitorAdapter;
 import net.sf.jsqlparser.expression.JdbcParameter;
 import net.sf.jsqlparser.expression.operators.conditional.AndExpression;
-import net.sf.jsqlparser.expression.operators.relational.EqualsTo;
+import net.sf.jsqlparser.expression.operators.conditional.OrExpression;
+import net.sf.jsqlparser.expression.operators.relational.ComparisonOperator;
+import net.sf.jsqlparser.expression.operators.relational.ExpressionList;
+import net.sf.jsqlparser.expression.operators.relational.InExpression;
+import net.sf.jsqlparser.expression.operators.relational.ParenthesedExpressionList;
 import net.sf.jsqlparser.schema.Table;
 import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.delete.Delete;
@@ -18,6 +21,7 @@ import net.sf.jsqlparser.statement.select.SelectItem;
 import net.sf.jsqlparser.statement.update.Update;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 
 public final class QueryAnalyzer {
@@ -97,6 +101,10 @@ public final class QueryAnalyzer {
                 parameters
         );
 
+        parameters.sort(
+                Comparator.comparingInt(QueryParameter::index)
+        );
+
         return parameters;
     }
 
@@ -111,13 +119,130 @@ public final class QueryAnalyzer {
             return;
         }
 
-        if (expression instanceof EqualsTo equalsTo) {
+        if (expression instanceof OrExpression or) {
+            resolveParameters(or.getLeftExpression(), table, parameters);
+            resolveParameters(or.getRightExpression(), table, parameters);
+            return;
+        }
+
+        if (expression instanceof ParenthesedExpressionList<?> parentheses) {
+            for (Expression nestedExpression : parentheses) {
+                resolveParameters(
+                        nestedExpression,
+                        table,
+                        parameters
+                );
+            }
+            return;
+        }
+
+        if (expression instanceof InExpression in) {
+            resolveInExpression(in, table, parameters);
+            return;
+        }
+
+        if (expression instanceof ComparisonOperator comparison) {
             resolveParameterComparison(
-                    equalsTo.getLeftExpression(),
-                    equalsTo.getRightExpression(),
+                    comparison.getLeftExpression(),
+                    comparison.getRightExpression(),
                     table,
                     parameters
             );
+        }
+    }
+
+    private void resolveInExpression(
+            InExpression in,
+            dev.sqlcj.schema.Table table,
+            List<QueryParameter> parameters
+    ) {
+        if (!(in.getLeftExpression()
+                instanceof net.sf.jsqlparser.schema.Column column)) {
+            return;
+        }
+
+        dev.sqlcj.schema.Column schemaColumn =
+                findColumn(table, column.getColumnName());
+
+        Expression rightExpression = in.getRightExpression();
+
+        if (rightExpression instanceof ExpressionList<?> expressionList) {
+            for (Expression expression : expressionList) {
+                if (expression instanceof JdbcParameter parameter) {
+                    addParameter(parameter, schemaColumn, parameters);
+                }
+            }
+
+            return;
+        }
+
+        resolveInExpression(
+                rightExpression,
+                schemaColumn,
+                table,
+                parameters
+        );
+    }
+
+    private void resolveInExpression(
+            Expression expression,
+            dev.sqlcj.schema.Column schemaColumn,
+            dev.sqlcj.schema.Table table,
+            List<QueryParameter> parameters
+    ) {
+        if (expression instanceof JdbcParameter parameter) {
+            addParameter(parameter, schemaColumn, parameters);
+            return;
+        }
+
+        if (expression instanceof AndExpression and) {
+            resolveInExpression(
+                    and.getLeftExpression(),
+                    schemaColumn,
+                    table,
+                    parameters
+            );
+
+            resolveInExpression(
+                    and.getRightExpression(),
+                    schemaColumn,
+                    table,
+                    parameters
+            );
+
+            return;
+        }
+
+        if (expression instanceof OrExpression or) {
+            resolveInExpression(
+                    or.getLeftExpression(),
+                    schemaColumn,
+                    table,
+                    parameters
+            );
+
+            resolveInExpression(
+                    or.getRightExpression(),
+                    schemaColumn,
+                    table,
+                    parameters
+            );
+
+            return;
+        }
+
+        if (expression instanceof ParenthesedExpressionList<?> expressionList) {
+            for (Expression nestedExpression : expressionList) {
+                if (nestedExpression instanceof JdbcParameter parameter) {
+                    addParameter(parameter, schemaColumn, parameters);
+                } else {
+                    resolveParameters(
+                            nestedExpression,
+                            table,
+                            parameters
+                    );
+                }
+            }
         }
     }
 
@@ -163,6 +288,21 @@ public final class QueryAnalyzer {
         parameters.add(
                 new QueryParameter(
                         parameter.getIndex(),
+                        column.name(),
+                        column.type()
+                )
+        );
+    }
+
+    private void addParameter(
+            JdbcParameter parameter,
+            dev.sqlcj.schema.Column column,
+            List<QueryParameter> parameters
+    ) {
+        parameters.add(
+                new QueryParameter(
+                        parameter.getIndex(),
+                        column.name(),
                         column.type()
                 )
         );
