@@ -9,15 +9,20 @@ import java.nio.file.StandardOpenOption;
 
 public final class GeneratedFileWriter {
 
-    public void write(GeneratedFile file) throws IOException {
-        Path parent = file.path().getParent();
+    public void write(
+            GeneratedFile file,
+            Path outputDirectory
+    ) throws IOException {
+        Path outputFile = outputDirectory.resolve(file.path());
+
+        Path parent = outputFile.getParent();
 
         if (parent != null) {
             Files.createDirectories(parent);
         }
 
         Files.writeString(
-                file.path(),
+                outputFile,
                 file.content(),
                 StandardOpenOption.CREATE,
                 StandardOpenOption.TRUNCATE_EXISTING
