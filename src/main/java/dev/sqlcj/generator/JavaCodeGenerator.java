@@ -4,10 +4,16 @@ import dev.sqlcj.analysis.QueryColumn;
 import dev.sqlcj.analysis.QueryModel;
 import dev.sqlcj.analysis.QueryParameter;
 import dev.sqlcj.parser.QueryType;
+import dev.sqlcj.schema.ColumnType;
 import dev.sqlcj.type.DefaultTypeResolver;
 import dev.sqlcj.type.TypeResolver;
 
 import java.nio.file.Path;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 public final class JavaCodeGenerator implements CodeGenerator {
@@ -23,7 +29,7 @@ public final class JavaCodeGenerator implements CodeGenerator {
     }
 
     private Path buildPath(QueryModel query) {
-        return Path.of("generated", query.name() + ".java");
+        return Path.of(query.name() + ".java");
     }
 
     private String generateSource(QueryModel query) {
@@ -48,11 +54,36 @@ public final class JavaCodeGenerator implements CodeGenerator {
     }
 
     private String generateImports(QueryModel query) {
+        Set<String> imports = new LinkedHashSet<>();
+
         if (query.type() == QueryType.MANY) {
-            return "import java.util.List;";
+            imports.add("java.util.List");
         }
 
-        return "";
+        query.columns().stream()
+                .map(QueryColumn::type)
+                .map(this::resolveImport)
+                .filter(Objects::nonNull)
+                .forEach(imports::add);
+
+        query.parameters().stream()
+                .map(QueryParameter::type)
+                .map(this::resolveImport)
+                .filter(Objects::nonNull)
+                .forEach(imports::add);
+
+        return imports.stream()
+                .map(type -> "import " + type + ";")
+                .collect(Collectors.joining("\n"));
+    }
+
+    private String resolveImport(ColumnType type) {
+        return switch (type) {
+            case DATE -> "java.time.LocalDate";
+            case TIMESTAMP -> "java.time.LocalDateTime";
+            case DECIMAL -> "java.math.BigDecimal";
+            default -> null;
+        };
     }
 
     private String generateJavaDoc(QueryModel query) {
@@ -92,11 +123,12 @@ public final class JavaCodeGenerator implements CodeGenerator {
 
     private String generateResultType(QueryModel query) {
         return """
-                public record Result(
+                public record %s(
                 %s
                 ) {
                 }
                 """.formatted(
+                generateResultTypeName(query),
                 generateResultComponents(query)
         );
     }
@@ -115,22 +147,47 @@ public final class JavaCodeGenerator implements CodeGenerator {
     }
 
     private String generateMethodParameters(QueryModel query) {
+        Map<String, Long> occurrences = query.parameters().stream()
+                .collect(Collectors.groupingBy(
+                        QueryParameter::name,
+                        Collectors.counting()
+                ));
+
+        Map<String, Integer> indexes = new HashMap<>();
+
         return query.parameters().stream()
-                .map(this::generateMethodParameter)
+                .map(parameter -> {
+                    String name = parameter.name();
+
+                    if (occurrences.get(name) > 1) {
+                        int occurrence = indexes.merge(
+                                name,
+                                1,
+                                Integer::sum
+                        );
+
+                        name += occurrence;
+                    }
+
+                    return typeResolver.resolve(parameter.type())
+                            + " "
+                            + name;
+                })
                 .collect(Collectors.joining(", "));
     }
 
     private String generateMethodParameter(QueryParameter parameter) {
         String type = typeResolver.resolve(parameter.type());
 
-        return type + " param" + parameter.index();
+        return type + " " + parameter.name();
     }
 
     private String generateMethod(QueryModel query) {
         return """
-        public %s %s(%s) {
-        }
-        """.formatted(
+            public %s %s(%s) {
+                throw new UnsupportedOperationException("Not implemented");
+            }
+            """.formatted(
                 generateReturnType(query),
                 generateMethodName(query),
                 generateMethodParameters(query)
@@ -143,13 +200,17 @@ public final class JavaCodeGenerator implements CodeGenerator {
 
     private String generateReturnType(QueryModel query) {
         return switch (query.type()) {
-            case ONE -> "Result";
-            case MANY -> "List<Result>";
+            case ONE -> generateResultTypeName(query);
+            case MANY -> "List<" + generateResultTypeName(query) + ">";
             case EXEC -> "void";
             case EXEC_RESULT -> "void";
             case BATCH_EXEC -> "void";
             case BATCH_MANY -> "void";
             case BATCH_ONE -> "void";
         };
+    }
+
+    private String generateResultTypeName(QueryModel query) {
+        return query.name() + "Result";
     }
 }
