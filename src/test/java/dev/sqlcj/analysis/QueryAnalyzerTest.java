@@ -734,4 +734,30 @@ class QueryAnalyzerTest {
         assertEquals("name", fourth.name());
         assertEquals(ColumnType.VARCHAR, fourth.type());
     }
+
+    @Test
+    void shouldPreserveQuerySql() {
+        String sql = """
+            SELECT id, name
+            FROM users
+            WHERE id = $1
+            """;
+
+        Query query = new Query(
+                "GetUser",
+                QueryType.ONE,
+                sql
+        );
+
+        QueryModel model = analyzer.analyze(
+                query,
+                parser.parse(sql),
+                schema
+        );
+
+        assertEquals(
+                sql,
+                model.sql()
+        );
+    }
 }

@@ -68,6 +68,7 @@ public final class QueryAnalyzer {
                 query.name(),
                 query.type(),
                 table.getName(),
+                query.sql(),
                 columns,
                 parameters
         );

@@ -8,6 +8,7 @@ public record QueryModel(
         String name,
         QueryType type,
         String table,
+        String sql,
         List<QueryColumn> columns,
         List<QueryParameter> parameters
 ) {
