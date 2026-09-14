@@ -9,6 +9,7 @@ import dev.sqlcj.type.DefaultTypeResolver;
 import dev.sqlcj.type.TypeResolver;
 
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -21,7 +22,18 @@ import java.util.stream.IntStream;
 
 public final class JavaCodeGenerator implements CodeGenerator {
 
+    private static final String DEFAULT_PACKAGE = "generated";
+
     private final TypeResolver typeResolver = new DefaultTypeResolver();
+    private final String packageName;
+
+    public JavaCodeGenerator() {
+        this(DEFAULT_PACKAGE);
+    }
+
+    public JavaCodeGenerator(String packageName) {
+        this.packageName = packageName;
+    }
 
     @Override
     public GeneratedFile generate(QueryModel query) {
@@ -32,7 +44,16 @@ public final class JavaCodeGenerator implements CodeGenerator {
     }
 
     private Path buildPath(QueryModel query) {
-        return Path.of(query.name() + ".java");
+        return packageDirectory().resolve(query.name() + ".java");
+    }
+
+    private Path packageDirectory() {
+        String[] segments = packageName.split("\\.");
+
+        return Path.of(
+                segments[0],
+                Arrays.copyOfRange(segments, 1, segments.length)
+        );
     }
 
     private String generateSource(QueryModel query) {
@@ -53,7 +74,7 @@ public final class JavaCodeGenerator implements CodeGenerator {
     }
 
     private String generatePackage() {
-        return "package generated;";
+        return "package " + packageName + ";";
     }
 
     private String generateImports(QueryModel query) {

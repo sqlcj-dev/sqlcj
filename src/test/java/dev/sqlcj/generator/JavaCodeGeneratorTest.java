@@ -48,7 +48,7 @@ class JavaCodeGeneratorTest {
         GeneratedFile file = codeGenerator.generate(query);
 
         assertEquals(
-                Path.of("GetUser.java"),
+                Path.of("generated", "GetUser.java"),
                 file.path()
         );
     }
@@ -176,6 +176,41 @@ class JavaCodeGeneratorTest {
         assertTrue(
                 file.content().startsWith("package generated;")
         );
+    }
+
+    @Test
+    void shouldGenerateConfiguredPackageDeclarationAndPath()
+            throws IOException {
+
+        CodeGenerator generator =
+                new JavaCodeGenerator("dev.example.generated");
+
+        QueryModel query = new QueryModel(
+                "GetUser",
+                QueryType.ONE,
+                "users",
+                SQL,
+                List.of(1),
+                List.of(
+                        new QueryColumn("id", ColumnType.BIGINT, false)
+                ),
+                List.of(
+                        new QueryParameter(1, "id", ColumnType.BIGINT)
+                )
+        );
+
+        GeneratedFile file = generator.generate(query);
+
+        assertEquals(
+                Path.of("dev", "example", "generated", "GetUser.java"),
+                file.path()
+        );
+
+        assertTrue(
+                file.content().startsWith("package dev.example.generated;")
+        );
+
+        assertCompiles(file);
     }
 
     @Test
@@ -1189,6 +1224,8 @@ class JavaCodeGeneratorTest {
         Files.createDirectories(outputDirectory);
 
         Path sourceFile = sourceDirectory.resolve(file.path());
+
+        Files.createDirectories(sourceFile.getParent());
 
         Files.writeString(sourceFile, file.content());
 

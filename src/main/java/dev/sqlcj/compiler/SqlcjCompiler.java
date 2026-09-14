@@ -17,33 +17,60 @@ import net.sf.jsqlparser.statement.Statement;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Path;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
 public final class SqlcjCompiler {
 
     private final SourceLoader sourceLoader = new DefaultSourceLoader();
     private final SqlParser sqlParser = new SqlParser();
     private final QueryAnalyzer queryAnalyzer = new QueryAnalyzer();
-    private final CodeGenerator codeGenerator = new JavaCodeGenerator();
     private final GeneratedFileWriter generatedFileWriter = new GeneratedFileWriter();
     private final SchemaParser schemaParser = new DefaultSchemaParser();
 
     public void compile(Config config) {
-        Source source = sourceLoader.load(config);
-        Schema schema = schemaParser.parse(source.schema());
+        List<Source> sources = sourceLoader.load(config);
 
-        for (Query query : source.queries()) {
-            compileQuery(query, schema, Path.of(config.java().out()));
+        CodeGenerator codeGenerator =
+                new JavaCodeGenerator(config.java().packageName());
+
+        Path outputDirectory = Path.of(config.java().out());
+
+        Set<Path> generatedPaths = new HashSet<>();
+
+        for (Source source : sources) {
+            Schema schema = schemaParser.parse(source.schema());
+
+            for (Query query : source.queries()) {
+                compileQuery(
+                        query,
+                        schema,
+                        codeGenerator,
+                        outputDirectory,
+                        generatedPaths
+                );
+            }
         }
     }
 
     private void compileQuery(
             Query query,
             Schema schema,
-            Path outputDirectory
+            CodeGenerator codeGenerator,
+            Path outputDirectory,
+            Set<Path> generatedPaths
     ) {
         Statement statement = sqlParser.parse(query.sql());
         QueryModel model = queryAnalyzer.analyze(query, statement, schema);
         GeneratedFile file = codeGenerator.generate(model);
+
+        if (!generatedPaths.add(file.path())) {
+            throw new CompilationException(
+                    "Duplicate generated file: " + file.path()
+            );
+        }
+
         write(file, outputDirectory);
     }
 
