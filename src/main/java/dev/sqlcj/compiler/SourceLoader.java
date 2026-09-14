@@ -2,7 +2,9 @@ package dev.sqlcj.compiler;
 
 import dev.sqlcj.config.Config;
 
+import java.util.List;
+
 public interface SourceLoader {
 
-    Source load(Config config);
+    List<Source> load(Config config);
 }

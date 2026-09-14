@@ -25,8 +25,10 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SqlcjCompilerIntegrationTest {
@@ -95,13 +97,13 @@ class SqlcjCompilerIntegrationTest {
         compiler.compile(config);
 
         Path getUserFile =
-                generatedDirectory.resolve("GetUser.java");
+                generatedDirectory.resolve("generated/GetUser.java");
 
         Path listUsersFile =
-                generatedDirectory.resolve("ListUsers.java");
+                generatedDirectory.resolve("generated/ListUsers.java");
 
         Path findUsersFile =
-                generatedDirectory.resolve("FindUsers.java");
+                generatedDirectory.resolve("generated/FindUsers.java");
 
         assertTrue(Files.exists(getUserFile));
         assertTrue(Files.exists(listUsersFile));
@@ -257,7 +259,7 @@ class SqlcjCompilerIntegrationTest {
 
         compiler.compile(config);
 
-        Path getUserFile = generatedDirectory.resolve("GetUser.java");
+        Path getUserFile = generatedDirectory.resolve("generated/GetUser.java");
 
         assertTrue(Files.exists(getUserFile));
 
@@ -423,7 +425,7 @@ class SqlcjCompilerIntegrationTest {
         compiler.compile(config);
 
         Path listActiveUsersFile =
-                generatedDirectory.resolve("ListActiveUsers.java");
+                generatedDirectory.resolve("generated/ListActiveUsers.java");
 
         assertTrue(Files.exists(listActiveUsersFile));
 
@@ -583,7 +585,7 @@ class SqlcjCompilerIntegrationTest {
         );
 
         String source = Files.readString(
-                tempDir.resolve("generated").resolve("FindUser.java")
+                tempDir.resolve("generated/generated/FindUser.java")
         );
 
         assertTrue(source.contains(
@@ -634,7 +636,7 @@ class SqlcjCompilerIntegrationTest {
         );
 
         String source = Files.readString(
-                tempDir.resolve("generated").resolve("GetFirstUser.java")
+                tempDir.resolve("generated/generated/GetFirstUser.java")
         );
 
         assertTrue(source.contains(
@@ -665,6 +667,225 @@ class SqlcjCompilerIntegrationTest {
             assertEquals(1L, getRecordComponent(result, "id"));
             assertEquals("Alice", getRecordComponent(result, "name"));
         }
+    }
+
+    @Test
+    void shouldCompileConfiguredEntriesWithConfiguredPackage()
+            throws IOException {
+
+        Path usersSchema = tempDir.resolve("users-schema.sql");
+        Path usersQueries = tempDir.resolve("users-queries.sql");
+        Path ordersSchema = tempDir.resolve("orders-schema.sql");
+        Path ordersQueries = tempDir.resolve("orders-queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+        Path classesDirectory = tempDir.resolve("classes");
+
+        Files.writeString(
+                usersSchema,
+                """
+                        CREATE TABLE users
+                        (
+                            id   BIGINT NOT NULL,
+                            name VARCHAR(255)
+                        );
+                        """
+        );
+
+        Files.writeString(
+                usersQueries,
+                """
+                        -- name: GetUser :one
+                        SELECT id, name
+                        FROM users
+                        WHERE id = $1;
+                        """
+        );
+
+        Files.writeString(
+                ordersSchema,
+                """
+                        CREATE TABLE orders
+                        (
+                            id         BIGINT NOT NULL,
+                            total      DECIMAL(10, 2),
+                            created_at TIMESTAMP
+                        );
+                        """
+        );
+
+        Files.writeString(
+                ordersQueries,
+                """
+                        -- name: ListOrders :many
+                        SELECT id, total, created_at
+                        FROM orders
+                        WHERE created_at = $1;
+                        """
+        );
+
+        Config config = new Config(
+                List.of(
+                        new SqlConfig(
+                                usersSchema.toString(),
+                                usersQueries.toString()
+                        ),
+                        new SqlConfig(
+                                ordersSchema.toString(),
+                                ordersQueries.toString()
+                        )
+                ),
+                new JavaConfig(
+                        generatedDirectory.toString(),
+                        "dev.example.generated"
+                )
+        );
+
+        new SqlcjCompiler().compile(config);
+
+        Path getUserFile = generatedDirectory.resolve(
+                "dev/example/generated/GetUser.java"
+        );
+
+        Path listOrdersFile = generatedDirectory.resolve(
+                "dev/example/generated/ListOrders.java"
+        );
+
+        assertTrue(Files.exists(getUserFile));
+        assertTrue(Files.exists(listOrdersFile));
+
+        String getUser = Files.readString(getUserFile);
+
+        assertTrue(getUser.startsWith("package dev.example.generated;"));
+        assertTrue(getUser.contains(
+                "public GetUserResult getUser(Long id)"
+        ));
+
+        String listOrders = Files.readString(listOrdersFile);
+
+        assertTrue(listOrders.startsWith("package dev.example.generated;"));
+        assertTrue(listOrders.contains(
+                "public List<ListOrdersResult> listOrders(LocalDateTime created_at)"
+        ));
+        assertTrue(listOrders.contains("BigDecimal total"));
+
+        Files.createDirectories(classesDirectory);
+
+        JavaCompiler compilerApi = ToolProvider.getSystemJavaCompiler();
+
+        assertNotNull(compilerApi);
+
+        int compilationResult = compilerApi.run(
+                null,
+                null,
+                null,
+                "-classpath",
+                System.getProperty("java.class.path"),
+                "-d",
+                classesDirectory.toString(),
+                getUserFile.toString(),
+                listOrdersFile.toString()
+        );
+
+        assertEquals(0, compilationResult);
+
+        assertTrue(
+                Files.exists(
+                        classesDirectory.resolve(
+                                "dev/example/generated/GetUser.class"
+                        )
+                )
+        );
+
+        assertTrue(
+                Files.exists(
+                        classesDirectory.resolve(
+                                "dev/example/generated/ListOrders.class"
+                        )
+                )
+        );
+    }
+
+    @Test
+    void shouldRejectDuplicateQueryNameAcrossEntriesBeforeWriting()
+            throws IOException {
+
+        Path usersSchema = tempDir.resolve("users-schema.sql");
+        Path usersQueries = tempDir.resolve("users-queries.sql");
+        Path ordersSchema = tempDir.resolve("orders-schema.sql");
+        Path ordersQueries = tempDir.resolve("orders-queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Files.writeString(
+                usersSchema,
+                """
+                        CREATE TABLE users
+                        (
+                            id BIGINT NOT NULL
+                        );
+                        """
+        );
+
+        Files.writeString(
+                usersQueries,
+                """
+                        -- name: GetRecord :one
+                        SELECT id
+                        FROM users
+                        WHERE id = $1;
+                        """
+        );
+
+        Files.writeString(
+                ordersSchema,
+                """
+                        CREATE TABLE orders
+                        (
+                            id BIGINT NOT NULL
+                        );
+                        """
+        );
+
+        Files.writeString(
+                ordersQueries,
+                """
+                        -- name: GetRecord :one
+                        SELECT id
+                        FROM orders
+                        WHERE id = $1;
+                        """
+        );
+
+        Config config = new Config(
+                List.of(
+                        new SqlConfig(
+                                usersSchema.toString(),
+                                usersQueries.toString()
+                        ),
+                        new SqlConfig(
+                                ordersSchema.toString(),
+                                ordersQueries.toString()
+                        )
+                ),
+                new JavaConfig(
+                        generatedDirectory.toString(),
+                        "dev.example.generated"
+                )
+        );
+
+        SqlcjCompiler compiler = new SqlcjCompiler();
+
+        CompilationException exception = assertThrows(
+                CompilationException.class,
+                () -> compiler.compile(config)
+        );
+
+        assertEquals(
+                "Duplicate query name 'GetRecord' in query source: "
+                        + ordersQueries,
+                exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
     }
 
     private Path generateAndCompile(
@@ -706,7 +927,7 @@ class SqlcjCompilerIntegrationTest {
         new SqlcjCompiler().compile(config);
 
         Path generatedFile =
-                generatedDirectory.resolve(queryName + ".java");
+                generatedDirectory.resolve("generated").resolve(queryName + ".java");
 
         assertTrue(Files.exists(generatedFile));
 
