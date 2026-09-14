@@ -10,11 +10,14 @@ import dev.sqlcj.type.TypeResolver;
 
 import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 public final class JavaCodeGenerator implements CodeGenerator {
 
@@ -56,7 +59,10 @@ public final class JavaCodeGenerator implements CodeGenerator {
     private String generateImports(QueryModel query) {
         Set<String> imports = new LinkedHashSet<>();
 
-        if (query.type() == QueryType.MANY) {
+        imports.add("dev.sqlcj.runtime.QueryExecutor");
+
+        if (hasResult(query)) {
+            imports.add("dev.sqlcj.runtime.RowMapper");
             imports.add("java.util.List");
         }
 
@@ -75,6 +81,11 @@ public final class JavaCodeGenerator implements CodeGenerator {
         return imports.stream()
                 .map(type -> "import " + type + ";")
                 .collect(Collectors.joining("\n"));
+    }
+
+    private boolean hasResult(QueryModel query) {
+        return query.type() == QueryType.ONE
+                || query.type() == QueryType.MANY;
     }
 
     private String resolveImport(ColumnType type) {
@@ -103,16 +114,29 @@ public final class JavaCodeGenerator implements CodeGenerator {
     }
 
     private String generateClass(QueryModel query) {
-        return """
-                public final class %s {
+        String rowMapper = hasResult(query)
+                ? indent(generateRowMapper(query))
+                : "";
 
-                %s
-                
-                %s
-                }
-                """.formatted(
+        return """
+            public final class %s {
+
+            %s
+
+            %s
+
+            %s
+
+            %s
+
+            %s
+            }
+            """.formatted(
                 query.name(),
+                indent(generateExecutorField()),
+                indent(generateConstructor(query)),
                 indent(generateResultType(query)),
+                rowMapper,
                 indent(generateMethod(query))
         );
     }
@@ -147,6 +171,20 @@ public final class JavaCodeGenerator implements CodeGenerator {
     }
 
     private String generateMethodParameters(QueryModel query) {
+        List<String> names = generateParameterNames(query);
+
+        return IntStream.range(0, query.parameters().size())
+                .mapToObj(i -> {
+                    QueryParameter parameter = query.parameters().get(i);
+
+                    return typeResolver.resolve(parameter.type())
+                            + " "
+                            + names.get(i);
+                })
+                .collect(Collectors.joining(", "));
+    }
+
+    private List<String> generateParameterNames(QueryModel query) {
         Map<String, Long> occurrences = query.parameters().stream()
                 .collect(Collectors.groupingBy(
                         QueryParameter::name,
@@ -169,23 +207,90 @@ public final class JavaCodeGenerator implements CodeGenerator {
                         name += occurrence;
                     }
 
-                    return typeResolver.resolve(parameter.type())
-                            + " "
-                            + name;
+                    return name;
                 })
-                .collect(Collectors.joining(", "));
+                .toList();
     }
 
     private String generateMethod(QueryModel query) {
+        return switch (query.type()) {
+            case ONE, MANY -> generateQueryMethod(query);
+            case EXEC, EXEC_RESULT, BATCH_EXEC, BATCH_MANY, BATCH_ONE -> generateUnsupportedMethod(query);
+        };
+    }
+
+    private String generateQueryMethod(QueryModel query) {
         return """
-            public %s %s(%s) {
-                throw new UnsupportedOperationException("Not implemented");
-            }
-            """.formatted(
+        public %s %s(%s) {
+            return executor.%s(
+                    %s,
+                    %s,
+                    ROW_MAPPER
+            );
+        }
+        """.formatted(
+                generateReturnType(query),
+                generateMethodName(query),
+                generateMethodParameters(query),
+                generateExecutorMethod(query),
+                generateSql(query),
+                generateParameterList(query)
+        );
+    }
+
+    private String generateUnsupportedMethod(QueryModel query) {
+        return """
+        public %s %s(%s) {
+            throw new UnsupportedOperationException("Not implemented");
+        }
+        """.formatted(
                 generateReturnType(query),
                 generateMethodName(query),
                 generateMethodParameters(query)
         );
+    }
+
+    private String generateExecutorMethod(QueryModel query) {
+        return switch (query.type()) {
+            case ONE -> "query";
+            case MANY -> "queryMany";
+            default -> throw new IllegalStateException(
+                    "Query type does not produce a result: " + query.type()
+            );
+        };
+    }
+
+    private String generateSql(QueryModel query) {
+        return "\"\"\"\n"
+                + query.executableSql()
+                + "\"\"\"";
+    }
+
+    /**
+     * Renders the executor arguments in the textual order of the JDBC
+     * {@code ?} positions, using the logically ordered method parameter names.
+     */
+    private String generateParameterList(QueryModel query) {
+        Map<Integer, String> namesByIndex = generateParameterNamesByIndex(query);
+
+        return query.bindingParameterIndexes().stream()
+                .map(namesByIndex::get)
+                .collect(Collectors.joining(", ", "List.of(", ")"));
+    }
+
+    private Map<Integer, String> generateParameterNamesByIndex(QueryModel query) {
+        List<String> names = generateParameterNames(query);
+
+        Map<Integer, String> namesByIndex = new LinkedHashMap<>();
+
+        for (int i = 0; i < query.parameters().size(); i++) {
+            namesByIndex.put(
+                    query.parameters().get(i).index(),
+                    names.get(i)
+            );
+        }
+
+        return namesByIndex;
     }
 
     private String generateMethodName(QueryModel query) {
@@ -206,5 +311,50 @@ public final class JavaCodeGenerator implements CodeGenerator {
 
     private String generateResultTypeName(QueryModel query) {
         return query.name() + "Result";
+    }
+
+    private String generateRowMapper(QueryModel query) {
+        return """
+            private static final RowMapper<%s> ROW_MAPPER =
+                    resultSet -> new %s(
+            %s
+            );
+            """.formatted(
+                generateResultTypeName(query),
+                generateResultTypeName(query),
+                generateResultMappings(query)
+        );
+    }
+
+    private String generateResultMappings(QueryModel query) {
+        return query.columns().stream()
+                .map(this::generateResultMapping)
+                .collect(Collectors.joining(",\n"));
+    }
+
+    private String generateResultMapping(QueryColumn column) {
+        String javaType = typeResolver.resolve(column.type());
+
+        return "resultSet.getObject(\"%s\", %s.class)"
+                .formatted(
+                        column.name(),
+                        javaType
+                )
+                .indent(8)
+                .stripTrailing();
+    }
+
+    private String generateExecutorField() {
+        return """
+            private final QueryExecutor executor;
+            """;
+    }
+
+    private String generateConstructor(QueryModel query) {
+        return """
+            public %s(QueryExecutor executor) {
+                this.executor = executor;
+            }
+            """.formatted(query.name());
     }
 }
