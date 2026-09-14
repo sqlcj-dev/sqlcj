@@ -10,6 +10,7 @@ import dev.sqlcj.type.TypeResolver;
 
 import java.nio.file.Path;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -62,9 +63,6 @@ public final class JavaCodeGenerator implements CodeGenerator {
 
         if (hasResult(query)) {
             imports.add("dev.sqlcj.runtime.RowMapper");
-        }
-
-        if (query.type() == QueryType.MANY || !query.parameters().isEmpty()) {
             imports.add("java.util.List");
         }
 
@@ -263,17 +261,36 @@ public final class JavaCodeGenerator implements CodeGenerator {
     }
 
     private String generateSql(QueryModel query) {
-        String sql = query.sql().replaceAll("\\$\\d+", "?");
-
         return "\"\"\"\n"
-                + sql
+                + query.executableSql()
                 + "\"\"\"";
     }
 
+    /**
+     * Renders the executor arguments in the textual order of the JDBC
+     * {@code ?} positions, using the logically ordered method parameter names.
+     */
     private String generateParameterList(QueryModel query) {
-        return "List.of(" +
-                String.join(", ", generateParameterNames(query)) +
-                ")";
+        Map<Integer, String> namesByIndex = generateParameterNamesByIndex(query);
+
+        return query.bindingParameterIndexes().stream()
+                .map(namesByIndex::get)
+                .collect(Collectors.joining(", ", "List.of(", ")"));
+    }
+
+    private Map<Integer, String> generateParameterNamesByIndex(QueryModel query) {
+        List<String> names = generateParameterNames(query);
+
+        Map<Integer, String> namesByIndex = new LinkedHashMap<>();
+
+        for (int i = 0; i < query.parameters().size(); i++) {
+            namesByIndex.put(
+                    query.parameters().get(i).index(),
+                    names.get(i)
+            );
+        }
+
+        return namesByIndex;
     }
 
     private String generateMethodName(QueryModel query) {

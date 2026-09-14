@@ -736,7 +736,7 @@ class QueryAnalyzerTest {
     }
 
     @Test
-    void shouldPreserveQuerySql() {
+    void shouldProduceExecutableSql() {
         String sql = """
             SELECT id, name
             FROM users
@@ -756,8 +756,84 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(
-                sql,
-                model.sql()
+                """
+                SELECT id, name
+                FROM users
+                WHERE id = ?
+                """,
+                model.executableSql()
         );
+
+        assertEquals(
+                List.of(1),
+                model.bindingParameterIndexes()
+        );
+    }
+
+    @Test
+    void shouldResolveBindingIndexesInTextualOrder() {
+        String sql = """
+            SELECT id, name
+            FROM users
+            WHERE active = $2
+              AND id = $1
+            """;
+
+        Query query = new Query(
+                "FindUser",
+                QueryType.ONE,
+                sql
+        );
+
+        QueryModel model = analyzer.analyze(
+                query,
+                parser.parse(sql),
+                schema
+        );
+
+        assertEquals(
+                """
+                SELECT id, name
+                FROM users
+                WHERE active = ?
+                  AND id = ?
+                """,
+                model.executableSql()
+        );
+
+        assertEquals(
+                List.of(
+                        new QueryParameter(1, "id", ColumnType.BIGINT),
+                        new QueryParameter(2, "active", ColumnType.BOOLEAN)
+                ),
+                model.parameters()
+        );
+
+        assertEquals(
+                List.of(2, 1),
+                model.bindingParameterIndexes()
+        );
+    }
+
+    @Test
+    void shouldResolveEmptyBindingIndexesWithoutParameters() {
+        String sql = """
+            SELECT id, name
+            FROM users
+            """;
+
+        Query query = new Query(
+                "ListUsers",
+                QueryType.MANY,
+                sql
+        );
+
+        QueryModel model = analyzer.analyze(
+                query,
+                parser.parse(sql),
+                schema
+        );
+
+        assertTrue(model.bindingParameterIndexes().isEmpty());
     }
 }

@@ -38,6 +38,7 @@ class JavaCodeGeneratorTest {
                 QueryType.ONE,
                 "users",
                 SQL,
+                List.of(),
                 List.of(
                         new QueryColumn("id", ColumnType.BIGINT, false)
                 ),
@@ -60,6 +61,7 @@ class JavaCodeGeneratorTest {
                 "users",
                 SQL,
                 List.of(),
+                List.of(),
                 List.of()
         );
 
@@ -76,6 +78,7 @@ class JavaCodeGeneratorTest {
                 QueryType.ONE,
                 "users",
                 SQL,
+                List.of(),
                 List.of(),
                 List.of()
         );
@@ -182,6 +185,7 @@ class JavaCodeGeneratorTest {
                 QueryType.ONE,
                 "users",
                 SQL,
+                List.of(),
                 List.of(
                         new QueryColumn("id", ColumnType.BIGINT, false),
                         new QueryColumn("name", ColumnType.VARCHAR, true),
@@ -208,6 +212,7 @@ class JavaCodeGeneratorTest {
                 QueryType.ONE,
                 "users",
                 SQL,
+                List.of(),
                 List.of(
                         new QueryColumn("id", ColumnType.BIGINT, false)
                 ),
@@ -230,6 +235,7 @@ class JavaCodeGeneratorTest {
                 QueryType.MANY,
                 "users",
                 SQL,
+                List.of(),
                 List.of(
                         new QueryColumn("id", ColumnType.BIGINT, false),
                         new QueryColumn("name", ColumnType.VARCHAR, true)
@@ -255,6 +261,7 @@ class JavaCodeGeneratorTest {
                 QueryType.MANY,
                 "users",
                 SQL,
+                List.of(1, 2),
                 List.of(
                         new QueryColumn("id", ColumnType.BIGINT, false),
                         new QueryColumn("name", ColumnType.VARCHAR, true)
@@ -281,6 +288,7 @@ class JavaCodeGeneratorTest {
                 QueryType.ONE,
                 "users",
                 SQL,
+                List.of(1),
                 List.of(
                         new QueryColumn("id", ColumnType.BIGINT, false),
                         new QueryColumn("name", ColumnType.VARCHAR, true)
@@ -300,12 +308,13 @@ class JavaCodeGeneratorTest {
     }
 
     @Test
-    void shouldNotGenerateListImportForSingleResult() {
+    void shouldGenerateListImportForSingleResultWithoutParameters() {
         QueryModel query = new QueryModel(
                 "GetUser",
                 QueryType.ONE,
                 "users",
                 SQL,
+                List.of(),
                 List.of(
                         new QueryColumn("id", ColumnType.BIGINT, false)
                 ),
@@ -314,9 +323,10 @@ class JavaCodeGeneratorTest {
 
         GeneratedFile file = codeGenerator.generate(query);
 
-        assertFalse(
-                file.content().contains("import java.util.List;")
-        );
+        String source = file.content();
+
+        assertTrue(source.contains("import java.util.List;"));
+        assertTrue(source.contains("List.of()"));
     }
 
     @Test
@@ -379,6 +389,7 @@ class JavaCodeGeneratorTest {
                 QueryType.MANY,
                 "users",
                 SQL,
+                List.of(),
                 List.of(
                         new QueryColumn("id", ColumnType.BIGINT, false)
                 ),
@@ -401,6 +412,7 @@ class JavaCodeGeneratorTest {
                 QueryType.ONE,
                 "users",
                 SQL,
+                List.of(),
                 List.of(
                         new QueryColumn(
                                 "birthDate",
@@ -427,6 +439,7 @@ class JavaCodeGeneratorTest {
                 QueryType.ONE,
                 "accounts",
                 SQL,
+                List.of(),
                 List.of(
                         new QueryColumn(
                                 "balance",
@@ -453,6 +466,7 @@ class JavaCodeGeneratorTest {
                 QueryType.ONE,
                 "users",
                 SQL,
+                List.of(1),
                 List.of(
                         new QueryColumn(
                                 "id",
@@ -485,6 +499,7 @@ class JavaCodeGeneratorTest {
                 QueryType.MANY,
                 "users",
                 SQL,
+                List.of(1),
                 List.of(
                         new QueryColumn(
                                 "createdAt",
@@ -520,6 +535,7 @@ class JavaCodeGeneratorTest {
                 QueryType.MANY,
                 "accounts",
                 SQL,
+                List.of(),
                 List.of(
                         new QueryColumn(
                                 "createdAt",
@@ -551,6 +567,7 @@ class JavaCodeGeneratorTest {
                 QueryType.ONE,
                 "users",
                 SQL,
+                List.of(1),
                 List.of(
                         new QueryColumn(
                                 "id",
@@ -582,6 +599,7 @@ class JavaCodeGeneratorTest {
                 QueryType.MANY,
                 "users",
                 SQL,
+                List.of(1),
                 List.of(
                         new QueryColumn(
                                 "id",
@@ -665,6 +683,7 @@ class JavaCodeGeneratorTest {
                 QueryType.ONE,
                 "users",
                 SQL,
+                List.of(),
                 List.of(
                         new QueryColumn(
                                 "value",
@@ -691,6 +710,7 @@ class JavaCodeGeneratorTest {
                 QueryType.ONE,
                 "users",
                 SQL,
+                List.of(),
                 List.of(
                         new QueryColumn(
                                 "id",
@@ -715,6 +735,7 @@ class JavaCodeGeneratorTest {
                 QueryType.ONE,
                 "users",
                 SQL,
+                List.of(),
                 List.of(
                         new QueryColumn(
                                 "id",
@@ -739,6 +760,7 @@ class JavaCodeGeneratorTest {
                 QueryType.MANY,
                 "users",
                 SQL,
+                List.of(1, 2),
                 List.of(
                         new QueryColumn("id", ColumnType.BIGINT, false)
                 ),
@@ -764,6 +786,7 @@ class JavaCodeGeneratorTest {
                 QueryType.ONE,
                 "users",
                 SQL,
+                List.of(),
                 List.of(
                         new QueryColumn("id", ColumnType.BIGINT, false),
                         new QueryColumn("name", ColumnType.VARCHAR, true),
@@ -814,6 +837,7 @@ class JavaCodeGeneratorTest {
                 QueryType.ONE,
                 "users",
                 SQL,
+                List.of(),
                 List.of(
                         new QueryColumn("name", ColumnType.VARCHAR, true),
                         new QueryColumn("id", ColumnType.BIGINT, false)
@@ -841,6 +865,7 @@ class JavaCodeGeneratorTest {
                 QueryType.MANY,
                 "users",
                 SQL,
+                List.of(),
                 List.of(
                         new QueryColumn("id", ColumnType.BIGINT, false),
                         new QueryColumn("name", ColumnType.VARCHAR, true)
@@ -868,34 +893,13 @@ class JavaCodeGeneratorTest {
     }
 
     @Test
-    void shouldNotGenerateRowMapperForExecQuery() {
-        QueryModel query = new QueryModel(
-                "DeleteUser",
-                QueryType.EXEC,
-                "users",
-                SQL,
-                List.of(),
-                List.of()
-        );
-
-        String source = codeGenerator.generate(query).content();
-
-        assertFalse(source.contains("RowMapper"));
-
-        assertTrue(
-                source.contains(
-                        "throw new UnsupportedOperationException(\"Not implemented\");"
-                )
-        );
-    }
-
-    @Test
     void shouldGenerateQueryExecutorImport() {
         QueryModel query = new QueryModel(
                 "GetUser",
                 QueryType.ONE,
                 "users",
                 SQL,
+                List.of(),
                 List.of(),
                 List.of()
         );
@@ -917,6 +921,7 @@ class JavaCodeGeneratorTest {
                 "users",
                 SQL,
                 List.of(),
+                List.of(),
                 List.of()
         );
 
@@ -936,6 +941,7 @@ class JavaCodeGeneratorTest {
                 QueryType.ONE,
                 "users",
                 SQL,
+                List.of(),
                 List.of(),
                 List.of()
         );
@@ -964,8 +970,9 @@ class JavaCodeGeneratorTest {
                 """
                         SELECT id, name
                         FROM users
-                        WHERE id = $1
+                        WHERE id = ?
                         """,
+                List.of(1),
                 List.of(
                         new QueryColumn(
                                 "id",
@@ -1025,6 +1032,7 @@ class JavaCodeGeneratorTest {
                 QueryType.MANY,
                 "users",
                 SQL,
+                List.of(1),
                 List.of(
                         new QueryColumn(
                                 "id",
@@ -1074,10 +1082,11 @@ class JavaCodeGeneratorTest {
                 """
                         SELECT id, name
                         FROM users
-                        WHERE active = $1
-                          AND id = $2
-                          AND name = $3
+                        WHERE active = ?
+                          AND id = ?
+                          AND name = ?
                         """,
+                List.of(1, 2, 3),
                 List.of(
                         new QueryColumn("id", ColumnType.BIGINT, false),
                         new QueryColumn("name", ColumnType.VARCHAR, true)
@@ -1098,6 +1107,109 @@ class JavaCodeGeneratorTest {
         );
     }
 
+    @Test
+    void shouldGenerateLogicalParametersWithTextualBindingOrder()
+            throws IOException {
+
+        QueryModel query = new QueryModel(
+                "FindUser",
+                QueryType.ONE,
+                "users",
+                """
+                        SELECT id, name
+                        FROM users
+                        WHERE active = ?
+                          AND id = ?
+                        """,
+                List.of(2, 1),
+                List.of(
+                        new QueryColumn("id", ColumnType.BIGINT, false),
+                        new QueryColumn("name", ColumnType.VARCHAR, true)
+                ),
+                List.of(
+                        new QueryParameter(1, "id", ColumnType.BIGINT),
+                        new QueryParameter(2, "active", ColumnType.BOOLEAN)
+                )
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        String source = file.content();
+
+        assertTrue(source.contains(
+                "public FindUserResult findUser(Long id, Boolean active)"
+        ));
+
+        assertTrue(source.contains("WHERE active = ?"));
+        assertTrue(source.contains("AND id = ?"));
+        assertTrue(source.contains("List.of(active, id)"));
+
+        assertCompiles(file);
+    }
+
+    @Test
+    void shouldGenerateEmptyArgumentListForQueryWithoutParameters()
+            throws IOException {
+
+        QueryModel query = new QueryModel(
+                "GetFirstUser",
+                QueryType.ONE,
+                "users",
+                """
+                        SELECT id, name
+                        FROM users
+                        """,
+                List.of(),
+                List.of(
+                        new QueryColumn("id", ColumnType.BIGINT, false),
+                        new QueryColumn("name", ColumnType.VARCHAR, true)
+                ),
+                List.of()
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        String source = file.content();
+
+        assertTrue(source.contains(
+                "public GetFirstUserResult getFirstUser()"
+        ));
+
+        assertTrue(source.contains("import java.util.List;"));
+        assertTrue(source.contains("List.of()"));
+
+        assertCompiles(file);
+    }
+
+    private void assertCompiles(GeneratedFile file) throws IOException {
+        Path sourceDirectory = tempDir.resolve("generated");
+        Path outputDirectory = tempDir.resolve("classes");
+
+        Files.createDirectories(sourceDirectory);
+        Files.createDirectories(outputDirectory);
+
+        Path sourceFile = sourceDirectory.resolve(file.path());
+
+        Files.writeString(sourceFile, file.content());
+
+        JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+
+        assertNotNull(compiler);
+
+        int result = compiler.run(
+                null,
+                null,
+                null,
+                "-classpath",
+                System.getProperty("java.class.path"),
+                "-d",
+                outputDirectory.toString(),
+                sourceFile.toString()
+        );
+
+        assertEquals(0, result);
+    }
+
     private QueryModel query(
             String name,
             QueryType type,
@@ -1108,6 +1220,9 @@ class JavaCodeGeneratorTest {
                 type,
                 "users",
                 SQL,
+                parameters.stream()
+                        .map(QueryParameter::index)
+                        .toList(),
                 List.of(),
                 parameters
         );

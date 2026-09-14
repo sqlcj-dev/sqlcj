@@ -23,8 +23,11 @@ import net.sf.jsqlparser.statement.update.Update;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.regex.Pattern;
 
 public final class QueryAnalyzer {
+
+    private static final Pattern PLACEHOLDER = Pattern.compile("\\$\\d+");
 
     public QueryModel analyze(Query query, Statement statement, Schema schema) {
         if (statement instanceof Select select) {
@@ -62,16 +65,30 @@ public final class QueryAnalyzer {
                 table
         );
 
-        List<QueryParameter> parameters = resolveParameters(plainSelect, schema, table);
+        List<QueryParameter> bindingParameters =
+                resolveBindingParameters(plainSelect, schema, table);
+
+        List<Integer> bindingParameterIndexes = bindingParameters.stream()
+                .map(QueryParameter::index)
+                .toList();
+
+        List<QueryParameter> parameters = bindingParameters.stream()
+                .sorted(Comparator.comparingInt(QueryParameter::index))
+                .toList();
 
         return new QueryModel(
                 query.name(),
                 query.type(),
                 table.getName(),
-                query.sql(),
+                toExecutableSql(query.sql()),
+                bindingParameterIndexes,
                 columns,
                 parameters
         );
+    }
+
+    private String toExecutableSql(String sql) {
+        return PLACEHOLDER.matcher(sql).replaceAll("?");
     }
 
     private Table getTable(PlainSelect plainSelect) {
@@ -82,7 +99,12 @@ public final class QueryAnalyzer {
         return table;
     }
 
-    private List<QueryParameter> resolveParameters(
+    /**
+     * Resolves the supported parameters in the textual order in which they are
+     * encountered, which is the JDBC binding order of the generated {@code ?}
+     * positions.
+     */
+    private List<QueryParameter> resolveBindingParameters(
             PlainSelect plainSelect,
             Schema schema,
             Table table
@@ -100,10 +122,6 @@ public final class QueryAnalyzer {
                 plainSelect.getWhere(),
                 schemaTable,
                 parameters
-        );
-
-        parameters.sort(
-                Comparator.comparingInt(QueryParameter::index)
         );
 
         return parameters;

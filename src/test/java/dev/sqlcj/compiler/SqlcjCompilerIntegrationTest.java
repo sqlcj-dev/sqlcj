@@ -567,6 +567,210 @@ class SqlcjCompilerIntegrationTest {
         }
     }
 
+    @Test
+    void shouldExecuteGeneratedQueryWithOutOfOrderPlaceholders()
+            throws Exception {
+
+        Path classesDirectory = generateAndCompile(
+                """
+                -- name: FindUser :one
+                SELECT id, name, active
+                FROM users
+                WHERE active = $2
+                  AND id = $1;
+                """,
+                "FindUser"
+        );
+
+        String source = Files.readString(
+                tempDir.resolve("generated").resolve("FindUser.java")
+        );
+
+        assertTrue(source.contains(
+                "public FindUserResult findUser(Long id, Boolean active)"
+        ));
+
+        assertTrue(source.contains("List.of(active, id)"));
+
+        QueryExecutor executor = new JdbcQueryExecutor(usersDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName(
+                    "generated.FindUser",
+                    true,
+                    classLoader
+            );
+
+            Object generatedQuery = generatedClass
+                    .getConstructor(QueryExecutor.class)
+                    .newInstance(executor);
+
+            Method method = generatedClass.getMethod(
+                    "findUser",
+                    Long.class,
+                    Boolean.class
+            );
+
+            Object result = method.invoke(generatedQuery, 1L, true);
+
+            assertNotNull(result);
+
+            assertEquals(1L, getRecordComponent(result, "id"));
+            assertEquals("Alice", getRecordComponent(result, "name"));
+            assertEquals(true, getRecordComponent(result, "active"));
+        }
+    }
+
+    @Test
+    void shouldExecuteGeneratedQueryWithoutParameters() throws Exception {
+        Path classesDirectory = generateAndCompile(
+                """
+                -- name: GetFirstUser :one
+                SELECT id, name
+                FROM users
+                ORDER BY id;
+                """,
+                "GetFirstUser"
+        );
+
+        String source = Files.readString(
+                tempDir.resolve("generated").resolve("GetFirstUser.java")
+        );
+
+        assertTrue(source.contains(
+                "public GetFirstUserResult getFirstUser()"
+        ));
+
+        assertTrue(source.contains("List.of()"));
+
+        QueryExecutor executor = new JdbcQueryExecutor(usersDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName(
+                    "generated.GetFirstUser",
+                    true,
+                    classLoader
+            );
+
+            Object generatedQuery = generatedClass
+                    .getConstructor(QueryExecutor.class)
+                    .newInstance(executor);
+
+            Object result = generatedClass
+                    .getMethod("getFirstUser")
+                    .invoke(generatedQuery);
+
+            assertNotNull(result);
+
+            assertEquals(1L, getRecordComponent(result, "id"));
+            assertEquals("Alice", getRecordComponent(result, "name"));
+        }
+    }
+
+    private Path generateAndCompile(
+            String queries,
+            String queryName
+    ) throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+        Path classesDirectory = tempDir.resolve("classes");
+
+        Files.writeString(
+                schemaFile,
+                """
+                        CREATE TABLE users
+                        (
+                            id     BIGINT NOT NULL,
+                            name   VARCHAR(255),
+                            active BOOLEAN
+                        );
+                        """
+        );
+
+        Files.writeString(queriesFile, queries);
+
+        Config config = new Config(
+                List.of(
+                        new SqlConfig(
+                                schemaFile.toString(),
+                                queriesFile.toString()
+                        )
+                ),
+                new JavaConfig(
+                        generatedDirectory.toString(),
+                        "generated"
+                )
+        );
+
+        new SqlcjCompiler().compile(config);
+
+        Path generatedFile =
+                generatedDirectory.resolve(queryName + ".java");
+
+        assertTrue(Files.exists(generatedFile));
+
+        Files.createDirectories(classesDirectory);
+
+        JavaCompiler compilerApi = ToolProvider.getSystemJavaCompiler();
+
+        assertNotNull(compilerApi);
+
+        int compilationResult = compilerApi.run(
+                null,
+                null,
+                null,
+                "-classpath",
+                System.getProperty("java.class.path"),
+                "-d",
+                classesDirectory.toString(),
+                generatedFile.toString()
+        );
+
+        assertEquals(0, compilationResult);
+
+        return classesDirectory;
+    }
+
+    private URLClassLoader classLoader(Path classesDirectory)
+            throws IOException {
+
+        return new URLClassLoader(
+                new URL[]{classesDirectory.toUri().toURL()},
+                getClass().getClassLoader()
+        );
+    }
+
+    private JdbcDataSource usersDataSource() throws Exception {
+        JdbcDataSource dataSource = new JdbcDataSource();
+
+        dataSource.setURL(
+                "jdbc:h2:mem:" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1"
+        );
+
+        try (
+                Connection connection = dataSource.getConnection();
+                Statement statement = connection.createStatement()
+        ) {
+            statement.execute("""
+                CREATE TABLE users (
+                    id BIGINT PRIMARY KEY,
+                    name VARCHAR(255),
+                    active BOOLEAN
+                )
+                """);
+
+            statement.execute("""
+                INSERT INTO users (id, name, active)
+                VALUES
+                    (1, 'Alice', TRUE),
+                    (2, 'Bob', FALSE)
+                """);
+        }
+
+        return dataSource;
+    }
+
     private Object getRecordComponent(
             Object record,
             String componentName
