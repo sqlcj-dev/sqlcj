@@ -10,10 +10,8 @@ import dev.sqlcj.type.TypeResolver;
 
 import java.nio.file.Path;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -37,14 +35,16 @@ public final class JavaCodeGenerator implements CodeGenerator {
 
     @Override
     public GeneratedFile generate(QueryModel query) {
+        JavaNames names = JavaNames.of(query);
+
         return new GeneratedFile(
-            buildPath(query),
-            generateSource(query)
+            buildPath(names),
+            generateSource(query, names)
         );
     }
 
-    private Path buildPath(QueryModel query) {
-        return packageDirectory().resolve(query.name() + ".java");
+    private Path buildPath(JavaNames names) {
+        return packageDirectory().resolve(names.className() + ".java");
     }
 
     private Path packageDirectory() {
@@ -56,7 +56,7 @@ public final class JavaCodeGenerator implements CodeGenerator {
         );
     }
 
-    private String generateSource(QueryModel query) {
+    private String generateSource(QueryModel query, JavaNames names) {
         return """
             %s
 
@@ -70,7 +70,7 @@ public final class JavaCodeGenerator implements CodeGenerator {
                 generatePackage(),
                 generateImports(query),
                 generateJavaDoc(query),
-                generateClass(query)
+                generateClass(query, names)
             );
     }
 
@@ -130,15 +130,15 @@ public final class JavaCodeGenerator implements CodeGenerator {
              */
             """
             .formatted(
-                query.name(),
-                query.table(),
+                escapeJavadoc(query.name()),
+                escapeJavadoc(query.table()),
                 query.type()
             );
     }
 
-    private String generateClass(QueryModel query) {
+    private String generateClass(QueryModel query, JavaNames names) {
         String rowMapper = hasResult(query)
-            ? indent(generateRowMapper(query))
+            ? indent(generateRowMapper(query, names))
             : "";
 
         return """
@@ -156,12 +156,12 @@ public final class JavaCodeGenerator implements CodeGenerator {
             }
             """
             .formatted(
-                query.name(),
+                names.className(),
                 indent(generateExecutorField()),
-                indent(generateConstructor(query)),
-                indent(generateResultType(query)),
+                indent(generateConstructor(names)),
+                indent(generateResultType(query, names)),
                 rowMapper,
-                indent(generateMethod(query))
+                indent(generateMethod(query, names))
             );
     }
 
@@ -169,7 +169,7 @@ public final class JavaCodeGenerator implements CodeGenerator {
         return text.indent(4).stripTrailing();
     }
 
-    private String generateResultType(QueryModel query) {
+    private String generateResultType(QueryModel query, JavaNames names) {
         return """
             public record %s(
             %s
@@ -177,79 +177,52 @@ public final class JavaCodeGenerator implements CodeGenerator {
             }
             """
             .formatted(
-                generateResultTypeName(query),
-                generateResultComponents(query)
+                names.resultTypeName(),
+                generateResultComponents(query, names)
             );
     }
 
-    private String generateResultComponents(QueryModel query) {
-        return query.columns().stream()
-            .map(this::generateResultComponent)
+    private String generateResultComponents(QueryModel query, JavaNames names) {
+        return IntStream.range(0, query.columns().size())
+            .mapToObj(
+                index -> generateResultComponent(
+                    query.columns().get(index),
+                    names.componentNames().get(index)
+                )
+            )
             .collect(Collectors.joining(",\n"));
     }
 
-    private String generateResultComponent(QueryColumn column) {
+    private String generateResultComponent(QueryColumn column, String name) {
         return "%s %s"
             .formatted(
                 typeResolver.resolve(column.type()),
-                column.name()
+                name
             )
             .indent(4)
             .stripTrailing();
     }
 
-    private String generateMethodParameters(QueryModel query) {
-        List<String> names = generateParameterNames(query);
-
+    private String generateMethodParameters(QueryModel query, JavaNames names) {
         return IntStream.range(0, query.parameters().size())
-            .mapToObj(i -> {
-                QueryParameter parameter = query.parameters().get(i);
+            .mapToObj(index -> {
+                QueryParameter parameter = query.parameters().get(index);
 
                 return typeResolver.resolve(parameter.type())
                     + " "
-                    + names.get(i);
+                    + names.parameterNames().get(index);
             })
             .collect(Collectors.joining(", "));
     }
 
-    private List<String> generateParameterNames(QueryModel query) {
-        Map<String, Long> occurrences = query.parameters().stream()
-            .collect(
-                Collectors.groupingBy(
-                    QueryParameter::name,
-                    Collectors.counting()
-                )
-            );
-
-        Map<String, Integer> indexes = new HashMap<>();
-
-        return query.parameters().stream()
-            .map(parameter -> {
-                String name = parameter.name();
-
-                if (occurrences.get(name) > 1) {
-                    int occurrence = indexes.merge(
-                        name,
-                        1,
-                        Integer::sum
-                    );
-
-                    name += occurrence;
-                }
-
-                return name;
-            })
-            .toList();
-    }
-
-    private String generateMethod(QueryModel query) {
+    private String generateMethod(QueryModel query, JavaNames names) {
         return switch (query.type()) {
-            case ONE, MANY -> generateQueryMethod(query);
-            case EXEC, EXEC_RESULT, BATCH_EXEC, BATCH_MANY, BATCH_ONE -> generateUnsupportedMethod(query);
+            case ONE, MANY -> generateQueryMethod(query, names);
+            case EXEC, EXEC_RESULT, BATCH_EXEC, BATCH_MANY, BATCH_ONE -> generateUnsupportedMethod(query, names);
         };
     }
 
-    private String generateQueryMethod(QueryModel query) {
+    private String generateQueryMethod(QueryModel query, JavaNames names) {
         return """
             public %s %s(%s) {
                 return executor.%s(
@@ -260,25 +233,25 @@ public final class JavaCodeGenerator implements CodeGenerator {
             }
             """
             .formatted(
-                generateReturnType(query),
-                generateMethodName(query),
-                generateMethodParameters(query),
+                generateReturnType(query, names),
+                names.methodName(),
+                generateMethodParameters(query, names),
                 generateExecutorMethod(query),
                 generateSql(query),
-                generateParameterList(query)
+                generateParameterList(query, names)
             );
     }
 
-    private String generateUnsupportedMethod(QueryModel query) {
+    private String generateUnsupportedMethod(QueryModel query, JavaNames names) {
         return """
             public %s %s(%s) {
                 throw new UnsupportedOperationException("Not implemented");
             }
             """
             .formatted(
-                generateReturnType(query),
-                generateMethodName(query),
-                generateMethodParameters(query)
+                generateReturnType(query, names),
+                names.methodName(),
+                generateMethodParameters(query, names)
             );
     }
 
@@ -294,45 +267,90 @@ public final class JavaCodeGenerator implements CodeGenerator {
 
     private String generateSql(QueryModel query) {
         return "\"\"\"\n"
-            + query.executableSql()
+            + escapeTextBlock(query.executableSql())
             + "\"\"\"";
+    }
+
+    /**
+     * Escapes the executable SQL rendered inside the generated text block so
+     * that the compiled string is exactly the analyzed SQL, including
+     * backslashes, embedded text-block delimiters, and line-trailing
+     * whitespace.
+     */
+    private String escapeTextBlock(String sql) {
+        StringBuilder builder = new StringBuilder();
+        int quotes = 0;
+
+        for (int index = 0; index < sql.length(); index++) {
+            char character = sql.charAt(index);
+            boolean lineEnd = isLineEnd(sql, index);
+
+            if (character == '"') {
+                quotes++;
+
+                if (quotes == 3 || index + 1 == sql.length()) {
+                    builder.append("\\\"");
+                    quotes = 0;
+                    continue;
+                }
+
+                builder.append('"');
+                continue;
+            }
+
+            quotes = 0;
+
+            switch (character) {
+                case '\\' -> builder.append("\\\\");
+                case '\r' -> builder.append("\\r");
+                case ' ' -> builder.append(lineEnd ? "\\s" : " ");
+                case '\t' -> builder.append(lineEnd ? "\\t" : "\t");
+                default -> builder.append(character);
+            }
+        }
+
+        return builder.toString();
+    }
+
+    private boolean isLineEnd(String sql, int index) {
+        if (index + 1 == sql.length()) {
+            return true;
+        }
+
+        char next = sql.charAt(index + 1);
+
+        return next == '\n' || next == '\r';
     }
 
     /**
      * Renders the executor arguments in the textual order of the JDBC
      * {@code ?} positions, using the logically ordered method parameter names.
      */
-    private String generateParameterList(QueryModel query) {
-        Map<Integer, String> namesByIndex = generateParameterNamesByIndex(query);
+    private String generateParameterList(QueryModel query, JavaNames names) {
+        Map<Integer, String> namesByIndex = generateParameterNamesByIndex(query, names);
 
         return query.bindingParameterIndexes().stream()
             .map(namesByIndex::get)
             .collect(Collectors.joining(", ", "List.of(", ")"));
     }
 
-    private Map<Integer, String> generateParameterNamesByIndex(QueryModel query) {
-        List<String> names = generateParameterNames(query);
-
+    private Map<Integer, String> generateParameterNamesByIndex(QueryModel query, JavaNames names) {
         Map<Integer, String> namesByIndex = new LinkedHashMap<>();
 
-        for (int i = 0; i < query.parameters().size(); i++) {
+        for (int index = 0; index < query.parameters().size(); index++) {
             namesByIndex.put(
-                query.parameters().get(i).index(),
-                names.get(i)
+                query.parameters().get(index).index(),
+                names.parameterNames().get(index)
             );
         }
 
         return namesByIndex;
     }
 
-    private String generateMethodName(QueryModel query) {
-        return Character.toLowerCase(query.name().charAt(0)) + query.name().substring(1);
-    }
-
-    private String generateReturnType(QueryModel query) {
+    private String generateReturnType(QueryModel query, JavaNames names) {
         return switch (query.type()) {
-            case ONE -> generateResultTypeName(query);
-            case MANY -> "List<" + generateResultTypeName(query) + ">";
+            case ONE -> names.resultTypeName();
+            case MANY -> "List<" + names.resultTypeName() + ">";
             case EXEC -> "void";
             case EXEC_RESULT -> "void";
             case BATCH_EXEC -> "void";
@@ -341,11 +359,7 @@ public final class JavaCodeGenerator implements CodeGenerator {
         };
     }
 
-    private String generateResultTypeName(QueryModel query) {
-        return query.name() + "Result";
-    }
-
-    private String generateRowMapper(QueryModel query) {
+    private String generateRowMapper(QueryModel query, JavaNames names) {
         return """
             private static final RowMapper<%s> ROW_MAPPER =
                     resultSet -> new %s(
@@ -353,8 +367,8 @@ public final class JavaCodeGenerator implements CodeGenerator {
             );
             """
             .formatted(
-                generateResultTypeName(query),
-                generateResultTypeName(query),
+                names.resultTypeName(),
+                names.resultTypeName(),
                 generateResultMappings(query)
             );
     }
@@ -370,7 +384,7 @@ public final class JavaCodeGenerator implements CodeGenerator {
 
         return "resultSet.getObject(\"%s\", %s.class)"
             .formatted(
-                column.name(),
+                escapeStringLiteral(column.name()),
                 javaType
             )
             .indent(8)
@@ -383,12 +397,48 @@ public final class JavaCodeGenerator implements CodeGenerator {
             """;
     }
 
-    private String generateConstructor(QueryModel query) {
+    private String generateConstructor(JavaNames names) {
         return """
             public %s(QueryExecutor executor) {
                 this.executor = executor;
             }
             """
-            .formatted(query.name());
+            .formatted(names.className());
+    }
+
+    /**
+     * Escapes a SQL-derived value rendered inside a generated Java string
+     * literal, such as a JDBC column label.
+     */
+    private String escapeStringLiteral(String value) {
+        StringBuilder builder = new StringBuilder();
+
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+
+            switch (character) {
+                case '\\' -> builder.append("\\\\");
+                case '"' -> builder.append("\\\"");
+                case '\b' -> builder.append("\\b");
+                case '\f' -> builder.append("\\f");
+                case '\n' -> builder.append("\\n");
+                case '\r' -> builder.append("\\r");
+                case '\t' -> builder.append("\\t");
+                default -> builder.append(character);
+            }
+        }
+
+        return builder.toString();
+    }
+
+    /**
+     * Escapes a SQL-derived value rendered inside the generated Javadoc block.
+     */
+    private String escapeJavadoc(String value) {
+        return value
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("*/", "*&#47;");
     }
 }

@@ -8,6 +8,7 @@ import dev.sqlcj.schema.Schema;
 import dev.sqlcj.schema.Table;
 import net.sf.jsqlparser.JSQLParserException;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
+import net.sf.jsqlparser.schema.MultiPartName;
 import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.Statements;
 import net.sf.jsqlparser.statement.create.table.ColumnDefinition;
@@ -45,7 +46,7 @@ public class DefaultSchemaParser implements SchemaParser {
     }
 
     private Table parseTable(CreateTable createTable) {
-        String tableName = createTable.getTable().getName();
+        String tableName = createTable.getTable().getUnquotedName();
 
         List<Column> columns = new ArrayList<>();
         List<Constraint> constraints = new ArrayList<>();
@@ -65,7 +66,7 @@ public class DefaultSchemaParser implements SchemaParser {
     }
 
     private Column parseColumn(ColumnDefinition definition) {
-        String name = definition.getColumnName();
+        String name = columnName(definition);
         ColumnType type = parseColumnType(definition);
         boolean nullable = isNullable(definition);
 
@@ -74,6 +75,13 @@ public class DefaultSchemaParser implements SchemaParser {
             type,
             nullable
         );
+    }
+
+    /**
+     * Returns the canonical column name without SQL identifier delimiters.
+     */
+    private String columnName(ColumnDefinition definition) {
+        return MultiPartName.unquote(definition.getColumnName());
     }
 
     private ColumnType parseColumnType(ColumnDefinition definition) {
@@ -136,7 +144,7 @@ public class DefaultSchemaParser implements SchemaParser {
                 constraints.add(
                     new Constraint(
                         ConstraintType.PRIMARY_KEY,
-                        List.of(definition.getColumnName())
+                        List.of(columnName(definition))
                     )
                 );
             }
@@ -145,7 +153,7 @@ public class DefaultSchemaParser implements SchemaParser {
                 constraints.add(
                     new Constraint(
                         ConstraintType.UNIQUE,
-                        List.of(definition.getColumnName())
+                        List.of(columnName(definition))
                     )
                 );
             }
@@ -177,7 +185,9 @@ public class DefaultSchemaParser implements SchemaParser {
             constraints.add(
                 new Constraint(
                     type,
-                    index.getColumnsNames()
+                    index.getColumnsNames().stream()
+                        .map(MultiPartName::unquote)
+                        .toList()
                 )
             );
         }

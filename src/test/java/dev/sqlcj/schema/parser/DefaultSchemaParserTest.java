@@ -115,6 +115,47 @@ class DefaultSchemaParserTest {
     }
 
     @Test
+    void shouldCanonicalizeQuotedTableAndColumnNames() {
+        String sql = """
+            CREATE TABLE "user data" (
+                "user id" BIGINT NOT NULL,
+                "select" VARCHAR(255) UNIQUE,
+                PRIMARY KEY ("user id")
+            );
+            """;
+
+        Schema schema = parser.parse(sql);
+
+        Table table = schema.tables().getFirst();
+
+        assertEquals("user data", table.name());
+
+        assertEquals(
+            new Column("user id", ColumnType.BIGINT, false),
+            table.columns().get(0)
+        );
+
+        assertEquals(
+            new Column("select", ColumnType.VARCHAR, true),
+            table.columns().get(1)
+        );
+
+        assertEquals(
+            List.of(
+                new Constraint(
+                    ConstraintType.UNIQUE,
+                    List.of("select")
+                ),
+                new Constraint(
+                    ConstraintType.PRIMARY_KEY,
+                    List.of("user id")
+                )
+            ),
+            table.constraints()
+        );
+    }
+
+    @Test
     void shouldThrowSchemaParseExceptionForInvalidSql() {
         String sql = """
             CREATE TABLE users (

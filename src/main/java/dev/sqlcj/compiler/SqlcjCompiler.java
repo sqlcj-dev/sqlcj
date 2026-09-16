@@ -17,9 +17,10 @@ import net.sf.jsqlparser.statement.Statement;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Path;
-import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
-import java.util.Set;
+import java.util.Locale;
+import java.util.Map;
 
 public final class SqlcjCompiler {
 
@@ -36,7 +37,7 @@ public final class SqlcjCompiler {
 
         Path outputDirectory = Path.of(config.java().out());
 
-        Set<Path> generatedPaths = new HashSet<>();
+        Map<String, GeneratedQuery> generatedQueries = new HashMap<>();
 
         for (Source source : sources) {
             Schema schema = schemaParser.parse(source.schema());
@@ -47,7 +48,7 @@ public final class SqlcjCompiler {
                     schema,
                     codeGenerator,
                     outputDirectory,
-                    generatedPaths
+                    generatedQueries
                 );
             }
         }
@@ -58,19 +59,57 @@ public final class SqlcjCompiler {
         Schema schema,
         CodeGenerator codeGenerator,
         Path outputDirectory,
-        Set<Path> generatedPaths
+        Map<String, GeneratedQuery> generatedQueries
     ) {
         Statement statement = sqlParser.parse(query.sql());
         QueryModel model = queryAnalyzer.analyze(query, statement, schema);
         GeneratedFile file = codeGenerator.generate(model);
 
-        if (!generatedPaths.add(file.path())) {
+        checkGeneratedPath(query, file, generatedQueries);
+
+        write(file, outputDirectory);
+    }
+
+    /**
+     * Rejects a generated path that repeats, or differs only by case from, an
+     * already generated path before the earlier file can be overwritten.
+     */
+    private void checkGeneratedPath(
+        Query query,
+        GeneratedFile file,
+        Map<String, GeneratedQuery> generatedQueries
+    ) {
+        String portabilityKey = file.path()
+            .toString()
+            .toLowerCase(Locale.ROOT);
+
+        GeneratedQuery generated = generatedQueries.get(portabilityKey);
+
+        if (generated == null) {
+            generatedQueries.put(
+                portabilityKey,
+                new GeneratedQuery(query.name(), file.path())
+            );
+
+            return;
+        }
+
+        if (generated.path().equals(file.path())) {
             throw new CompilationException(
-                "Duplicate generated file: " + file.path()
+                "Duplicate generated file for queries '%s' and '%s': %s"
+                    .formatted(generated.queryName(), query.name(), file.path())
             );
         }
 
-        write(file, outputDirectory);
+        throw new CompilationException(
+            "Generated file paths for queries '%s' and '%s' differ only by case: %s and %s"
+                .formatted(
+                    generated.queryName(),
+                    query.name(),
+                    generated.path(),
+                    file.path()
+                )
+        );
     }
 
     private void write(GeneratedFile file, Path outputDirectory) {
@@ -79,5 +118,8 @@ public final class SqlcjCompiler {
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
+    }
+
+    private record GeneratedQuery(String queryName, Path path) {
     }
 }

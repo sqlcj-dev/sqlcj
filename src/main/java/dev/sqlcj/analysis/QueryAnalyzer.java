@@ -74,7 +74,7 @@ public final class QueryAnalyzer {
         return new QueryModel(
             query.name(),
             query.type(),
-            table.getName(),
+            table.getUnquotedName(),
             toExecutableSql(query.sql()),
             bindingParameterIndexes,
             columns,
@@ -104,7 +104,7 @@ public final class QueryAnalyzer {
             return List.of();
         }
 
-        dev.sqlcj.schema.Table schemaTable = findTable(schema, table.getName());
+        dev.sqlcj.schema.Table schemaTable = findTable(schema, table.getUnquotedName());
 
         List<QueryParameter> parameters = new ArrayList<>();
 
@@ -165,7 +165,7 @@ public final class QueryAnalyzer {
             return;
         }
 
-        dev.sqlcj.schema.Column schemaColumn = findColumn(table, column.getColumnName());
+        dev.sqlcj.schema.Column schemaColumn = findColumn(table, column.getUnquotedColumnName());
 
         Expression rightExpression = in.getRightExpression();
 
@@ -261,7 +261,7 @@ public final class QueryAnalyzer {
         ) {
             addParameter(
                 parameter,
-                column.getColumnName(),
+                column.getUnquotedColumnName(),
                 table,
                 parameters
             );
@@ -274,7 +274,7 @@ public final class QueryAnalyzer {
         ) {
             addParameter(
                 parameter,
-                column.getColumnName(),
+                column.getUnquotedColumnName(),
                 table,
                 parameters
             );
@@ -313,7 +313,7 @@ public final class QueryAnalyzer {
     }
 
     private List<QueryColumn> resolveColumns(PlainSelect plainSelect, Schema schema, Table table) {
-        dev.sqlcj.schema.Table schemaTable = findTable(schema, table.getName());
+        dev.sqlcj.schema.Table schemaTable = findTable(schema, table.getUnquotedName());
 
         List<QueryColumn> columns = new ArrayList<>();
 
@@ -324,7 +324,7 @@ public final class QueryAnalyzer {
             }
 
             if (selectItem.getExpression() instanceof net.sf.jsqlparser.schema.Column column) {
-                dev.sqlcj.schema.Column schemaColumn = findColumn(schemaTable, column.getColumnName());
+                dev.sqlcj.schema.Column schemaColumn = findColumn(schemaTable, column.getUnquotedColumnName());
 
                 columns.add(
                     new QueryColumn(
