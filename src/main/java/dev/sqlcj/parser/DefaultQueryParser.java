@@ -18,15 +18,12 @@ public final class DefaultQueryParser implements QueryParser {
         StringBuilder builder = new StringBuilder();
 
         for (String line : source.lines().toList()) {
-
             if (line.startsWith(HEADER_PREFIX)) {
-
                 if (currentName != null) {
                     queries.add(buildQuery(builder, currentName, currentType));
                 }
 
                 QueryHeader header = parseHeader(line);
-
                 currentName = header.name();
                 currentType = header.type();
 
@@ -35,8 +32,9 @@ public final class DefaultQueryParser implements QueryParser {
             }
 
             if (currentName != null) {
-                builder.append(line)
-                        .append(System.lineSeparator());
+                builder
+                    .append(line)
+                    .append(System.lineSeparator());
             }
         }
 
@@ -48,7 +46,7 @@ public final class DefaultQueryParser implements QueryParser {
         for (Query query : queries) {
             if (!names.add(query.name())) {
                 throw new IllegalArgumentException(
-                        "Duplicate query: " + query.name()
+                    "Duplicate query: " + query.name()
                 );
             }
         }
@@ -61,14 +59,14 @@ public final class DefaultQueryParser implements QueryParser {
 
         if (sql.isBlank()) {
             throw new IllegalArgumentException(
-                    "Query '" + currentName + "' has no SQL"
+                "Query '" + currentName + "' has no SQL"
             );
         }
 
         return new Query(
-                currentName,
-                currentType,
-                sql
+            currentName,
+            currentType,
+            sql
         );
     }
 
@@ -78,7 +76,7 @@ public final class DefaultQueryParser implements QueryParser {
 
         if (parts.length != 2) {
             throw new IllegalArgumentException(
-                    "Invalid query header: " + line
+                "Invalid query header: " + line
             );
         }
 

@@ -23,19 +23,18 @@ class GeneratedFileWriterTest {
         Path outputDirectory = tempDir.resolve("generated");
 
         GeneratedFile file = new GeneratedFile(
-                Path.of("GetUser.java"),
-                "public final class GetUser {}"
+            Path.of("GetUser.java"),
+            "public final class GetUser {}"
         );
 
         writer.write(file, outputDirectory);
 
-        Path outputFile =
-                outputDirectory.resolve("GetUser.java");
+        Path outputFile = outputDirectory.resolve("GetUser.java");
 
         assertTrue(Files.exists(outputFile));
         assertEquals(
-                "public final class GetUser {}",
-                Files.readString(outputFile)
+            "public final class GetUser {}",
+            Files.readString(outputFile)
         );
     }
 
@@ -44,19 +43,18 @@ class GeneratedFileWriterTest {
         Path outputDirectory = tempDir.resolve("generated");
 
         GeneratedFile file = new GeneratedFile(
-                Path.of("nested", "GetUser.java"),
-                "public final class GetUser {}"
+            Path.of("nested", "GetUser.java"),
+            "public final class GetUser {}"
         );
 
         writer.write(file, outputDirectory);
 
-        Path outputFile =
-                outputDirectory.resolve("nested").resolve("GetUser.java");
+        Path outputFile = outputDirectory.resolve("nested").resolve("GetUser.java");
 
         assertTrue(Files.exists(outputFile));
         assertEquals(
-                "public final class GetUser {}",
-                Files.readString(outputFile)
+            "public final class GetUser {}",
+            Files.readString(outputFile)
         );
     }
 }

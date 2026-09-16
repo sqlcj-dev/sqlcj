@@ -22,107 +22,105 @@ class YamlConfigLoaderTest {
     @Test
     void shouldMapVersionOneFields() throws IOException {
         Path configFile = write("""
-                version: "1"
-                sql:
-                  - schema: schema.sql
-                    queries: queries.sql
-                java:
-                  package: dev.example.generated
-                  out: generated
-                """);
+            version: "1"
+            sql:
+              - schema: schema.sql
+                queries: queries.sql
+            java:
+              package: dev.example.generated
+              out: generated
+            """);
 
         Config config = configLoader.load(configFile);
 
         assertEquals("1", config.version());
         assertEquals(1, config.sql().size());
         assertEquals(
-                tempDir.resolve("schema.sql").toString(),
-                config.sql().getFirst().schema()
+            tempDir.resolve("schema.sql").toString(),
+            config.sql().getFirst().schema()
         );
         assertEquals(
-                tempDir.resolve("queries.sql").toString(),
-                config.sql().getFirst().queries()
+            tempDir.resolve("queries.sql").toString(),
+            config.sql().getFirst().queries()
         );
         assertEquals(
-                "dev.example.generated",
-                config.java().packageName()
+            "dev.example.generated",
+            config.java().packageName()
         );
         assertEquals(
-                tempDir.resolve("generated").toString(),
-                config.java().out()
+            tempDir.resolve("generated").toString(),
+            config.java().out()
         );
     }
 
     @Test
     void shouldPreserveSqlEntryOrder() throws IOException {
         Path configFile = write("""
-                version: "1"
-                sql:
-                  - schema: users.sql
-                    queries: user-queries.sql
-                  - schema: orders.sql
-                    queries: order-queries.sql
-                java:
-                  package: dev.example.generated
-                  out: generated
-                """);
+            version: "1"
+            sql:
+              - schema: users.sql
+                queries: user-queries.sql
+              - schema: orders.sql
+                queries: order-queries.sql
+            java:
+              package: dev.example.generated
+              out: generated
+            """);
 
         Config config = configLoader.load(configFile);
 
         assertEquals(
-                List.of(
-                        tempDir.resolve("users.sql").toString(),
-                        tempDir.resolve("orders.sql").toString()
-                ),
-                config.sql().stream().map(SqlConfig::schema).toList()
+            List.of(
+                tempDir.resolve("users.sql").toString(),
+                tempDir.resolve("orders.sql").toString()
+            ),
+            config.sql().stream().map(SqlConfig::schema).toList()
         );
 
         assertEquals(
-                List.of(
-                        tempDir.resolve("user-queries.sql").toString(),
-                        tempDir.resolve("order-queries.sql").toString()
-                ),
-                config.sql().stream().map(SqlConfig::queries).toList()
+            List.of(
+                tempDir.resolve("user-queries.sql").toString(),
+                tempDir.resolve("order-queries.sql").toString()
+            ),
+            config.sql().stream().map(SqlConfig::queries).toList()
         );
     }
 
     @Test
-    void shouldResolveRelativePathsAgainstConfigurationDirectory()
-            throws IOException {
-
+    void shouldResolveRelativePathsAgainstConfigurationDirectory() throws IOException {
         Path configDirectory = Files.createDirectories(
-                tempDir.resolve("project").resolve("config")
+            tempDir.resolve("project").resolve("config")
         );
 
         Path configFile = configDirectory.resolve("sqlcj.yaml");
 
         Files.writeString(configFile, """
-                version: "1"
-                sql:
-                  - schema: ../sql/schema.sql
-                    queries: ./queries.sql
-                java:
-                  package: dev.example.generated
-                  out: ../target/generated
-                """);
+            version: "1"
+            sql:
+              - schema: ../sql/schema.sql
+                queries: ./queries.sql
+            java:
+              package: dev.example.generated
+              out: ../target/generated
+            """);
 
         Config config = configLoader.load(
-                Path.of(configFile.toString())
+            Path.of(configFile.toString())
         );
 
         assertEquals(
-                tempDir.resolve("project/sql/schema.sql").toString(),
-                config.sql().getFirst().schema()
+            tempDir.resolve("project/sql/schema.sql").toString(),
+            config.sql().getFirst().schema()
         );
 
         assertEquals(
-                configDirectory.resolve("queries.sql").toString(),
-                config.sql().getFirst().queries()
+            configDirectory.resolve("queries.sql").toString(),
+            config.sql().getFirst().queries()
         );
 
         assertEquals(
-                tempDir.resolve("project/target/generated").toString(),
-                config.java().out()
+            tempDir.resolve("project/target/generated").toString(),
+            config.java().out()
         );
     }
 
@@ -132,7 +130,8 @@ class YamlConfigLoaderTest {
         Path queriesFile = tempDir.resolve("absolute").resolve("queries.sql");
         Path outputDirectory = tempDir.resolve("absolute").resolve("out");
 
-        Path configFile = write("""
+        Path configFile = write(
+            """
                 version: "1"
                 sql:
                   - schema: %s
@@ -140,23 +139,25 @@ class YamlConfigLoaderTest {
                 java:
                   package: dev.example.generated
                   out: %s
-                """.formatted(schemaFile, queriesFile, outputDirectory));
+                """
+                .formatted(schemaFile, queriesFile, outputDirectory)
+        );
 
         Config config = configLoader.load(configFile);
 
         assertEquals(
-                schemaFile.toString(),
-                config.sql().getFirst().schema()
+            schemaFile.toString(),
+            config.sql().getFirst().schema()
         );
 
         assertEquals(
-                queriesFile.toString(),
-                config.sql().getFirst().queries()
+            queriesFile.toString(),
+            config.sql().getFirst().queries()
         );
 
         assertEquals(
-                outputDirectory.toString(),
-                config.java().out()
+            outputDirectory.toString(),
+            config.java().out()
         );
     }
 
@@ -165,50 +166,50 @@ class YamlConfigLoaderTest {
         Path configFile = tempDir.resolve("sqlcj.yaml");
 
         ConfigurationException exception = assertThrows(
-                ConfigurationException.class,
-                () -> configLoader.load(configFile)
+            ConfigurationException.class,
+            () -> configLoader.load(configFile)
         );
 
         assertTrue(
-                exception.getMessage().contains(
-                        "Cannot read configuration file: " + configFile
-                ),
-                exception.getMessage()
+            exception.getMessage().contains(
+                "Cannot read configuration file: " + configFile
+            ),
+            exception.getMessage()
         );
     }
 
     @Test
     void shouldRejectMalformedYaml() throws IOException {
         Path configFile = write("""
-                version: "1"
-                  sql: [
-                """);
+            version: "1"
+              sql: [
+            """);
 
         ConfigurationException exception = assertThrows(
-                ConfigurationException.class,
-                () -> configLoader.load(configFile)
+            ConfigurationException.class,
+            () -> configLoader.load(configFile)
         );
 
         assertTrue(
-                exception.getMessage().contains(
-                        "Malformed configuration file: " + configFile
-                ),
-                exception.getMessage()
+            exception.getMessage().contains(
+                "Malformed configuration file: " + configFile
+            ),
+            exception.getMessage()
         );
     }
 
     @Test
     void shouldRejectUnknownField() throws IOException {
         Path configFile = write("""
-                version: "1"
-                sql:
-                  - schema: schema.sql
-                    queries: queries.sql
-                java:
-                  package: dev.example.generated
-                  out: generated
-                  indent: 2
-                """);
+            version: "1"
+            sql:
+              - schema: schema.sql
+                queries: queries.sql
+            java:
+              package: dev.example.generated
+              out: generated
+              indent: 2
+            """);
 
         assertInvalid(configFile, "unknown field 'indent'");
     }
@@ -216,86 +217,86 @@ class YamlConfigLoaderTest {
     @Test
     void shouldRejectWrongTypedField() throws IOException {
         Path configFile = write("""
-                version: "1"
-                sql: schema.sql
-                java:
-                  package: dev.example.generated
-                  out: generated
-                """);
+            version: "1"
+            sql: schema.sql
+            java:
+              package: dev.example.generated
+              out: generated
+            """);
 
         assertInvalid(
-                configFile,
-                "invalid 'sql' value of type string, expected a list"
+            configFile,
+            "invalid 'sql' value of type string, expected a list"
         );
     }
 
     @Test
     void shouldRejectWrongTypedNestedField() throws IOException {
         Path configFile = write("""
-                version: "1"
-                sql:
-                  - schema: 42
-                    queries: queries.sql
-                java:
-                  package: dev.example.generated
-                  out: generated
-                """);
+            version: "1"
+            sql:
+              - schema: 42
+                queries: queries.sql
+            java:
+              package: dev.example.generated
+              out: generated
+            """);
 
         assertInvalid(
-                configFile,
-                "invalid 'sql[0].schema' value '42' of type number, "
-                        + "expected a string"
+            configFile,
+            "invalid 'sql[0].schema' value '42' of type number, "
+                + "expected a string"
         );
     }
 
     @Test
     void shouldRejectWrongTypedJavaOut() throws IOException {
         Path configFile = write("""
-                version: "1"
-                sql:
-                  - schema: schema.sql
-                    queries: queries.sql
-                java:
-                  package: dev.example.generated
-                  out:
-                    - generated
-                """);
+            version: "1"
+            sql:
+              - schema: schema.sql
+                queries: queries.sql
+            java:
+              package: dev.example.generated
+              out:
+                - generated
+            """);
 
         assertInvalid(
-                configFile,
-                "invalid 'java.out' value of type list, expected a string"
+            configFile,
+            "invalid 'java.out' value of type list, expected a string"
         );
     }
 
     @Test
     void shouldRejectNumericVersion() throws IOException {
         Path configFile = write("""
-                version: 1
-                sql:
-                  - schema: schema.sql
-                    queries: queries.sql
-                java:
-                  package: dev.example.generated
-                  out: generated
-                """);
+            version: 1
+            sql:
+              - schema: schema.sql
+                queries: queries.sql
+            java:
+              package: dev.example.generated
+              out: generated
+            """);
 
         assertInvalid(
-                configFile,
-                "invalid 'version' value '1' of type number, "
-                        + "expected a string"
+            configFile,
+            "invalid 'version' value '1' of type number, "
+                + "expected a string"
         );
     }
 
     @Test
     void shouldRejectMissingVersion() throws IOException {
         Path configFile = write("""
-                sql:
-                  - schema: schema.sql
-                    queries: queries.sql
-                java:
-                  package: dev.example.generated
-                  out: generated
-                """);
+            sql:
+              - schema: schema.sql
+                queries: queries.sql
+            java:
+              package: dev.example.generated
+              out: generated
+            """);
 
         assertInvalid(configFile, "'version' is required");
     }
@@ -303,29 +304,29 @@ class YamlConfigLoaderTest {
     @Test
     void shouldRejectUnsupportedVersion() throws IOException {
         Path configFile = write("""
-                version: "2"
-                sql:
-                  - schema: schema.sql
-                    queries: queries.sql
-                java:
-                  package: dev.example.generated
-                  out: generated
-                """);
+            version: "2"
+            sql:
+              - schema: schema.sql
+                queries: queries.sql
+            java:
+              package: dev.example.generated
+              out: generated
+            """);
 
         assertInvalid(
-                configFile,
-                "unsupported 'version' value '2', expected '1'"
+            configFile,
+            "unsupported 'version' value '2', expected '1'"
         );
     }
 
     @Test
     void shouldRejectMissingSqlSection() throws IOException {
         Path configFile = write("""
-                version: "1"
-                java:
-                  package: dev.example.generated
-                  out: generated
-                """);
+            version: "1"
+            java:
+              package: dev.example.generated
+              out: generated
+            """);
 
         assertInvalid(configFile, "'sql' is required");
     }
@@ -333,12 +334,12 @@ class YamlConfigLoaderTest {
     @Test
     void shouldRejectEmptySqlList() throws IOException {
         Path configFile = write("""
-                version: "1"
-                sql: []
-                java:
-                  package: dev.example.generated
-                  out: generated
-                """);
+            version: "1"
+            sql: []
+            java:
+              package: dev.example.generated
+              out: generated
+            """);
 
         assertInvalid(configFile, "'sql' must contain at least one entry");
     }
@@ -346,15 +347,15 @@ class YamlConfigLoaderTest {
     @Test
     void shouldRejectNullSqlEntry() throws IOException {
         Path configFile = write("""
-                version: "1"
-                sql:
-                  - schema: schema.sql
-                    queries: queries.sql
-                  -
-                java:
-                  package: dev.example.generated
-                  out: generated
-                """);
+            version: "1"
+            sql:
+              - schema: schema.sql
+                queries: queries.sql
+              -
+            java:
+              package: dev.example.generated
+              out: generated
+            """);
 
         assertInvalid(configFile, "'sql[1]' must not be null");
     }
@@ -362,14 +363,14 @@ class YamlConfigLoaderTest {
     @Test
     void shouldRejectBlankQueriesValue() throws IOException {
         Path configFile = write("""
-                version: "1"
-                sql:
-                  - schema: schema.sql
-                    queries: "  "
-                java:
-                  package: dev.example.generated
-                  out: generated
-                """);
+            version: "1"
+            sql:
+              - schema: schema.sql
+                queries: "  "
+            java:
+              package: dev.example.generated
+              out: generated
+            """);
 
         assertInvalid(configFile, "'sql[0].queries' must not be blank");
     }
@@ -377,11 +378,11 @@ class YamlConfigLoaderTest {
     @Test
     void shouldRejectMissingJavaSection() throws IOException {
         Path configFile = write("""
-                version: "1"
-                sql:
-                  - schema: schema.sql
-                    queries: queries.sql
-                """);
+            version: "1"
+            sql:
+              - schema: schema.sql
+                queries: queries.sql
+            """);
 
         assertInvalid(configFile, "'java' is required");
     }
@@ -389,13 +390,13 @@ class YamlConfigLoaderTest {
     @Test
     void shouldRejectMissingJavaOut() throws IOException {
         Path configFile = write("""
-                version: "1"
-                sql:
-                  - schema: schema.sql
-                    queries: queries.sql
-                java:
-                  package: dev.example.generated
-                """);
+            version: "1"
+            sql:
+              - schema: schema.sql
+                queries: queries.sql
+            java:
+              package: dev.example.generated
+            """);
 
         assertInvalid(configFile, "'java.out' is required");
     }
@@ -403,34 +404,31 @@ class YamlConfigLoaderTest {
     @Test
     void shouldRejectInvalidJavaPackage() throws IOException {
         Path configFile = write("""
-                version: "1"
-                sql:
-                  - schema: schema.sql
-                    queries: queries.sql
-                java:
-                  package: dev.class.generated
-                  out: generated
-                """);
+            version: "1"
+            sql:
+              - schema: schema.sql
+                queries: queries.sql
+            java:
+              package: dev.class.generated
+              out: generated
+            """);
 
         assertInvalid(
-                configFile,
-                "'java.package' value 'dev.class.generated' "
-                        + "is not a valid Java package name"
+            configFile,
+            "'java.package' value 'dev.class.generated' "
+                + "is not a valid Java package name"
         );
     }
 
-    private void assertInvalid(
-            Path configFile,
-            String detail
-    ) {
+    private void assertInvalid(Path configFile, String detail) {
         ConfigurationException exception = assertThrows(
-                ConfigurationException.class,
-                () -> configLoader.load(configFile)
+            ConfigurationException.class,
+            () -> configLoader.load(configFile)
         );
 
         assertEquals(
-                "Invalid configuration in %s: %s".formatted(configFile, detail),
-                exception.getMessage()
+            "Invalid configuration in %s: %s".formatted(configFile, detail),
+            exception.getMessage()
         );
     }
 

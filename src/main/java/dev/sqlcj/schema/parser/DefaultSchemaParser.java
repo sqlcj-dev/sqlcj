@@ -30,8 +30,8 @@ public class DefaultSchemaParser implements SchemaParser {
             for (Statement statement : statements) {
                 if (!(statement instanceof CreateTable createTable)) {
                     throw new UnsupportedOperationException(
-                            "Unsupported schema statement: "
-                                    + statement.getClass().getSimpleName()
+                        "Unsupported schema statement: "
+                            + statement.getClass().getSimpleName()
                     );
                 }
 
@@ -58,9 +58,9 @@ public class DefaultSchemaParser implements SchemaParser {
         constraints.addAll(parseTableConstraints(createTable));
 
         return new Table(
-                tableName,
-                columns,
-                constraints
+            tableName,
+            columns,
+            constraints
         );
     }
 
@@ -70,16 +70,16 @@ public class DefaultSchemaParser implements SchemaParser {
         boolean nullable = isNullable(definition);
 
         return new Column(
-                name,
-                type,
-                nullable
+            name,
+            type,
+            nullable
         );
     }
 
     private ColumnType parseColumnType(ColumnDefinition definition) {
         String typeName = definition.getColDataType()
-                .getDataType()
-                .toUpperCase(Locale.ROOT);
+            .getDataType()
+            .toUpperCase(Locale.ROOT);
 
         int parenthesisIndex = typeName.indexOf('(');
 
@@ -98,7 +98,7 @@ public class DefaultSchemaParser implements SchemaParser {
             case "TIMESTAMP" -> ColumnType.TIMESTAMP;
             case "DECIMAL", "NUMERIC" -> ColumnType.DECIMAL;
             default -> throw new UnsupportedOperationException(
-                    "Unsupported SQL column type: " + typeName
+                "Unsupported SQL column type: " + typeName
             );
         };
     }
@@ -111,8 +111,7 @@ public class DefaultSchemaParser implements SchemaParser {
         }
 
         for (int i = 0; i < specs.size() - 1; i++) {
-            if ("NOT".equalsIgnoreCase(specs.get(i))
-                    && "NULL".equalsIgnoreCase(specs.get(i + 1))) {
+            if ("NOT".equalsIgnoreCase(specs.get(i)) && "NULL".equalsIgnoreCase(specs.get(i + 1))) {
                 return false;
             }
         }
@@ -132,24 +131,22 @@ public class DefaultSchemaParser implements SchemaParser {
         for (int i = 0; i < specs.size(); i++) {
             String spec = specs.get(i);
 
-            if ("PRIMARY".equalsIgnoreCase(spec)
-                    && i + 1 < specs.size()
-                    && "KEY".equalsIgnoreCase(specs.get(i + 1))) {
+            if ("PRIMARY".equalsIgnoreCase(spec) && i + 1 < specs.size() && "KEY".equalsIgnoreCase(specs.get(i + 1))) {
 
                 constraints.add(
-                        new Constraint(
-                                ConstraintType.PRIMARY_KEY,
-                                List.of(definition.getColumnName())
-                        )
+                    new Constraint(
+                        ConstraintType.PRIMARY_KEY,
+                        List.of(definition.getColumnName())
+                    )
                 );
             }
 
             if ("UNIQUE".equalsIgnoreCase(spec)) {
                 constraints.add(
-                        new Constraint(
-                                ConstraintType.UNIQUE,
-                                List.of(definition.getColumnName())
-                        )
+                    new Constraint(
+                        ConstraintType.UNIQUE,
+                        List.of(definition.getColumnName())
+                    )
                 );
             }
         }
@@ -173,15 +170,15 @@ public class DefaultSchemaParser implements SchemaParser {
                 case "PRIMARY KEY" -> ConstraintType.PRIMARY_KEY;
                 case "UNIQUE" -> ConstraintType.UNIQUE;
                 default -> throw new UnsupportedOperationException(
-                        "Unsupported table constraint: " + indexType
+                    "Unsupported table constraint: " + indexType
                 );
             };
 
             constraints.add(
-                    new Constraint(
-                            type,
-                            index.getColumnsNames()
-                    )
+                new Constraint(
+                    type,
+                    index.getColumnsNames()
+                )
             );
         }
 

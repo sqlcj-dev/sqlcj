@@ -9,10 +9,7 @@ import java.nio.file.StandardOpenOption;
 
 public final class GeneratedFileWriter {
 
-    public void write(
-            GeneratedFile file,
-            Path outputDirectory
-    ) throws IOException {
+    public void write(GeneratedFile file, Path outputDirectory) throws IOException {
         Path outputFile = outputDirectory.resolve(file.path());
 
         Path parent = outputFile.getParent();
@@ -22,10 +19,10 @@ public final class GeneratedFileWriter {
         }
 
         Files.writeString(
-                outputFile,
-                file.content(),
-                StandardOpenOption.CREATE,
-                StandardOpenOption.TRUNCATE_EXISTING
+            outputFile,
+            file.content(),
+            StandardOpenOption.CREATE,
+            StandardOpenOption.TRUNCATE_EXISTING
         );
     }
 }

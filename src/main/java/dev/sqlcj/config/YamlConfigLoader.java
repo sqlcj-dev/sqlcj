@@ -21,25 +21,25 @@ import java.util.Map;
 public class YamlConfigLoader implements ConfigLoader {
 
     private static final ObjectMapper OBJECT_MAPPER = YAMLMapper.builder()
-            .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
-            .withCoercionConfig(
-                    LogicalType.Textual,
-                    coercion -> {
-                        coercion.setCoercion(
-                                CoercionInputShape.Integer,
-                                CoercionAction.Fail
-                        );
-                        coercion.setCoercion(
-                                CoercionInputShape.Float,
-                                CoercionAction.Fail
-                        );
-                        coercion.setCoercion(
-                                CoercionInputShape.Boolean,
-                                CoercionAction.Fail
-                        );
-                    }
-            )
-            .build();
+        .enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+        .withCoercionConfig(
+            LogicalType.Textual,
+            coercion -> {
+                coercion.setCoercion(
+                    CoercionInputShape.Integer,
+                    CoercionAction.Fail
+                );
+                coercion.setCoercion(
+                    CoercionInputShape.Float,
+                    CoercionAction.Fail
+                );
+                coercion.setCoercion(
+                    CoercionInputShape.Boolean,
+                    CoercionAction.Fail
+                );
+            }
+        )
+        .build();
 
     private final ConfigValidator validator = new ConfigValidator();
 
@@ -57,7 +57,7 @@ public class YamlConfigLoader implements ConfigLoader {
     private Config read(Path configFile) {
         if (!Files.isReadable(configFile)) {
             throw new ConfigurationException(
-                    "Cannot read configuration file: " + configFile
+                "Cannot read configuration file: " + configFile
             );
         }
 
@@ -67,22 +67,22 @@ public class YamlConfigLoader implements ConfigLoader {
             config = OBJECT_MAPPER.readValue(configFile.toFile(), Config.class);
         } catch (UnrecognizedPropertyException e) {
             throw new ConfigurationException(
-                    "Invalid configuration in %s: unknown field '%s'"
-                            .formatted(configFile, e.getPropertyName()),
-                    e
+                "Invalid configuration in %s: unknown field '%s'"
+                    .formatted(configFile, e.getPropertyName()),
+                e
             );
         } catch (MismatchedInputException e) {
             throw invalidValue(configFile, e);
         } catch (JacksonException e) {
             throw new ConfigurationException(
-                    "Malformed configuration file: " + configFile,
-                    e
+                "Malformed configuration file: " + configFile,
+                e
             );
         }
 
         if (config == null) {
             throw new ConfigurationException(
-                    "Configuration file is empty: " + configFile
+                "Configuration file is empty: " + configFile
             );
         }
 
@@ -94,10 +94,7 @@ public class YamlConfigLoader implements ConfigLoader {
      * naming the configuration file, the offending property path, and the
      * offending value or type as far as Jackson reports them.
      */
-    private ConfigurationException invalidValue(
-            Path configFile,
-            MismatchedInputException e
-    ) {
+    private ConfigurationException invalidValue(Path configFile, MismatchedInputException e) {
         StringBuilder detail = new StringBuilder("invalid ");
 
         String property = propertyPath(e);
@@ -108,8 +105,7 @@ public class YamlConfigLoader implements ConfigLoader {
 
         detail.append("value");
 
-        if (e instanceof InvalidFormatException format
-                && format.getValue() != null) {
+        if (e instanceof InvalidFormatException format && format.getValue() != null) {
             detail.append(" '").append(format.getValue()).append("'");
         }
 
@@ -126,8 +122,8 @@ public class YamlConfigLoader implements ConfigLoader {
         }
 
         return new ConfigurationException(
-                "Invalid configuration in %s: %s".formatted(configFile, detail),
-                e
+            "Invalid configuration in %s: %s".formatted(configFile, detail),
+            e
         );
     }
 
@@ -185,29 +181,25 @@ public class YamlConfigLoader implements ConfigLoader {
         return "a value of type " + targetType.getSimpleName();
     }
 
-    private Config resolvePaths(
-            Config config,
-            Path baseDirectory
-    ) {
+    private Config resolvePaths(Config config, Path baseDirectory) {
         List<SqlConfig> sql = config.sql().stream()
-                .map(entry -> new SqlConfig(
-                        resolvePath(entry.schema(), baseDirectory),
-                        resolvePath(entry.queries(), baseDirectory)
-                ))
-                .toList();
+            .map(
+                entry -> new SqlConfig(
+                    resolvePath(entry.schema(), baseDirectory),
+                    resolvePath(entry.queries(), baseDirectory)
+                )
+            )
+            .toList();
 
         JavaConfig java = new JavaConfig(
-                resolvePath(config.java().out(), baseDirectory),
-                config.java().packageName()
+            resolvePath(config.java().out(), baseDirectory),
+            config.java().packageName()
         );
 
         return new Config(config.version(), sql, java);
     }
 
-    private String resolvePath(
-            String value,
-            Path baseDirectory
-    ) {
+    private String resolvePath(String value, Path baseDirectory) {
         Path path = Path.of(value);
 
         if (path.isAbsolute()) {

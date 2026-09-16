@@ -7,13 +7,16 @@ import dev.sqlcj.config.ConfigLoader;
 import dev.sqlcj.config.ConfigurationException;
 import dev.sqlcj.config.YamlConfigLoader;
 import picocli.CommandLine;
+import picocli.CommandLine.Command;
+import picocli.CommandLine.Model.CommandSpec;
+import picocli.CommandLine.Spec;
 
 import java.nio.file.Path;
 import java.util.concurrent.Callable;
 
-@CommandLine.Command(
-        name = "generate",
-        description = "Generate Java sources from SQL queries"
+@Command(
+    name = "generate",
+    description = "Generate Java sources from SQL queries"
 )
 public class GenerateCommand implements Callable<Integer> {
 
@@ -21,8 +24,8 @@ public class GenerateCommand implements Callable<Integer> {
 
     private final ConfigLoader configLoader = new YamlConfigLoader();
 
-    @CommandLine.Spec
-    CommandLine.Model.CommandSpec spec;
+    @Spec
+    CommandSpec spec;
 
     @Override
     public Integer call() {
@@ -33,8 +36,8 @@ public class GenerateCommand implements Callable<Integer> {
             return CommandLine.ExitCode.OK;
         } catch (ConfigurationException | CompilationException e) {
             spec.commandLine()
-                    .getErr()
-                    .println("sqlcj: " + e.getMessage());
+                .getErr()
+                .println("sqlcj: " + e.getMessage());
 
             return CommandLine.ExitCode.SOFTWARE;
         }

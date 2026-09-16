@@ -21,12 +21,12 @@ class DefaultSchemaParserTest {
     @Test
     void shouldParseTable() {
         String sql = """
-                CREATE TABLE users (
-                    id BIGINT NOT NULL,
-                    name VARCHAR(255),
-                    active BOOLEAN
-                );
-                """;
+            CREATE TABLE users (
+                id BIGINT NOT NULL,
+                name VARCHAR(255),
+                active BOOLEAN
+            );
+            """;
 
         Schema schema = parser.parse(sql);
 
@@ -53,18 +53,18 @@ class DefaultSchemaParserTest {
         Table table = schema.tables().getFirst();
 
         assertEquals(
-                new Column("id", ColumnType.BIGINT, false),
-                table.columns().get(0)
+            new Column("id", ColumnType.BIGINT, false),
+            table.columns().get(0)
         );
 
         assertEquals(
-                new Column("name", ColumnType.VARCHAR, true),
-                table.columns().get(1)
+            new Column("name", ColumnType.VARCHAR, true),
+            table.columns().get(1)
         );
 
         assertEquals(
-                new Column("active", ColumnType.BOOLEAN, true),
-                table.columns().get(2)
+            new Column("active", ColumnType.BOOLEAN, true),
+            table.columns().get(2)
         );
     }
 
@@ -84,17 +84,17 @@ class DefaultSchemaParserTest {
         Table table = schema.tables().getFirst();
 
         assertEquals(
-                List.of(
-                        new Constraint(
-                                ConstraintType.PRIMARY_KEY,
-                                List.of("id")
-                        ),
-                        new Constraint(
-                                ConstraintType.UNIQUE,
-                                List.of("email")
-                        )
+            List.of(
+                new Constraint(
+                    ConstraintType.PRIMARY_KEY,
+                    List.of("id")
                 ),
-                table.constraints()
+                new Constraint(
+                    ConstraintType.UNIQUE,
+                    List.of("email")
+                )
+            ),
+            table.constraints()
         );
     }
 
@@ -122,8 +122,8 @@ class DefaultSchemaParserTest {
             """;
 
         assertThrows(
-                SchemaParseException.class,
-                () -> parser.parse(sql)
+            SchemaParseException.class,
+            () -> parser.parse(sql)
         );
     }
 }

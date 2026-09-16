@@ -3,7 +3,7 @@ package dev.sqlcj.schema;
 import java.util.List;
 
 public record Schema(
-        List<Table> tables
+    List<Table> tables
 ) {
 
     public Schema {

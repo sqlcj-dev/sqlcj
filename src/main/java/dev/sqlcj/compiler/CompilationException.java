@@ -9,10 +9,7 @@ public class CompilationException extends RuntimeException {
         super(message);
     }
 
-    public CompilationException(
-            String message,
-            Throwable cause
-    ) {
+    public CompilationException(String message, Throwable cause) {
         super(message, cause);
     }
 }

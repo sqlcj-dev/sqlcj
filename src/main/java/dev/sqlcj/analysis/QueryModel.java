@@ -14,12 +14,12 @@ import java.util.List;
  * @param parameters               query parameters in logical placeholder-index order
  */
 public record QueryModel(
-        String name,
-        QueryType type,
-        String table,
-        String executableSql,
-        List<Integer> bindingParameterIndexes,
-        List<QueryColumn> columns,
-        List<QueryParameter> parameters
+    String name,
+    QueryType type,
+    String table,
+    String executableSql,
+    List<Integer> bindingParameterIndexes,
+    List<QueryColumn> columns,
+    List<QueryParameter> parameters
 ) {
 }
