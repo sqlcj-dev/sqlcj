@@ -15,11 +15,11 @@ class DefaultQueryParserTest {
     @Test
     void parsesSingleQuery() {
         String source = """
-                -- name: GetUser :one
-                SELECT *
-                FROM users
-                WHERE id = $1;
-                """;
+            -- name: GetUser :one
+            SELECT *
+            FROM users
+            WHERE id = $1;
+            """;
 
         List<Query> queries = parser.parse(source);
 
@@ -30,24 +30,24 @@ class DefaultQueryParserTest {
         assertEquals("GetUser", query.name());
         assertEquals(QueryType.ONE, query.type());
         assertEquals("""
-                SELECT *
-                FROM users
-                WHERE id = $1;
-                """.trim(), query.sql());
+            SELECT *
+            FROM users
+            WHERE id = $1;
+            """.trim(), query.sql());
     }
 
     @Test
     void parsesMultipleQueries() {
         String source = """
-                -- name: GetUser :one
-                SELECT *
-                FROM users
-                WHERE id = $1;
-                
-                -- name: ListUsers :many
-                SELECT *
-                FROM users;
-                """;
+            -- name: GetUser :one
+            SELECT *
+            FROM users
+            WHERE id = $1;
+
+            -- name: ListUsers :many
+            SELECT *
+            FROM users;
+            """;
 
         List<Query> queries = parser.parse(source);
 
@@ -65,10 +65,10 @@ class DefaultQueryParserTest {
     @Test
     void parsesExecQueryType() {
         String source = """
-                -- name: DeleteUser :exec
-                DELETE FROM users
-                WHERE id = $1;
-                """;
+            -- name: DeleteUser :exec
+            DELETE FROM users
+            WHERE id = $1;
+            """;
 
         List<Query> queries = parser.parse(source);
 
@@ -79,69 +79,69 @@ class DefaultQueryParserTest {
     @Test
     void rejectsInvalidQueryType() {
         String source = """
-                -- name: GetUser :invalid
-                SELECT *
-                FROM users;
-                """;
+            -- name: GetUser :invalid
+            SELECT *
+            FROM users;
+            """;
 
         IllegalArgumentException exception = assertThrows(
-                IllegalArgumentException.class,
-                () -> parser.parse(source)
+            IllegalArgumentException.class,
+            () -> parser.parse(source)
         );
 
         assertEquals(
-                "Unknown query type: :invalid",
-                exception.getMessage()
+            "Unknown query type: :invalid",
+            exception.getMessage()
         );
     }
 
     @Test
     void rejectsDuplicateQueryNames() {
         String source = """
-                -- name: GetUser :one
-                SELECT *
-                FROM users
-                WHERE id = $1;
-                
-                -- name: GetUser :many
-                SELECT *
-                FROM users;
-                """;
+            -- name: GetUser :one
+            SELECT *
+            FROM users
+            WHERE id = $1;
+
+            -- name: GetUser :many
+            SELECT *
+            FROM users;
+            """;
 
         IllegalArgumentException exception = assertThrows(
-                IllegalArgumentException.class,
-                () -> parser.parse(source)
+            IllegalArgumentException.class,
+            () -> parser.parse(source)
         );
 
         assertEquals(
-                "Duplicate query: GetUser",
-                exception.getMessage()
+            "Duplicate query: GetUser",
+            exception.getMessage()
         );
     }
 
     @Test
     void rejectsQueryWithoutSql() {
         String source = """
-                -- name: GetUser :one
-                """;
+            -- name: GetUser :one
+            """;
 
         IllegalArgumentException exception = assertThrows(
-                IllegalArgumentException.class,
-                () -> parser.parse(source)
+            IllegalArgumentException.class,
+            () -> parser.parse(source)
         );
 
         assertEquals(
-                "Query 'GetUser' has no SQL",
-                exception.getMessage()
+            "Query 'GetUser' has no SQL",
+            exception.getMessage()
         );
     }
 
     @Test
     void returnsEmptyListWhenNoQueriesExist() {
         String source = """
-                SELECT *
-                FROM users;
-                """;
+            SELECT *
+            FROM users;
+            """;
 
         List<Query> queries = parser.parse(source);
 
@@ -151,19 +151,19 @@ class DefaultQueryParserTest {
     @Test
     void rejectsInvalidHeader() {
         String source = """
-                -- name:
-                SELECT *
-                FROM users;
-                """;
+            -- name:
+            SELECT *
+            FROM users;
+            """;
 
         IllegalArgumentException exception = assertThrows(
-                IllegalArgumentException.class,
-                () -> parser.parse(source)
+            IllegalArgumentException.class,
+            () -> parser.parse(source)
         );
 
         assertEquals(
-                "Invalid query header: -- name:",
-                exception.getMessage()
+            "Invalid query header: -- name:",
+            exception.getMessage()
         );
     }
 
@@ -172,10 +172,10 @@ class DefaultQueryParserTest {
         String source = """
             -- name: First :one
             SELECT 1;
-            
+
             -- name: Second :one
             SELECT 2;
-            
+
             -- name: Third :one
             SELECT 3;
             """;

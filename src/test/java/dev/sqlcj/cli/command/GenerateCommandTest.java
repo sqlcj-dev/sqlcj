@@ -19,19 +19,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class GenerateCommandTest {
 
     private static final String SCHEMA = """
-            CREATE TABLE users
-            (
-                id   BIGINT NOT NULL,
-                name VARCHAR(255)
-            );
-            """;
+        CREATE TABLE users
+        (
+            id   BIGINT NOT NULL,
+            name VARCHAR(255)
+        );
+        """;
 
     private static final String QUERIES = """
-            -- name: GetUser :one
-            SELECT id, name
-            FROM users
-            WHERE id = $1;
-            """;
+        -- name: GetUser :one
+        SELECT id, name
+        FROM users
+        WHERE id = $1;
+        """;
 
     @TempDir
     Path workingDirectory;
@@ -41,8 +41,8 @@ class GenerateCommandTest {
         Files.writeString(workingDirectory.resolve("schema.sql"), SCHEMA);
         Files.writeString(workingDirectory.resolve("queries.sql"), QUERIES);
         Files.writeString(
-                workingDirectory.resolve("sqlcj.yaml"),
-                """
+            workingDirectory.resolve("sqlcj.yaml"),
+            """
                 version: "1"
                 sql:
                   - schema: schema.sql
@@ -57,25 +57,21 @@ class GenerateCommandTest {
 
         assertEquals(0, result.exitCode(), result.error());
 
-        Path generated = workingDirectory.resolve(
-                "generated/dev/example/generated/GetUser.java"
-        );
+        Path generated = workingDirectory.resolve("generated/dev/example/generated/GetUser.java");
 
         assertTrue(Files.exists(generated), result.error());
 
         assertTrue(
-                Files.readString(generated)
-                        .startsWith("package dev.example.generated;")
+            Files.readString(generated)
+                .startsWith("package dev.example.generated;")
         );
     }
 
     @Test
-    void shouldFailWithConciseDiagnosticForMalformedConfiguration()
-            throws Exception {
-
+    void shouldFailWithConciseDiagnosticForMalformedConfiguration() throws Exception {
         Files.writeString(
-                workingDirectory.resolve("sqlcj.yaml"),
-                """
+            workingDirectory.resolve("sqlcj.yaml"),
+            """
                 version: "1"
                 sql:
                   - schema: schema.sql
@@ -95,13 +91,11 @@ class GenerateCommandTest {
     }
 
     @Test
-    void shouldFailWithConciseDiagnosticForUnreadableSource()
-            throws Exception {
-
+    void shouldFailWithConciseDiagnosticForUnreadableSource() throws Exception {
         Files.writeString(workingDirectory.resolve("schema.sql"), SCHEMA);
         Files.writeString(
-                workingDirectory.resolve("sqlcj.yaml"),
-                """
+            workingDirectory.resolve("sqlcj.yaml"),
+            """
                 version: "1"
                 sql:
                   - schema: schema.sql
@@ -117,9 +111,9 @@ class GenerateCommandTest {
         assertEquals(1, result.exitCode(), result.error());
         assertTrue(result.error().contains("sqlcj: Cannot read queries source"));
         assertTrue(
-                result.error().contains(
-                        workingDirectory.resolve("missing.sql").toString()
-                )
+            result.error().contains(
+                workingDirectory.resolve("missing.sql").toString()
+            )
         );
         assertFalse(result.error().contains("\tat "));
         assertFalse(Files.exists(workingDirectory.resolve("generated")));
@@ -129,30 +123,30 @@ class GenerateCommandTest {
         Path java = Path.of(System.getProperty("java.home"), "bin", "java");
 
         Process process = new ProcessBuilder(
-                java.toString(),
-                "-classpath",
-                System.getProperty("java.class.path"),
-                "dev.sqlcj.Main",
-                "generate"
+            java.toString(),
+            "-classpath",
+            System.getProperty("java.class.path"),
+            "dev.sqlcj.Main",
+            "generate"
         )
-                .directory(workingDirectory.toFile())
-                .start();
+            .directory(workingDirectory.toFile())
+            .start();
 
         String output = new String(process.getInputStream().readAllBytes());
         String error = new String(process.getErrorStream().readAllBytes());
 
         assertTrue(
-                process.waitFor(60, TimeUnit.SECONDS),
-                "sqlcj generate did not terminate"
+            process.waitFor(60, TimeUnit.SECONDS),
+            "sqlcj generate did not terminate"
         );
 
         return new Result(process.exitValue(), output, error);
     }
 
     private record Result(
-            int exitCode,
-            String output,
-            String error
+        int exitCode,
+        String output,
+        String error
     ) {
     }
 }

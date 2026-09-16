@@ -1,11 +1,11 @@
 package dev.sqlcj.cli.command;
 
 import dev.sqlcj.Main;
-import picocli.CommandLine;
+import picocli.CommandLine.Command;
 
-@CommandLine.Command(
-        name = "version",
-        description = "Print SQLCJ version"
+@Command(
+    name = "version",
+    description = "Print SQLCJ version"
 )
 public class VersionCommand implements Runnable {
 

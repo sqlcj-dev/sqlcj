@@ -35,8 +35,8 @@ public final class DefaultSourceLoader implements SourceLoader {
             for (Query query : queries) {
                 if (!queryNames.add(query.name())) {
                     throw new CompilationException(
-                            "Duplicate query name '%s' in query source: %s"
-                                    .formatted(query.name(), queriesPath)
+                        "Duplicate query name '%s' in query source: %s"
+                            .formatted(query.name(), queriesPath)
                     );
                 }
             }
@@ -47,30 +47,24 @@ public final class DefaultSourceLoader implements SourceLoader {
         return sources;
     }
 
-    private String read(
-            Path path,
-            String kind
-    ) {
+    private String read(Path path, String kind) {
         try {
             return fileLoader.read(path);
         } catch (IOException e) {
             throw new CompilationException(
-                    "Cannot read %s source: %s".formatted(kind, path),
-                    e
+                "Cannot read %s source: %s".formatted(kind, path),
+                e
             );
         }
     }
 
-    private List<Query> parse(
-            String querySource,
-            Path queriesPath
-    ) {
+    private List<Query> parse(String querySource, Path queriesPath) {
         try {
             return queryParser.parse(querySource);
         } catch (IllegalArgumentException e) {
             throw new CompilationException(
-                    "Invalid query source %s: %s".formatted(queriesPath, e.getMessage()),
-                    e
+                "Invalid query source %s: %s".formatted(queriesPath, e.getMessage()),
+                e
             );
         }
     }

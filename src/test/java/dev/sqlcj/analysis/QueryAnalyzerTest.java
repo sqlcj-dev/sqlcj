@@ -21,17 +21,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class QueryAnalyzerTest {
 
     private static final Schema schema = new Schema(
-            List.of(
-                    new Table(
-                            "users",
-                            List.of(
-                                    new Column("id", ColumnType.BIGINT, false),
-                                    new Column("name", ColumnType.VARCHAR, true),
-                                    new Column("active", ColumnType.BOOLEAN, true)
-                            ),
-                            List.of()
-                    )
+        List.of(
+            new Table(
+                "users",
+                List.of(
+                    new Column("id", ColumnType.BIGINT, false),
+                    new Column("name", ColumnType.VARCHAR, true),
+                    new Column("active", ColumnType.BOOLEAN, true)
+                ),
+                List.of()
             )
+        )
     );
 
     private final SqlParser parser = new SqlParser();
@@ -40,9 +40,9 @@ class QueryAnalyzerTest {
     @Test
     void shouldAnalyzeSelectWithoutParameters() {
         Query query = new Query(
-                "ListUsers",
-                QueryType.MANY,
-                """
+            "ListUsers",
+            QueryType.MANY,
+            """
                 SELECT *
                 FROM users;
                 """
@@ -60,9 +60,9 @@ class QueryAnalyzerTest {
     @Test
     void shouldAnalyzeSelectWithSingleParameter() {
         Query query = new Query(
-                "GetUser",
-                QueryType.ONE,
-                """
+            "GetUser",
+            QueryType.ONE,
+            """
                 SELECT *
                 FROM users
                 WHERE id = $1;
@@ -74,19 +74,19 @@ class QueryAnalyzerTest {
 
         assertEquals("users", model.table());
         assertEquals(
-                List.of(
-                        new QueryParameter(1, "id", ColumnType.BIGINT)
-                ),
-                model.parameters()
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT)
+            ),
+            model.parameters()
         );
     }
 
     @Test
     void shouldAnalyzeSelectWithMultipleParameters() {
         Query query = new Query(
-                "ListUsersByIdAndName",
-                QueryType.MANY,
-                """
+            "ListUsersByIdAndName",
+            QueryType.MANY,
+            """
                 SELECT *
                 FROM users
                 WHERE id = $1
@@ -99,20 +99,20 @@ class QueryAnalyzerTest {
 
         assertEquals("users", model.table());
         assertEquals(
-                List.of(
-                        new QueryParameter(1, "id", ColumnType.BIGINT),
-                        new QueryParameter(2, "name", ColumnType.VARCHAR)
-                ),
-                model.parameters()
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR)
+            ),
+            model.parameters()
         );
     }
 
     @Test
     void shouldRejectInsertStatements() {
         Query query = new Query(
-                "InsertUser",
-                QueryType.EXEC,
-                """
+            "InsertUser",
+            QueryType.EXEC,
+            """
                 INSERT INTO users(id)
                 VALUES ($1);
                 """
@@ -120,24 +120,23 @@ class QueryAnalyzerTest {
 
         Statement statement = parser.parse(query.sql());
 
-        UnsupportedOperationException exception =
-                assertThrows(
-                        UnsupportedOperationException.class,
-                        () -> analyzer.analyze(query, statement, schema)
-                );
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, statement, schema)
+        );
 
         assertEquals(
-                "INSERT is not supported yet",
-                exception.getMessage()
+            "INSERT is not supported yet",
+            exception.getMessage()
         );
     }
 
     @Test
     void shouldRejectUpdateStatements() {
         Query query = new Query(
-                "UpdateUser",
-                QueryType.EXEC,
-                """
+            "UpdateUser",
+            QueryType.EXEC,
+            """
                 UPDATE users
                 SET username = $2
                 WHERE id = $1;
@@ -146,24 +145,23 @@ class QueryAnalyzerTest {
 
         Statement statement = parser.parse(query.sql());
 
-        UnsupportedOperationException exception =
-                assertThrows(
-                        UnsupportedOperationException.class,
-                        () -> analyzer.analyze(query, statement, schema)
-                );
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, statement, schema)
+        );
 
         assertEquals(
-                "UPDATE is not supported yet",
-                exception.getMessage()
+            "UPDATE is not supported yet",
+            exception.getMessage()
         );
     }
 
     @Test
     void shouldRejectDeleteStatements() {
         Query query = new Query(
-                "DeleteUser",
-                QueryType.EXEC,
-                """
+            "DeleteUser",
+            QueryType.EXEC,
+            """
                 DELETE users
                 WHERE id = $1;
                 """
@@ -171,32 +169,31 @@ class QueryAnalyzerTest {
 
         Statement statement = parser.parse(query.sql());
 
-        UnsupportedOperationException exception =
-                assertThrows(
-                        UnsupportedOperationException.class,
-                        () -> analyzer.analyze(query, statement, schema)
-                );
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, statement, schema)
+        );
 
         assertEquals(
-                "DELETE is not supported yet",
-                exception.getMessage()
+            "DELETE is not supported yet",
+            exception.getMessage()
         );
     }
 
     @Test
     void shouldAnalyzeSelectWithExplicitColumns() {
         Query query = new Query(
-                "GetUser",
-                QueryType.ONE,
-                "SELECT id, name FROM users WHERE id = $1"
+            "GetUser",
+            QueryType.ONE,
+            "SELECT id, name FROM users WHERE id = $1"
         );
 
         Statement statement = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
-                query,
-                statement,
-                schema
+            query,
+            statement,
+            schema
         );
 
         assertEquals("GetUser", model.name());
@@ -204,37 +201,37 @@ class QueryAnalyzerTest {
         assertEquals("users", model.table());
 
         assertEquals(
-                List.of(
-                        new QueryColumn("id", ColumnType.BIGINT, false),
-                        new QueryColumn("name", ColumnType.VARCHAR, true)
-                ),
-                model.columns()
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
         );
     }
 
     @Test
     void shouldResolveAllColumns() {
         Query query = new Query(
-                "ListUsers",
-                QueryType.MANY,
-                "SELECT * FROM users"
+            "ListUsers",
+            QueryType.MANY,
+            "SELECT * FROM users"
         );
 
         Statement statement = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
-                query,
-                statement,
-                schema
+            query,
+            statement,
+            schema
         );
 
         assertEquals(
-                List.of(
-                        new QueryColumn("id", ColumnType.BIGINT, false),
-                        new QueryColumn("name", ColumnType.VARCHAR, true),
-                        new QueryColumn("active", ColumnType.BOOLEAN, true)
-                ),
-                model.columns()
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true),
+                new QueryColumn("active", ColumnType.BOOLEAN, true)
+            ),
+            model.columns()
         );
 
         assertTrue(model.parameters().isEmpty());
@@ -243,71 +240,71 @@ class QueryAnalyzerTest {
     @Test
     void shouldResolveParameterTypeFromColumn() {
         Query query = new Query(
-                "GetUser",
-                QueryType.ONE,
-                "SELECT * FROM users WHERE id = $1"
+            "GetUser",
+            QueryType.ONE,
+            "SELECT * FROM users WHERE id = $1"
         );
 
         Statement statement = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
-                query,
-                statement,
-                schema
+            query,
+            statement,
+            schema
         );
 
         assertEquals(
-                List.of(
-                        new QueryParameter(1, "id", ColumnType.BIGINT)
-                ),
-                model.parameters()
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT)
+            ),
+            model.parameters()
         );
     }
 
     @Test
     void shouldResolveMultipleParameters() {
         Query query = new Query(
-                "ListUsersByIdAndName",
-                QueryType.MANY,
+            "ListUsersByIdAndName",
+            QueryType.MANY,
+            """
+                SELECT *
+                FROM users
+                WHERE id = $1
+                  AND name = $2
                 """
-                        SELECT *
-                        FROM users
-                        WHERE id = $1
-                          AND name = $2
-                        """
         );
 
         Statement statement = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
-                query,
-                statement,
-                schema
+            query,
+            statement,
+            schema
         );
 
         assertEquals(
-                List.of(
-                        new QueryParameter(1, "id", ColumnType.BIGINT),
-                        new QueryParameter(2, "name", ColumnType.VARCHAR)
-                ),
-                model.parameters()
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR)
+            ),
+            model.parameters()
         );
     }
 
     @Test
     void shouldNotCreateParametersForLiteralExpressions() {
         Query query = new Query(
-                "ListUsers",
-                QueryType.MANY,
-                "SELECT * FROM users WHERE 1 = 1"
+            "ListUsers",
+            QueryType.MANY,
+            "SELECT * FROM users WHERE 1 = 1"
         );
 
         Statement statement = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
-                query,
-                statement,
-                schema
+            query,
+            statement,
+            schema
         );
 
         assertTrue(model.parameters().isEmpty());
@@ -316,49 +313,49 @@ class QueryAnalyzerTest {
     @Test
     void shouldThrowWhenTableDoesNotExist() {
         Query query = new Query(
-                "GetOrder",
-                QueryType.ONE,
-                "SELECT * FROM orders"
+            "GetOrder",
+            QueryType.ONE,
+            "SELECT * FROM orders"
         );
 
         Statement statement = parser.parse(query.sql());
 
         assertThrows(
-                IllegalArgumentException.class,
-                () -> analyzer.analyze(query, statement, schema)
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, statement, schema)
         );
     }
 
     @Test
     void shouldThrowWhenColumnDoesNotExist() {
         Query query = new Query(
-                "GetUser",
-                QueryType.ONE,
-                "SELECT username FROM users"
+            "GetUser",
+            QueryType.ONE,
+            "SELECT username FROM users"
         );
 
         Statement statement = parser.parse(query.sql());
 
         assertThrows(
-                IllegalArgumentException.class,
-                () -> analyzer.analyze(query, statement, schema)
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, statement, schema)
         );
     }
 
     @Test
     void shouldResolveQueryParameterFromReferencedColumn() {
         Query query = new Query(
-                "GetUser",
-                QueryType.ONE,
-                "SELECT * FROM users WHERE id = $1"
+            "GetUser",
+            QueryType.ONE,
+            "SELECT * FROM users WHERE id = $1"
         );
 
         Statement statement = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
-                query,
-                statement,
-                schema
+            query,
+            statement,
+            schema
         );
 
         assertEquals(1, model.parameters().size());
@@ -373,17 +370,17 @@ class QueryAnalyzerTest {
     @Test
     void shouldResolveMultipleQueryParameters() {
         Query query = new Query(
-                "FindUsers",
-                QueryType.MANY,
-                "SELECT * FROM users WHERE id = $1 AND active = $2"
+            "FindUsers",
+            QueryType.MANY,
+            "SELECT * FROM users WHERE id = $1 AND active = $2"
         );
 
         Statement statement = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
-                query,
-                statement,
-                schema
+            query,
+            statement,
+            schema
         );
 
         assertEquals(2, model.parameters().size());
@@ -402,17 +399,17 @@ class QueryAnalyzerTest {
     @Test
     void shouldResolveMultipleParametersForSameColumn() {
         Query query = new Query(
-                "FindUsers",
-                QueryType.MANY,
-                "SELECT * FROM users WHERE id = $1 AND id = $2"
+            "FindUsers",
+            QueryType.MANY,
+            "SELECT * FROM users WHERE id = $1 AND id = $2"
         );
 
         Statement statement = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
-                query,
-                statement,
-                schema
+            query,
+            statement,
+            schema
         );
 
         assertEquals(2, model.parameters().size());
@@ -431,17 +428,17 @@ class QueryAnalyzerTest {
     @Test
     void shouldResolveQueryParametersInIndexOrder() {
         Query query = new Query(
-                "FindUser",
-                QueryType.ONE,
-                "SELECT * FROM users WHERE active = $2 AND id = $1"
+            "FindUser",
+            QueryType.ONE,
+            "SELECT * FROM users WHERE active = $2 AND id = $1"
         );
 
         Statement statement = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
-                query,
-                statement,
-                schema
+            query,
+            statement,
+            schema
         );
 
         assertEquals(2, model.parameters().size());
@@ -460,17 +457,17 @@ class QueryAnalyzerTest {
     @Test
     void shouldResolveQueryParametersInsideOrExpression() {
         Query query = new Query(
-                "FindUsers",
-                QueryType.MANY,
-                "SELECT * FROM users WHERE id = $1 OR active = $2"
+            "FindUsers",
+            QueryType.MANY,
+            "SELECT * FROM users WHERE id = $1 OR active = $2"
         );
 
         Statement statement = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
-                query,
-                statement,
-                schema
+            query,
+            statement,
+            schema
         );
 
         assertEquals(2, model.parameters().size());
@@ -489,9 +486,9 @@ class QueryAnalyzerTest {
     @Test
     void shouldResolveQueryParametersInsideNestedAndOrExpressions() {
         Query query = new Query(
-                "FindUsers",
-                QueryType.MANY,
-                """
+            "FindUsers",
+            QueryType.MANY,
+            """
                 SELECT *
                 FROM users
                 WHERE id = $1
@@ -502,9 +499,9 @@ class QueryAnalyzerTest {
         Statement statement = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
-                query,
-                statement,
-                schema
+            query,
+            statement,
+            schema
         );
 
         assertEquals(3, model.parameters().size());
@@ -528,9 +525,9 @@ class QueryAnalyzerTest {
     @Test
     void shouldResolveQueryParametersForComparisonOperators() {
         Query query = new Query(
-                "FindUsers",
-                QueryType.MANY,
-                """
+            "FindUsers",
+            QueryType.MANY,
+            """
                 SELECT *
                 FROM users
                 WHERE id > $1
@@ -541,9 +538,9 @@ class QueryAnalyzerTest {
         Statement statement = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
-                query,
-                statement,
-                schema
+            query,
+            statement,
+            schema
         );
 
         assertEquals(2, model.parameters().size());
@@ -560,33 +557,36 @@ class QueryAnalyzerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {
+    @ValueSource(
+        strings = {
             "=",
             "<>",
             ">",
             ">=",
             "<",
             "<="
-    })
+        }
+    )
     void shouldResolveQueryParameterForComparisonOperator(
-            String operator
+        String operator
     ) {
         Query query = new Query(
-                "FindUser",
-                QueryType.ONE,
-                """
+            "FindUser",
+            QueryType.ONE,
+            """
                 SELECT *
                 FROM users
                 WHERE id %s $1
-                """.formatted(operator)
+                """
+                .formatted(operator)
         );
 
         Statement statement = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
-                query,
-                statement,
-                schema
+            query,
+            statement,
+            schema
         );
 
         assertEquals(1, model.parameters().size());
@@ -601,17 +601,17 @@ class QueryAnalyzerTest {
     @Test
     void shouldResolveQueryParameterWhenParameterIsOnLeftSide() {
         Query query = new Query(
-                "FindUser",
-                QueryType.ONE,
-                "SELECT * FROM users WHERE $1 = id"
+            "FindUser",
+            QueryType.ONE,
+            "SELECT * FROM users WHERE $1 = id"
         );
 
         Statement statement = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
-                query,
-                statement,
-                schema
+            query,
+            statement,
+            schema
         );
 
         assertEquals(1, model.parameters().size());
@@ -626,17 +626,17 @@ class QueryAnalyzerTest {
     @Test
     void shouldResolveQueryParametersInsideInExpression() {
         Query query = new Query(
-                "FindUsers",
-                QueryType.MANY,
-                "SELECT * FROM users WHERE id IN ($1, $2, $3)"
+            "FindUsers",
+            QueryType.MANY,
+            "SELECT * FROM users WHERE id IN ($1, $2, $3)"
         );
 
         Statement statement = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
-                query,
-                statement,
-                schema
+            query,
+            statement,
+            schema
         );
 
         assertEquals(3, model.parameters().size());
@@ -660,17 +660,17 @@ class QueryAnalyzerTest {
     @Test
     void shouldResolveQueryParametersInsideInExpressionInIndexOrder() {
         Query query = new Query(
-                "FindUsers",
-                QueryType.MANY,
-                "SELECT * FROM users WHERE id IN ($3, $1, $2)"
+            "FindUsers",
+            QueryType.MANY,
+            "SELECT * FROM users WHERE id IN ($3, $1, $2)"
         );
 
         Statement statement = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
-                query,
-                statement,
-                schema
+            query,
+            statement,
+            schema
         );
 
         assertEquals(3, model.parameters().size());
@@ -694,9 +694,9 @@ class QueryAnalyzerTest {
     @Test
     void shouldResolveQueryParametersFromCombinedExpressions() {
         Query query = new Query(
-                "FindUsers",
-                QueryType.MANY,
-                """
+            "FindUsers",
+            QueryType.MANY,
+            """
                 SELECT *
                 FROM users
                 WHERE id IN ($1, $2)
@@ -707,9 +707,9 @@ class QueryAnalyzerTest {
         Statement statement = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
-                query,
-                statement,
-                schema
+            query,
+            statement,
+            schema
         );
 
         assertEquals(4, model.parameters().size());
@@ -744,29 +744,29 @@ class QueryAnalyzerTest {
             """;
 
         Query query = new Query(
-                "GetUser",
-                QueryType.ONE,
-                sql
+            "GetUser",
+            QueryType.ONE,
+            sql
         );
 
         QueryModel model = analyzer.analyze(
-                query,
-                parser.parse(sql),
-                schema
+            query,
+            parser.parse(sql),
+            schema
         );
 
         assertEquals(
-                """
+            """
                 SELECT id, name
                 FROM users
                 WHERE id = ?
                 """,
-                model.executableSql()
+            model.executableSql()
         );
 
         assertEquals(
-                List.of(1),
-                model.bindingParameterIndexes()
+            List.of(1),
+            model.bindingParameterIndexes()
         );
     }
 
@@ -780,38 +780,38 @@ class QueryAnalyzerTest {
             """;
 
         Query query = new Query(
-                "FindUser",
-                QueryType.ONE,
-                sql
+            "FindUser",
+            QueryType.ONE,
+            sql
         );
 
         QueryModel model = analyzer.analyze(
-                query,
-                parser.parse(sql),
-                schema
+            query,
+            parser.parse(sql),
+            schema
         );
 
         assertEquals(
-                """
+            """
                 SELECT id, name
                 FROM users
                 WHERE active = ?
                   AND id = ?
                 """,
-                model.executableSql()
+            model.executableSql()
         );
 
         assertEquals(
-                List.of(
-                        new QueryParameter(1, "id", ColumnType.BIGINT),
-                        new QueryParameter(2, "active", ColumnType.BOOLEAN)
-                ),
-                model.parameters()
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "active", ColumnType.BOOLEAN)
+            ),
+            model.parameters()
         );
 
         assertEquals(
-                List.of(2, 1),
-                model.bindingParameterIndexes()
+            List.of(2, 1),
+            model.bindingParameterIndexes()
         );
     }
 
@@ -823,15 +823,15 @@ class QueryAnalyzerTest {
             """;
 
         Query query = new Query(
-                "ListUsers",
-                QueryType.MANY,
-                sql
+            "ListUsers",
+            QueryType.MANY,
+            sql
         );
 
         QueryModel model = analyzer.analyze(
-                query,
-                parser.parse(sql),
-                schema
+            query,
+            parser.parse(sql),
+            schema
         );
 
         assertTrue(model.bindingParameterIndexes().isEmpty());

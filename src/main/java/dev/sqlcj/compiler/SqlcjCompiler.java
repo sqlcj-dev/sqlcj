@@ -32,8 +32,7 @@ public final class SqlcjCompiler {
     public void compile(Config config) {
         List<Source> sources = sourceLoader.load(config);
 
-        CodeGenerator codeGenerator =
-                new JavaCodeGenerator(config.java().packageName());
+        CodeGenerator codeGenerator = new JavaCodeGenerator(config.java().packageName());
 
         Path outputDirectory = Path.of(config.java().out());
 
@@ -44,22 +43,22 @@ public final class SqlcjCompiler {
 
             for (Query query : source.queries()) {
                 compileQuery(
-                        query,
-                        schema,
-                        codeGenerator,
-                        outputDirectory,
-                        generatedPaths
+                    query,
+                    schema,
+                    codeGenerator,
+                    outputDirectory,
+                    generatedPaths
                 );
             }
         }
     }
 
     private void compileQuery(
-            Query query,
-            Schema schema,
-            CodeGenerator codeGenerator,
-            Path outputDirectory,
-            Set<Path> generatedPaths
+        Query query,
+        Schema schema,
+        CodeGenerator codeGenerator,
+        Path outputDirectory,
+        Set<Path> generatedPaths
     ) {
         Statement statement = sqlParser.parse(query.sql());
         QueryModel model = queryAnalyzer.analyze(query, statement, schema);
@@ -67,17 +66,14 @@ public final class SqlcjCompiler {
 
         if (!generatedPaths.add(file.path())) {
             throw new CompilationException(
-                    "Duplicate generated file: " + file.path()
+                "Duplicate generated file: " + file.path()
             );
         }
 
         write(file, outputDirectory);
     }
 
-    private void write(
-            GeneratedFile file,
-            Path outputDirectory
-    ) {
+    private void write(GeneratedFile file, Path outputDirectory) {
         try {
             generatedFileWriter.write(file, outputDirectory);
         } catch (IOException e) {

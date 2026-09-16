@@ -10,34 +10,25 @@ import java.util.List;
  */
 final class ConfigValidator {
 
-    void validate(
-            Config config,
-            Path configFile
-    ) {
+    void validate(Config config, Path configFile) {
         validateVersion(config.version(), configFile);
         validateSql(config.sql(), configFile);
         validateJava(config.java(), configFile);
     }
 
-    private void validateVersion(
-            String version,
-            Path configFile
-    ) {
+    private void validateVersion(String version, Path configFile) {
         requireValue(version, "version", configFile);
 
         if (!Config.VERSION_1.equals(version)) {
             throw invalid(
-                    configFile,
-                    "unsupported 'version' value '%s', expected '%s'"
-                            .formatted(version, Config.VERSION_1)
+                configFile,
+                "unsupported 'version' value '%s', expected '%s'"
+                    .formatted(version, Config.VERSION_1)
             );
         }
     }
 
-    private void validateSql(
-            List<SqlConfig> sql,
-            Path configFile
-    ) {
+    private void validateSql(List<SqlConfig> sql, Path configFile) {
         if (sql == null) {
             throw invalid(configFile, "'sql' is required");
         }
@@ -58,10 +49,7 @@ final class ConfigValidator {
         }
     }
 
-    private void validateJava(
-            JavaConfig java,
-            Path configFile
-    ) {
+    private void validateJava(JavaConfig java, Path configFile) {
         if (java == null) {
             throw invalid(configFile, "'java' is required");
         }
@@ -71,18 +59,14 @@ final class ConfigValidator {
 
         if (!SourceVersion.isName(java.packageName())) {
             throw invalid(
-                    configFile,
-                    "'java.package' value '%s' is not a valid Java package name"
-                            .formatted(java.packageName())
+                configFile,
+                "'java.package' value '%s' is not a valid Java package name"
+                    .formatted(java.packageName())
             );
         }
     }
 
-    private void requireValue(
-            String value,
-            String field,
-            Path configFile
-    ) {
+    private void requireValue(String value, String field, Path configFile) {
         if (value == null) {
             throw invalid(configFile, "'%s' is required".formatted(field));
         }
@@ -92,12 +76,9 @@ final class ConfigValidator {
         }
     }
 
-    private ConfigurationException invalid(
-            Path configFile,
-            String detail
-    ) {
+    private ConfigurationException invalid(Path configFile, String detail) {
         return new ConfigurationException(
-                "Invalid configuration in %s: %s".formatted(configFile, detail)
+            "Invalid configuration in %s: %s".formatted(configFile, detail)
         );
     }
 }

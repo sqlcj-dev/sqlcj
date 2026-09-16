@@ -3,9 +3,9 @@ package dev.sqlcj.schema;
 import java.util.List;
 
 public record Table(
-        String name,
-        List<Column> columns,
-        List<Constraint> constraints
+    String name,
+    List<Column> columns,
+    List<Constraint> constraints
 ) {
 
     public Table {
