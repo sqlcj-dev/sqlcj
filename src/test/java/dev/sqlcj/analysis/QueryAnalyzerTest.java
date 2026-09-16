@@ -816,6 +816,64 @@ class QueryAnalyzerTest {
     }
 
     @Test
+    void shouldResolveQuotedIdentifiersWithoutDelimiters() {
+        Schema quotedSchema = new Schema(
+            List.of(
+                new Table(
+                    "user data",
+                    List.of(
+                        new Column("user id", ColumnType.BIGINT, false),
+                        new Column("select", ColumnType.VARCHAR, true)
+                    ),
+                    List.of()
+                )
+            )
+        );
+
+        String sql = """
+            SELECT "user id", "select"
+            FROM "user data"
+            WHERE "select" = $1
+            """;
+
+        Query query = new Query(
+            "ListUserData",
+            QueryType.MANY,
+            sql
+        );
+
+        QueryModel model = analyzer.analyze(
+            query,
+            parser.parse(sql),
+            quotedSchema
+        );
+
+        assertEquals("user data", model.table());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("user id", ColumnType.BIGINT, false),
+                new QueryColumn("select", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "select", ColumnType.VARCHAR)),
+            model.parameters()
+        );
+
+        assertEquals(
+            """
+                SELECT "user id", "select"
+                FROM "user data"
+                WHERE "select" = ?
+                """,
+            model.executableSql()
+        );
+    }
+
+    @Test
     void shouldResolveEmptyBindingIndexesWithoutParameters() {
         String sql = """
             SELECT id, name

@@ -835,6 +835,195 @@ class SqlcjCompilerIntegrationTest {
         assertFalse(Files.exists(generatedDirectory));
     }
 
+    @Test
+    void shouldRejectNormalizedGeneratedPathCollisionBeforeOverwriting() throws IOException {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileUsersQueries(
+                """
+                    -- name: Get.User :one
+                    SELECT id
+                    FROM users
+                    WHERE id = $1;
+
+                    -- name: Get-User :one
+                    SELECT name
+                    FROM users
+                    WHERE id = $1;
+                    """,
+                generatedDirectory
+            )
+        );
+
+        assertEquals(
+            "Duplicate generated file for queries 'Get.User' and 'Get-User': "
+                + Path.of("generated", "Get_User.java"),
+            exception.getMessage()
+        );
+
+        String generated = Files.readString(
+            generatedDirectory.resolve("generated").resolve("Get_User.java")
+        );
+
+        assertTrue(generated.contains("resultSet.getObject(\"id\", Long.class)"));
+        assertFalse(generated.contains("resultSet.getObject(\"name\", String.class)"));
+    }
+
+    @Test
+    void shouldRejectGeneratedPathsThatDifferOnlyByCaseBeforeOverwriting() throws IOException {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileUsersQueries(
+                """
+                    -- name: GetUser :one
+                    SELECT id
+                    FROM users
+                    WHERE id = $1;
+
+                    -- name: getuser :one
+                    SELECT name
+                    FROM users
+                    WHERE id = $1;
+                    """,
+                generatedDirectory
+            )
+        );
+
+        assertEquals(
+            "Generated file paths for queries 'GetUser' and 'getuser' differ only by case: "
+                + Path.of("generated", "GetUser.java")
+                + " and "
+                + Path.of("generated", "getuser.java"),
+            exception.getMessage()
+        );
+
+        assertTrue(
+            Files.exists(
+                generatedDirectory.resolve("generated").resolve("GetUser.java")
+            )
+        );
+
+        assertFalse(
+            Files.exists(
+                generatedDirectory.resolve("generated").resolve("getuser.java")
+            )
+        );
+    }
+
+    @Test
+    void shouldGenerateCompilableJavaForQuotedSqlIdentifiers() throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+        Path classesDirectory = tempDir.resolve("classes");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE "user data"
+                (
+                    "user id" BIGINT NOT NULL,
+                    "class"   VARCHAR(255)
+                );
+                """
+        );
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: ListUserData :many
+                SELECT "user id", "class"
+                FROM "user data"
+                WHERE "class" = $1;
+                """
+        );
+
+        Config config = new Config(
+            List.of(
+                new SqlConfig(
+                    schemaFile.toString(),
+                    queriesFile.toString()
+                )
+            ),
+            new JavaConfig(
+                generatedDirectory.toString(),
+                "generated"
+            )
+        );
+
+        new SqlcjCompiler().compile(config);
+
+        Path generatedFile = generatedDirectory
+            .resolve("generated")
+            .resolve("ListUserData.java");
+
+        String source = Files.readString(generatedFile);
+
+        assertTrue(source.contains("Long user_id"));
+        assertTrue(source.contains("String class_"));
+        assertTrue(source.contains("resultSet.getObject(\"user id\", Long.class)"));
+        assertTrue(source.contains("resultSet.getObject(\"class\", String.class)"));
+        assertTrue(source.contains("listUserData(String class_)"));
+        assertTrue(source.contains("WHERE \"class\" = ?"));
+
+        Files.createDirectories(classesDirectory);
+
+        JavaCompiler compilerApi = ToolProvider.getSystemJavaCompiler();
+
+        assertNotNull(compilerApi);
+
+        assertEquals(
+            0,
+            compilerApi.run(
+                null,
+                null,
+                null,
+                "-classpath",
+                System.getProperty("java.class.path"),
+                "-d",
+                classesDirectory.toString(),
+                generatedFile.toString()
+            )
+        );
+    }
+
+    private void compileUsersQueries(String queries, Path generatedDirectory) throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE users
+                (
+                    id   BIGINT NOT NULL,
+                    name VARCHAR(255)
+                );
+                """
+        );
+
+        Files.writeString(queriesFile, queries);
+
+        Config config = new Config(
+            List.of(
+                new SqlConfig(
+                    schemaFile.toString(),
+                    queriesFile.toString()
+                )
+            ),
+            new JavaConfig(
+                generatedDirectory.toString(),
+                "generated"
+            )
+        );
+
+        new SqlcjCompiler().compile(config);
+    }
+
     private Path generateAndCompile(String queries, String queryName) throws IOException {
         Path schemaFile = tempDir.resolve("schema.sql");
         Path queriesFile = tempDir.resolve("queries.sql");
