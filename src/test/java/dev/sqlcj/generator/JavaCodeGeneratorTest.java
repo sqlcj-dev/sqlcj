@@ -1251,6 +1251,45 @@ class JavaCodeGeneratorTest {
         assertCompiles(file);
     }
 
+    @Test
+    void shouldGenerateExecMethodForWriteQuery() throws IOException {
+        QueryModel query = new QueryModel(
+            "InsertUser",
+            QueryType.EXEC,
+            "users",
+            """
+                INSERT INTO users (id, name)
+                VALUES (?, ?)
+                """,
+            List.of(1, 2),
+            List.of(),
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR)
+            )
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        String source = file.content();
+
+        assertTrue(
+            source.contains(
+                "public int insertUser(Long id, String name)"
+            )
+        );
+
+        assertTrue(source.contains("return executor.execute("));
+        assertTrue(source.contains("INSERT INTO users (id, name)"));
+        assertTrue(source.contains("List.of(id, name)"));
+
+        assertFalse(source.contains("public record InsertUserResult("));
+        assertFalse(source.contains("RowMapper"));
+        assertFalse(source.contains("UnsupportedOperationException"));
+
+        assertCompiles(file);
+    }
+
     private void assertCompiles(GeneratedFile file) throws IOException {
         Path sourceDirectory = tempDir.resolve("generated");
         Path outputDirectory = tempDir.resolve("classes");

@@ -275,6 +275,13 @@ class JavaCodeGeneratorNamingTest {
 
             return List.of();
         }
+
+        @Override
+        public int execute(String sql, List<?> parameters) {
+            this.sql = sql;
+
+            return 0;
+        }
     }
 
     private QueryModel query(String name, List<QueryColumn> columns, List<QueryParameter> parameters) {

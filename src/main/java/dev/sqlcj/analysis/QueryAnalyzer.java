@@ -1,6 +1,7 @@
 package dev.sqlcj.analysis;
 
 import dev.sqlcj.parser.Query;
+import dev.sqlcj.parser.QueryType;
 import dev.sqlcj.schema.Schema;
 import net.sf.jsqlparser.expression.Expression;
 import net.sf.jsqlparser.expression.JdbcParameter;
@@ -18,7 +19,9 @@ import net.sf.jsqlparser.statement.select.AllColumns;
 import net.sf.jsqlparser.statement.select.PlainSelect;
 import net.sf.jsqlparser.statement.select.Select;
 import net.sf.jsqlparser.statement.select.SelectItem;
+import net.sf.jsqlparser.statement.select.Values;
 import net.sf.jsqlparser.statement.update.Update;
+import net.sf.jsqlparser.statement.update.UpdateSet;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -34,16 +37,16 @@ public final class QueryAnalyzer {
             return analyzeSelect(query, select, schema);
         }
 
-        if (statement instanceof Insert) {
-            throw new UnsupportedOperationException("INSERT is not supported yet");
+        if (statement instanceof Insert insert) {
+            return analyzeInsert(query, insert, schema);
         }
 
-        if (statement instanceof Update) {
-            throw new UnsupportedOperationException("UPDATE is not supported yet");
+        if (statement instanceof Update update) {
+            return analyzeUpdate(query, update, schema);
         }
 
-        if (statement instanceof Delete) {
-            throw new UnsupportedOperationException("DELETE is not supported yet");
+        if (statement instanceof Delete delete) {
+            return analyzeDelete(query, delete, schema);
         }
 
         throw new UnsupportedOperationException(
@@ -63,6 +66,167 @@ public final class QueryAnalyzer {
 
         List<QueryParameter> bindingParameters = resolveBindingParameters(plainSelect, schema, table);
 
+        return toQueryModel(
+            query,
+            table.getUnquotedName(),
+            columns,
+            bindingParameters
+        );
+    }
+
+    private QueryModel analyzeInsert(Query query, Insert insert, Schema schema) {
+        requireExecQueryType(query);
+
+        Table table = insert.getTable();
+        dev.sqlcj.schema.Table schemaTable = findTable(schema, table.getUnquotedName());
+
+        return toQueryModel(
+            query,
+            table.getUnquotedName(),
+            List.of(),
+            resolveInsertParameters(insert, schemaTable)
+        );
+    }
+
+    private QueryModel analyzeUpdate(Query query, Update update, Schema schema) {
+        requireExecQueryType(query);
+
+        Table table = update.getTable();
+        dev.sqlcj.schema.Table schemaTable = findTable(schema, table.getUnquotedName());
+
+        List<QueryParameter> bindingParameters = resolveUpdateSetParameters(update, schemaTable);
+
+        if (update.getWhere() != null) {
+            resolveParameters(update.getWhere(), schemaTable, bindingParameters);
+        }
+
+        return toQueryModel(
+            query,
+            table.getUnquotedName(),
+            List.of(),
+            bindingParameters
+        );
+    }
+
+    private QueryModel analyzeDelete(Query query, Delete delete, Schema schema) {
+        requireExecQueryType(query);
+
+        Table table = delete.getTable();
+        dev.sqlcj.schema.Table schemaTable = findTable(schema, table.getUnquotedName());
+
+        List<QueryParameter> bindingParameters = new ArrayList<>();
+
+        if (delete.getWhere() != null) {
+            resolveParameters(delete.getWhere(), schemaTable, bindingParameters);
+        }
+
+        return toQueryModel(
+            query,
+            table.getUnquotedName(),
+            List.of(),
+            bindingParameters
+        );
+    }
+
+    private void requireExecQueryType(Query query) {
+        if (query.type() != QueryType.EXEC) {
+            throw new UnsupportedOperationException(
+                "Write queries must be declared as :exec"
+            );
+        }
+    }
+
+    /**
+     * Resolves the {@code INSERT} parameters by pairing the explicit column
+     * list with the single values row, which is also their textual order.
+     */
+    private List<QueryParameter> resolveInsertParameters(Insert insert, dev.sqlcj.schema.Table table) {
+        ExpressionList<net.sf.jsqlparser.schema.Column> columns = insert.getColumns();
+
+        if (columns == null || columns.isEmpty()) {
+            throw new UnsupportedOperationException("INSERT requires an explicit column list.");
+        }
+
+        ParenthesedExpressionList<?> values = resolveInsertValues(insert);
+
+        if (values.size() != columns.size()) {
+            throw new UnsupportedOperationException(
+                "INSERT column and value counts must match."
+            );
+        }
+
+        List<QueryParameter> parameters = new ArrayList<>();
+
+        for (int index = 0; index < columns.size(); index++) {
+            if (!(values.get(index) instanceof JdbcParameter parameter)) {
+                throw new UnsupportedOperationException(
+                    "INSERT values must be indexed placeholders."
+                );
+            }
+
+            addParameter(
+                parameter,
+                columns.get(index).getUnquotedColumnName(),
+                table,
+                parameters
+            );
+        }
+
+        return parameters;
+    }
+
+    private ParenthesedExpressionList<?> resolveInsertValues(Insert insert) {
+        Values values = insert.getValues();
+
+        if (values == null || !(values.getExpressions() instanceof ParenthesedExpressionList<?> row)) {
+            throw new UnsupportedOperationException(
+                "INSERT requires a single VALUES row."
+            );
+        }
+
+        return row;
+    }
+
+    /**
+     * Resolves the {@code UPDATE} assignment parameters in source order, which
+     * precedes any parameter in the {@code WHERE} expression.
+     */
+    private List<QueryParameter> resolveUpdateSetParameters(Update update, dev.sqlcj.schema.Table table) {
+        List<QueryParameter> parameters = new ArrayList<>();
+
+        for (UpdateSet updateSet : update.getUpdateSets()) {
+            if (
+                updateSet.getColumns().size() != 1
+                    || updateSet.getValues().size() != 1
+                    || !(updateSet.getValue(0) instanceof JdbcParameter parameter)
+            ) {
+                throw new UnsupportedOperationException(
+                    "UPDATE assignments must set one column to an indexed placeholder."
+                );
+            }
+
+            addParameter(
+                parameter,
+                updateSet.getColumn(0).getUnquotedColumnName(),
+                table,
+                parameters
+            );
+        }
+
+        return parameters;
+    }
+
+    /**
+     * Builds the analyzed model from parameters collected in textual order,
+     * keeping that order for JDBC binding and exposing the parameters in
+     * logical placeholder-index order.
+     */
+    private QueryModel toQueryModel(
+        Query query,
+        String tableName,
+        List<QueryColumn> columns,
+        List<QueryParameter> bindingParameters
+    ) {
         List<Integer> bindingParameterIndexes = bindingParameters.stream()
             .map(QueryParameter::index)
             .toList();
@@ -74,7 +238,7 @@ public final class QueryAnalyzer {
         return new QueryModel(
             query.name(),
             query.type(),
-            table.getUnquotedName(),
+            tableName,
             toExecutableSql(query.sql()),
             bindingParameterIndexes,
             columns,

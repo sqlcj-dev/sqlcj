@@ -17,6 +17,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 public final class JavaCodeGenerator implements CodeGenerator {
 
@@ -85,6 +86,9 @@ public final class JavaCodeGenerator implements CodeGenerator {
 
         if (hasResult(query)) {
             imports.add("dev.sqlcj.runtime.RowMapper");
+        }
+
+        if (hasResult(query) || isExec(query)) {
             imports.add("java.util.List");
         }
 
@@ -108,6 +112,15 @@ public final class JavaCodeGenerator implements CodeGenerator {
     private boolean hasResult(QueryModel query) {
         return query.type() == QueryType.ONE
             || query.type() == QueryType.MANY;
+    }
+
+    private boolean isExec(QueryModel query) {
+        return query.type() == QueryType.EXEC;
+    }
+
+    /** A write query has no generated result record. */
+    private boolean hasResultType(QueryModel query) {
+        return !isExec(query);
     }
 
     private String resolveImport(ColumnType type) {
@@ -137,31 +150,26 @@ public final class JavaCodeGenerator implements CodeGenerator {
     }
 
     private String generateClass(QueryModel query, JavaNames names) {
-        String rowMapper = hasResult(query)
-            ? indent(generateRowMapper(query, names))
-            : "";
+        String members = Stream.of(
+            generateExecutorField(),
+            generateConstructor(names),
+            hasResultType(query) ? generateResultType(query, names) : "",
+            hasResult(query) ? generateRowMapper(query, names) : "",
+            generateMethod(query, names)
+        )
+            .filter(member -> !member.isBlank())
+            .map(this::indent)
+            .collect(Collectors.joining("\n\n"));
 
         return """
             public final class %s {
-
-            %s
-
-            %s
-
-            %s
-
-            %s
 
             %s
             }
             """
             .formatted(
                 names.className(),
-                indent(generateExecutorField()),
-                indent(generateConstructor(names)),
-                indent(generateResultType(query, names)),
-                rowMapper,
-                indent(generateMethod(query, names))
+                members
             );
     }
 
@@ -218,7 +226,8 @@ public final class JavaCodeGenerator implements CodeGenerator {
     private String generateMethod(QueryModel query, JavaNames names) {
         return switch (query.type()) {
             case ONE, MANY -> generateQueryMethod(query, names);
-            case EXEC, EXEC_RESULT, BATCH_EXEC, BATCH_MANY, BATCH_ONE -> generateUnsupportedMethod(query, names);
+            case EXEC -> generateExecMethod(query, names);
+            case EXEC_RESULT, BATCH_EXEC, BATCH_MANY, BATCH_ONE -> generateUnsupportedMethod(query, names);
         };
     }
 
@@ -237,6 +246,24 @@ public final class JavaCodeGenerator implements CodeGenerator {
                 names.methodName(),
                 generateMethodParameters(query, names),
                 generateExecutorMethod(query),
+                generateSql(query),
+                generateParameterList(query, names)
+            );
+    }
+
+    private String generateExecMethod(QueryModel query, JavaNames names) {
+        return """
+            public %s %s(%s) {
+                return executor.execute(
+                        %s,
+                        %s
+                );
+            }
+            """
+            .formatted(
+                generateReturnType(query, names),
+                names.methodName(),
+                generateMethodParameters(query, names),
                 generateSql(query),
                 generateParameterList(query, names)
             );
@@ -351,7 +378,7 @@ public final class JavaCodeGenerator implements CodeGenerator {
         return switch (query.type()) {
             case ONE -> names.resultTypeName();
             case MANY -> "List<" + names.resultTypeName() + ">";
-            case EXEC -> "void";
+            case EXEC -> "int";
             case EXEC_RESULT -> "void";
             case BATCH_EXEC -> "void";
             case BATCH_MANY -> "void";

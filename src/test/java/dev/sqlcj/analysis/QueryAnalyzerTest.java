@@ -108,62 +108,172 @@ class QueryAnalyzerTest {
     }
 
     @Test
-    void shouldRejectInsertStatements() {
+    void shouldAnalyzeInsert() {
         Query query = new Query(
             "InsertUser",
             QueryType.EXEC,
             """
-                INSERT INTO users(id)
-                VALUES ($1);
+                INSERT INTO users (id, name)
+                VALUES ($1, $2)
                 """
         );
 
-        Statement statement = parser.parse(query.sql());
+        QueryModel model = analyzer.analyze(
+            query,
+            parser.parse(query.sql()),
+            schema
+        );
 
-        UnsupportedOperationException exception = assertThrows(
-            UnsupportedOperationException.class,
-            () -> analyzer.analyze(query, statement, schema)
+        assertEquals("InsertUser", model.name());
+        assertEquals(QueryType.EXEC, model.type());
+        assertEquals("users", model.table());
+        assertTrue(model.columns().isEmpty());
+
+        assertEquals(
+            """
+                INSERT INTO users (id, name)
+                VALUES (?, ?)
+                """,
+            model.executableSql()
         );
 
         assertEquals(
-            "INSERT is not supported yet",
-            exception.getMessage()
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(
+            List.of(1, 2),
+            model.bindingParameterIndexes()
         );
     }
 
     @Test
-    void shouldRejectUpdateStatements() {
+    void shouldAnalyzeUpdate() {
         Query query = new Query(
             "UpdateUser",
             QueryType.EXEC,
             """
                 UPDATE users
-                SET username = $2
-                WHERE id = $1;
+                SET name = $2,
+                    active = $3
+                WHERE id = $1
                 """
         );
 
-        Statement statement = parser.parse(query.sql());
+        QueryModel model = analyzer.analyze(
+            query,
+            parser.parse(query.sql()),
+            schema
+        );
 
-        UnsupportedOperationException exception = assertThrows(
-            UnsupportedOperationException.class,
-            () -> analyzer.analyze(query, statement, schema)
+        assertEquals("UpdateUser", model.name());
+        assertEquals(QueryType.EXEC, model.type());
+        assertEquals("users", model.table());
+        assertTrue(model.columns().isEmpty());
+
+        assertEquals(
+            """
+                UPDATE users
+                SET name = ?,
+                    active = ?
+                WHERE id = ?
+                """,
+            model.executableSql()
         );
 
         assertEquals(
-            "UPDATE is not supported yet",
-            exception.getMessage()
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR),
+                new QueryParameter(3, "active", ColumnType.BOOLEAN)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(
+            List.of(2, 3, 1),
+            model.bindingParameterIndexes()
         );
     }
 
     @Test
-    void shouldRejectDeleteStatements() {
+    void shouldAnalyzeDelete() {
         Query query = new Query(
             "DeleteUser",
             QueryType.EXEC,
             """
-                DELETE users
-                WHERE id = $1;
+                DELETE FROM users
+                WHERE id = $1
+                  AND active = $2
+                """
+        );
+
+        QueryModel model = analyzer.analyze(
+            query,
+            parser.parse(query.sql()),
+            schema
+        );
+
+        assertEquals("DeleteUser", model.name());
+        assertEquals(QueryType.EXEC, model.type());
+        assertEquals("users", model.table());
+        assertTrue(model.columns().isEmpty());
+
+        assertEquals(
+            """
+                DELETE FROM users
+                WHERE id = ?
+                  AND active = ?
+                """,
+            model.executableSql()
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "active", ColumnType.BOOLEAN)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(
+            List.of(1, 2),
+            model.bindingParameterIndexes()
+        );
+    }
+
+    @Test
+    void shouldAnalyzeDeleteWithoutWhere() {
+        Query query = new Query(
+            "DeleteUsers",
+            QueryType.EXEC,
+            "DELETE FROM users"
+        );
+
+        QueryModel model = analyzer.analyze(
+            query,
+            parser.parse(query.sql()),
+            schema
+        );
+
+        assertEquals("users", model.table());
+        assertTrue(model.columns().isEmpty());
+        assertTrue(model.parameters().isEmpty());
+        assertTrue(model.bindingParameterIndexes().isEmpty());
+    }
+
+    @Test
+    void shouldRejectWriteWithoutExecQueryType() {
+        Query query = new Query(
+            "InsertUser",
+            QueryType.ONE,
+            """
+                INSERT INTO users (id)
+                VALUES ($1)
                 """
         );
 
@@ -175,7 +285,7 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(
-            "DELETE is not supported yet",
+            "Write queries must be declared as :exec",
             exception.getMessage()
         );
     }

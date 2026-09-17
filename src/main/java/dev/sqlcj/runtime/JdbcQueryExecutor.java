@@ -64,6 +64,23 @@ public final class JdbcQueryExecutor implements QueryExecutor {
         }
     }
 
+    @Override
+    public int execute(String sql, List<?> parameters) {
+        try (
+            Connection connection = dataSource.getConnection();
+            PreparedStatement statement = connection.prepareStatement(sql)
+        ) {
+            bindParameters(statement, parameters);
+
+            return statement.executeUpdate();
+        } catch (SQLException e) {
+            throw new QueryExecutionException(
+                "Failed to execute query",
+                e
+            );
+        }
+    }
+
     private void bindParameters(PreparedStatement statement, List<?> parameters) throws SQLException {
         for (int i = 0; i < parameters.size(); i++) {
             statement.setObject(i + 1, parameters.get(i));

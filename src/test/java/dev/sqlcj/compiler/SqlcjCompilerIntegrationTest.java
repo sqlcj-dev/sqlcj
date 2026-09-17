@@ -28,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -625,6 +626,157 @@ class SqlcjCompilerIntegrationTest {
 
             assertEquals(1L, getRecordComponent(result, "id"));
             assertEquals("Alice", getRecordComponent(result, "name"));
+        }
+    }
+
+    @Test
+    void shouldExecuteGeneratedInsert() throws Exception {
+        Path classesDirectory = generateAndCompile(
+            """
+                -- name: InsertUser :exec
+                INSERT INTO users (id, name, active)
+                VALUES ($1, $2, $3);
+                """,
+            "InsertUser"
+        );
+
+        String source = Files.readString(tempDir.resolve("generated/generated/InsertUser.java"));
+
+        assertTrue(
+            source.contains(
+                "public int insertUser(Long id, String name, Boolean active)"
+            )
+        );
+
+        assertTrue(source.contains("return executor.execute("));
+        assertTrue(source.contains("List.of(id, name, active)"));
+        assertFalse(source.contains("public record InsertUserResult("));
+        assertFalse(source.contains("RowMapper"));
+
+        QueryExecutor executor = new JdbcQueryExecutor(usersDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName(
+                "generated.InsertUser",
+                true,
+                classLoader
+            );
+
+            Object generatedQuery = generatedClass
+                .getConstructor(QueryExecutor.class)
+                .newInstance(executor);
+
+            Object affected = generatedClass
+                .getMethod("insertUser", Long.class, String.class, Boolean.class)
+                .invoke(generatedQuery, 3L, "Carol", true);
+
+            assertEquals(1, affected);
+
+            assertEquals(
+                "Carol",
+                executor.query(
+                    "SELECT name FROM users WHERE id = ?",
+                    List.of(3L),
+                    resultSet -> resultSet.getString("name")
+                )
+            );
+        }
+    }
+
+    @Test
+    void shouldExecuteGeneratedUpdateWithOutOfOrderPlaceholders() throws Exception {
+        Path classesDirectory = generateAndCompile(
+            """
+                -- name: UpdateUserName :exec
+                UPDATE users
+                SET name = $2
+                WHERE id = $1;
+                """,
+            "UpdateUserName"
+        );
+
+        String source = Files.readString(tempDir.resolve("generated/generated/UpdateUserName.java"));
+
+        assertTrue(
+            source.contains(
+                "public int updateUserName(Long id, String name)"
+            )
+        );
+
+        assertTrue(source.contains("List.of(name, id)"));
+
+        QueryExecutor executor = new JdbcQueryExecutor(usersDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName(
+                "generated.UpdateUserName",
+                true,
+                classLoader
+            );
+
+            Object generatedQuery = generatedClass
+                .getConstructor(QueryExecutor.class)
+                .newInstance(executor);
+
+            Object affected = generatedClass
+                .getMethod("updateUserName", Long.class, String.class)
+                .invoke(generatedQuery, 1L, "Alicia");
+
+            assertEquals(1, affected);
+
+            assertEquals(
+                "Alicia",
+                executor.query(
+                    "SELECT name FROM users WHERE id = ?",
+                    List.of(1L),
+                    resultSet -> resultSet.getString("name")
+                )
+            );
+        }
+    }
+
+    @Test
+    void shouldExecuteGeneratedDelete() throws Exception {
+        Path classesDirectory = generateAndCompile(
+            """
+                -- name: DeleteUser :exec
+                DELETE FROM users
+                WHERE id = $1;
+                """,
+            "DeleteUser"
+        );
+
+        String source = Files.readString(tempDir.resolve("generated/generated/DeleteUser.java"));
+
+        assertTrue(source.contains("public int deleteUser(Long id)"));
+        assertTrue(source.contains("List.of(id)"));
+
+        QueryExecutor executor = new JdbcQueryExecutor(usersDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName(
+                "generated.DeleteUser",
+                true,
+                classLoader
+            );
+
+            Object generatedQuery = generatedClass
+                .getConstructor(QueryExecutor.class)
+                .newInstance(executor);
+
+            Object affected = generatedClass
+                .getMethod("deleteUser", Long.class)
+                .invoke(generatedQuery, 2L);
+
+            assertEquals(1, affected);
+
+            assertNull(
+                executor.query(
+                    "SELECT name FROM users WHERE id = ?",
+                    List.of(2L),
+                    resultSet -> resultSet.getString("name")
+                )
+            );
         }
     }
 

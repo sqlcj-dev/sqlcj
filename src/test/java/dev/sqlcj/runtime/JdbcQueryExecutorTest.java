@@ -173,6 +173,42 @@ class JdbcQueryExecutorTest {
     }
 
     @Test
+    void shouldReturnAffectedRowCountForExecute() {
+        int affected = executor.execute(
+            """
+                UPDATE users
+                SET name = ?
+                WHERE id = ?
+                """,
+            List.of("Alicia", 1L)
+        );
+
+        assertEquals(1, affected);
+
+        String name = executor.query(
+            "SELECT name FROM users WHERE id = ?",
+            List.of(1L),
+            resultSet -> resultSet.getString("name")
+        );
+
+        assertEquals("Alicia", name);
+    }
+
+    @Test
+    void shouldWrapSqlExceptionForExecute() {
+        QueryExecutionException exception = assertThrows(
+            QueryExecutionException.class,
+            () -> executor.execute(
+                "DELETE FROM missing_table",
+                List.of()
+            )
+        );
+
+        assertEquals("Failed to execute query", exception.getMessage());
+        assertInstanceOf(SQLException.class, exception.getCause());
+    }
+
+    @Test
     void shouldWrapSqlException() {
         QueryExecutionException exception = assertThrows(
             QueryExecutionException.class,
