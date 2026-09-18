@@ -400,20 +400,26 @@ public final class JavaCodeGenerator implements CodeGenerator {
             );
     }
 
+    /**
+     * Reads each result column by its one-based projection position so that
+     * identically named columns from different sources stay distinct.
+     */
     private String generateResultMappings(QueryModel query) {
-        return query.columns().stream()
-            .map(this::generateResultMapping)
+        return IntStream.range(0, query.columns().size())
+            .mapToObj(
+                index -> generateResultMapping(
+                    query.columns().get(index),
+                    index + 1
+                )
+            )
             .collect(Collectors.joining(",\n"));
     }
 
-    private String generateResultMapping(QueryColumn column) {
+    private String generateResultMapping(QueryColumn column, int position) {
         String javaType = typeResolver.resolve(column.type());
 
-        return "resultSet.getObject(\"%s\", %s.class)"
-            .formatted(
-                escapeStringLiteral(column.name()),
-                javaType
-            )
+        return "resultSet.getObject(%d, %s.class)"
+            .formatted(position, javaType)
             .indent(8)
             .stripTrailing();
     }
@@ -431,31 +437,6 @@ public final class JavaCodeGenerator implements CodeGenerator {
             }
             """
             .formatted(names.className());
-    }
-
-    /**
-     * Escapes a SQL-derived value rendered inside a generated Java string
-     * literal, such as a JDBC column label.
-     */
-    private String escapeStringLiteral(String value) {
-        StringBuilder builder = new StringBuilder();
-
-        for (int index = 0; index < value.length(); index++) {
-            char character = value.charAt(index);
-
-            switch (character) {
-                case '\\' -> builder.append("\\\\");
-                case '"' -> builder.append("\\\"");
-                case '\b' -> builder.append("\\b");
-                case '\f' -> builder.append("\\f");
-                case '\n' -> builder.append("\\n");
-                case '\r' -> builder.append("\\r");
-                case '\t' -> builder.append("\\t");
-                default -> builder.append(character);
-            }
-        }
-
-        return builder.toString();
     }
 
     /**

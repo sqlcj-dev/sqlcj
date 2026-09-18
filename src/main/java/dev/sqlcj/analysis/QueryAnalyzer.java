@@ -8,6 +8,7 @@ import net.sf.jsqlparser.expression.JdbcParameter;
 import net.sf.jsqlparser.expression.operators.conditional.AndExpression;
 import net.sf.jsqlparser.expression.operators.conditional.OrExpression;
 import net.sf.jsqlparser.expression.operators.relational.ComparisonOperator;
+import net.sf.jsqlparser.expression.operators.relational.EqualsTo;
 import net.sf.jsqlparser.expression.operators.relational.ExpressionList;
 import net.sf.jsqlparser.expression.operators.relational.InExpression;
 import net.sf.jsqlparser.expression.operators.relational.ParenthesedExpressionList;
@@ -16,6 +17,8 @@ import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.delete.Delete;
 import net.sf.jsqlparser.statement.insert.Insert;
 import net.sf.jsqlparser.statement.select.AllColumns;
+import net.sf.jsqlparser.statement.select.AllTableColumns;
+import net.sf.jsqlparser.statement.select.Join;
 import net.sf.jsqlparser.statement.select.PlainSelect;
 import net.sf.jsqlparser.statement.select.Select;
 import net.sf.jsqlparser.statement.select.SelectItem;
@@ -24,13 +27,27 @@ import net.sf.jsqlparser.statement.update.Update;
 import net.sf.jsqlparser.statement.update.UpdateSet;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 public final class QueryAnalyzer {
 
     private static final Pattern PLACEHOLDER = Pattern.compile("\\$\\d+");
+
+    /**
+     * One query source and the name it exposes to column references, which is
+     * its alias when present and otherwise its table name.
+     */
+    private record Source(String name, dev.sqlcj.schema.Table table) {
+    }
+
+    /** One column reference resolved against the ordered query sources. */
+    private record ResolvedColumn(Source source, dev.sqlcj.schema.Column column) {
+    }
 
     public QueryModel analyze(Query query, Statement statement, Schema schema) {
         if (statement instanceof Select select) {
@@ -58,13 +75,11 @@ public final class QueryAnalyzer {
         PlainSelect plainSelect = select.getPlainSelect();
         Table table = getTable(plainSelect);
 
-        List<QueryColumn> columns = resolveColumns(
-            plainSelect,
-            schema,
-            table
-        );
+        List<Source> sources = resolveSources(plainSelect, table, schema);
 
-        List<QueryParameter> bindingParameters = resolveBindingParameters(plainSelect, schema, table);
+        List<QueryColumn> columns = resolveColumns(plainSelect, sources);
+
+        List<QueryParameter> bindingParameters = resolveBindingParameters(plainSelect, sources);
 
         return toQueryModel(
             query,
@@ -92,12 +107,12 @@ public final class QueryAnalyzer {
         requireExecQueryType(query);
 
         Table table = update.getTable();
-        dev.sqlcj.schema.Table schemaTable = findTable(schema, table.getUnquotedName());
+        Source source = toSource(table, schema);
 
-        List<QueryParameter> bindingParameters = resolveUpdateSetParameters(update, schemaTable);
+        List<QueryParameter> bindingParameters = resolveUpdateSetParameters(update, source.table());
 
         if (update.getWhere() != null) {
-            resolveParameters(update.getWhere(), schemaTable, bindingParameters);
+            resolveParameters(update.getWhere(), List.of(source), bindingParameters);
         }
 
         return toQueryModel(
@@ -112,12 +127,12 @@ public final class QueryAnalyzer {
         requireExecQueryType(query);
 
         Table table = delete.getTable();
-        dev.sqlcj.schema.Table schemaTable = findTable(schema, table.getUnquotedName());
+        Source source = toSource(table, schema);
 
         List<QueryParameter> bindingParameters = new ArrayList<>();
 
         if (delete.getWhere() != null) {
-            resolveParameters(delete.getWhere(), schemaTable, bindingParameters);
+            resolveParameters(delete.getWhere(), List.of(source), bindingParameters);
         }
 
         return toQueryModel(
@@ -259,22 +274,142 @@ public final class QueryAnalyzer {
     }
 
     /**
+     * Resolves the ordered query sources from the base table followed by every
+     * joined table, rejecting an exposed name that repeats.
+     */
+    private List<Source> resolveSources(PlainSelect plainSelect, Table table, Schema schema) {
+        List<Source> sources = new ArrayList<>();
+
+        addSource(sources, table, schema);
+
+        List<Join> joins = plainSelect.getJoins();
+
+        if (joins == null) {
+            return List.copyOf(sources);
+        }
+
+        for (Join join : joins) {
+            Source joined = addSource(sources, requireSupportedJoin(join), schema);
+
+            requireJoinCondition(join, sources, joined);
+        }
+
+        return List.copyOf(sources);
+    }
+
+    private Source addSource(List<Source> sources, Table table, Schema schema) {
+        Source source = toSource(table, schema);
+
+        boolean duplicate = sources.stream()
+            .anyMatch(existing -> existing.name().equalsIgnoreCase(source.name()));
+
+        if (duplicate) {
+            throw new IllegalArgumentException(
+                "Duplicate source name in query: " + source.name()
+            );
+        }
+
+        sources.add(source);
+
+        return source;
+    }
+
+    private Source toSource(Table table, Schema schema) {
+        return new Source(
+            table.getAlias() == null
+                ? table.getUnquotedName()
+                : table.getAlias().getUnquotedName(),
+            findTable(schema, table.getUnquotedName())
+        );
+    }
+
+    /**
+     * Accepts only a bare {@code JOIN} or explicit {@code INNER JOIN} of one
+     * table source. {@link Join#isInnerJoin()} also reports shapes that this
+     * subset excludes, so every excluded modifier is rejected explicitly.
+     */
+    private Table requireSupportedJoin(Join join) {
+        boolean supported = join.isInnerJoin()
+            && !join.isSimple()
+            && !join.isOuter()
+            && !join.isLeft()
+            && !join.isRight()
+            && !join.isFull()
+            && !join.isCross()
+            && !join.isNatural()
+            && !join.isSemi()
+            && !join.isApply()
+            && !join.isStraight()
+            && !join.isGlobal()
+            && !join.isWindowJoin()
+            && join.getJoinHint() == null
+            && join.getUsingColumns().isEmpty();
+
+        if (!supported) {
+            throw new UnsupportedOperationException(
+                "Only unmodified INNER JOIN clauses are supported."
+            );
+        }
+
+        if (!(join.getRightItem() instanceof Table table)) {
+            throw new UnsupportedOperationException(
+                "Only table join sources are supported."
+            );
+        }
+
+        return table;
+    }
+
+    /**
+     * Requires one {@code ON} equality between a qualified column of the joined
+     * source and a qualified column of a source introduced earlier.
+     */
+    private void requireJoinCondition(Join join, List<Source> sources, Source joined) {
+        Collection<Expression> onExpressions = join.getOnExpressions();
+
+        if (onExpressions.size() != 1 || !(onExpressions.iterator().next() instanceof EqualsTo equality)) {
+            throw new UnsupportedOperationException(
+                "A join requires exactly one ON equality."
+            );
+        }
+
+        Source left = resolveJoinConditionSource(equality.getLeftExpression(), sources);
+        Source right = resolveJoinConditionSource(equality.getRightExpression(), sources);
+
+        if ((left == joined) == (right == joined)) {
+            throw new UnsupportedOperationException(
+                "A join ON equality must compare "
+                    + joined.name()
+                    + " with an earlier source."
+            );
+        }
+    }
+
+    private Source resolveJoinConditionSource(Expression expression, List<Source> sources) {
+        if (!(expression instanceof net.sf.jsqlparser.schema.Column column) || qualifier(column) == null) {
+            throw new UnsupportedOperationException(
+                "A join ON equality requires qualified columns."
+            );
+        }
+
+        return resolveColumn(column, sources).source();
+    }
+
+    /**
      * Resolves the supported parameters in the textual order in which they are
      * encountered, which is the JDBC binding order of the generated {@code ?}
      * positions.
      */
-    private List<QueryParameter> resolveBindingParameters(PlainSelect plainSelect, Schema schema, Table table) {
+    private List<QueryParameter> resolveBindingParameters(PlainSelect plainSelect, List<Source> sources) {
         if (plainSelect.getWhere() == null) {
             return List.of();
         }
-
-        dev.sqlcj.schema.Table schemaTable = findTable(schema, table.getUnquotedName());
 
         List<QueryParameter> parameters = new ArrayList<>();
 
         resolveParameters(
             plainSelect.getWhere(),
-            schemaTable,
+            sources,
             parameters
         );
 
@@ -283,18 +418,18 @@ public final class QueryAnalyzer {
 
     private void resolveParameters(
         Expression expression,
-        dev.sqlcj.schema.Table table,
+        List<Source> sources,
         List<QueryParameter> parameters
     ) {
         if (expression instanceof AndExpression and) {
-            resolveParameters(and.getLeftExpression(), table, parameters);
-            resolveParameters(and.getRightExpression(), table, parameters);
+            resolveParameters(and.getLeftExpression(), sources, parameters);
+            resolveParameters(and.getRightExpression(), sources, parameters);
             return;
         }
 
         if (expression instanceof OrExpression or) {
-            resolveParameters(or.getLeftExpression(), table, parameters);
-            resolveParameters(or.getRightExpression(), table, parameters);
+            resolveParameters(or.getLeftExpression(), sources, parameters);
+            resolveParameters(or.getRightExpression(), sources, parameters);
             return;
         }
 
@@ -302,7 +437,7 @@ public final class QueryAnalyzer {
             for (Expression nestedExpression : parentheses) {
                 resolveParameters(
                     nestedExpression,
-                    table,
+                    sources,
                     parameters
                 );
             }
@@ -310,7 +445,7 @@ public final class QueryAnalyzer {
         }
 
         if (expression instanceof InExpression in) {
-            resolveInExpression(in, table, parameters);
+            resolveInExpression(in, sources, parameters);
             return;
         }
 
@@ -318,18 +453,18 @@ public final class QueryAnalyzer {
             resolveParameterComparison(
                 comparison.getLeftExpression(),
                 comparison.getRightExpression(),
-                table,
+                sources,
                 parameters
             );
         }
     }
 
-    private void resolveInExpression(InExpression in, dev.sqlcj.schema.Table table, List<QueryParameter> parameters) {
+    private void resolveInExpression(InExpression in, List<Source> sources, List<QueryParameter> parameters) {
         if (!(in.getLeftExpression() instanceof net.sf.jsqlparser.schema.Column column)) {
             return;
         }
 
-        dev.sqlcj.schema.Column schemaColumn = findColumn(table, column.getUnquotedColumnName());
+        dev.sqlcj.schema.Column schemaColumn = resolveColumn(column, sources).column();
 
         Expression rightExpression = in.getRightExpression();
 
@@ -346,7 +481,7 @@ public final class QueryAnalyzer {
         resolveInExpression(
             rightExpression,
             schemaColumn,
-            table,
+            sources,
             parameters
         );
     }
@@ -354,7 +489,7 @@ public final class QueryAnalyzer {
     private void resolveInExpression(
         Expression expression,
         dev.sqlcj.schema.Column schemaColumn,
-        dev.sqlcj.schema.Table table,
+        List<Source> sources,
         List<QueryParameter> parameters
     ) {
         if (expression instanceof JdbcParameter parameter) {
@@ -366,14 +501,14 @@ public final class QueryAnalyzer {
             resolveInExpression(
                 and.getLeftExpression(),
                 schemaColumn,
-                table,
+                sources,
                 parameters
             );
 
             resolveInExpression(
                 and.getRightExpression(),
                 schemaColumn,
-                table,
+                sources,
                 parameters
             );
 
@@ -384,14 +519,14 @@ public final class QueryAnalyzer {
             resolveInExpression(
                 or.getLeftExpression(),
                 schemaColumn,
-                table,
+                sources,
                 parameters
             );
 
             resolveInExpression(
                 or.getRightExpression(),
                 schemaColumn,
-                table,
+                sources,
                 parameters
             );
 
@@ -405,7 +540,7 @@ public final class QueryAnalyzer {
                 } else {
                     resolveParameters(
                         nestedExpression,
-                        table,
+                        sources,
                         parameters
                     );
                 }
@@ -416,7 +551,7 @@ public final class QueryAnalyzer {
     private void resolveParameterComparison(
         Expression left,
         Expression right,
-        dev.sqlcj.schema.Table table,
+        List<Source> sources,
         List<QueryParameter> parameters
     ) {
         if (
@@ -425,8 +560,7 @@ public final class QueryAnalyzer {
         ) {
             addParameter(
                 parameter,
-                column.getUnquotedColumnName(),
-                table,
+                resolveColumn(column, sources).column(),
                 parameters
             );
             return;
@@ -438,8 +572,7 @@ public final class QueryAnalyzer {
         ) {
             addParameter(
                 parameter,
-                column.getUnquotedColumnName(),
-                table,
+                resolveColumn(column, sources).column(),
                 parameters
             );
         }
@@ -451,14 +584,10 @@ public final class QueryAnalyzer {
         dev.sqlcj.schema.Table table,
         List<QueryParameter> parameters
     ) {
-        dev.sqlcj.schema.Column column = findColumn(table, columnName);
-
-        parameters.add(
-            new QueryParameter(
-                parameter.getIndex(),
-                column.name(),
-                column.type()
-            )
+        addParameter(
+            parameter,
+            findColumn(table, columnName),
+            parameters
         );
     }
 
@@ -476,19 +605,40 @@ public final class QueryAnalyzer {
         );
     }
 
-    private List<QueryColumn> resolveColumns(PlainSelect plainSelect, Schema schema, Table table) {
-        dev.sqlcj.schema.Table schemaTable = findTable(schema, table.getUnquotedName());
-
+    /**
+     * Resolves the selected columns in declared order, expanding {@code *}
+     * across the query sources in their declared order and
+     * {@code qualifier.*} across one source, each in schema column order.
+     */
+    private List<QueryColumn> resolveColumns(PlainSelect plainSelect, List<Source> sources) {
         List<QueryColumn> columns = new ArrayList<>();
 
         for (SelectItem<?> selectItem : plainSelect.getSelectItems()) {
-            if (selectItem.getExpression() instanceof AllColumns) {
-                columns.addAll(resolveAllColumns(schemaTable));
+            Expression expression = selectItem.getExpression();
+
+            if (expression instanceof AllTableColumns allTableColumns) {
+                columns.addAll(
+                    resolveAllColumns(
+                        findSource(
+                            sources,
+                            allTableColumns.getTable().getUnquotedName()
+                        )
+                    )
+                );
+
                 continue;
             }
 
-            if (selectItem.getExpression() instanceof net.sf.jsqlparser.schema.Column column) {
-                dev.sqlcj.schema.Column schemaColumn = findColumn(schemaTable, column.getUnquotedColumnName());
+            if (expression instanceof AllColumns) {
+                for (Source source : sources) {
+                    columns.addAll(resolveAllColumns(source));
+                }
+
+                continue;
+            }
+
+            if (expression instanceof net.sf.jsqlparser.schema.Column column) {
+                dev.sqlcj.schema.Column schemaColumn = resolveColumn(column, sources).column();
 
                 columns.add(
                     new QueryColumn(
@@ -503,11 +653,74 @@ public final class QueryAnalyzer {
 
             throw new UnsupportedOperationException(
                 "Unsupported SELECT expression: "
-                    + selectItem.getExpression().getClass().getSimpleName()
+                    + expression.getClass().getSimpleName()
             );
         }
 
         return columns;
+    }
+
+    /**
+     * Resolves one column reference against the ordered query sources. A
+     * qualified reference resolves through the exposed source name, and an
+     * unqualified reference must be contained by exactly one source.
+     */
+    private ResolvedColumn resolveColumn(net.sf.jsqlparser.schema.Column column, List<Source> sources) {
+        String columnName = column.getUnquotedColumnName();
+        String qualifier = qualifier(column);
+
+        if (qualifier != null) {
+            Source source = findSource(sources, qualifier);
+
+            return new ResolvedColumn(source, findColumn(source.table(), columnName));
+        }
+
+        List<Source> matches = sources.stream()
+            .filter(source -> lookupColumn(source.table(), columnName).isPresent())
+            .toList();
+
+        if (matches.size() > 1) {
+            throw new IllegalArgumentException(
+                "Ambiguous column reference '%s' in sources: %s"
+                    .formatted(columnName, sourceNames(matches))
+            );
+        }
+
+        if (matches.isEmpty()) {
+            throw new IllegalArgumentException(
+                "Column not found in sources %s: %s"
+                    .formatted(sourceNames(sources), columnName)
+            );
+        }
+
+        Source source = matches.getFirst();
+
+        return new ResolvedColumn(source, findColumn(source.table(), columnName));
+    }
+
+    private String qualifier(net.sf.jsqlparser.schema.Column column) {
+        Table table = column.getTable();
+
+        return table == null || table.getName() == null
+            ? null
+            : table.getUnquotedName();
+    }
+
+    private Source findSource(List<Source> sources, String name) {
+        return sources.stream()
+            .filter(source -> source.name().equalsIgnoreCase(name))
+            .findFirst()
+            .orElseThrow(
+                () -> new IllegalArgumentException(
+                    "Unknown source qualifier in query: " + name
+                )
+            );
+    }
+
+    private String sourceNames(List<Source> sources) {
+        return sources.stream()
+            .map(Source::name)
+            .collect(Collectors.joining(", "));
     }
 
     private dev.sqlcj.schema.Table findTable(Schema schema, String tableName) {
@@ -521,8 +734,8 @@ public final class QueryAnalyzer {
             );
     }
 
-    private List<QueryColumn> resolveAllColumns(dev.sqlcj.schema.Table table) {
-        return table.columns().stream()
+    private List<QueryColumn> resolveAllColumns(Source source) {
+        return source.table().columns().stream()
             .map(
                 column -> new QueryColumn(
                     column.name(),
@@ -534,9 +747,7 @@ public final class QueryAnalyzer {
     }
 
     private dev.sqlcj.schema.Column findColumn(dev.sqlcj.schema.Table table, String columnName) {
-        return table.columns().stream()
-            .filter(column -> column.name().equalsIgnoreCase(columnName))
-            .findFirst()
+        return lookupColumn(table, columnName)
             .orElseThrow(
                 () -> new IllegalArgumentException(
                     "Column not found in table "
@@ -545,5 +756,11 @@ public final class QueryAnalyzer {
                         + columnName
                 )
             );
+    }
+
+    private Optional<dev.sqlcj.schema.Column> lookupColumn(dev.sqlcj.schema.Table table, String columnName) {
+        return table.columns().stream()
+            .filter(column -> column.name().equalsIgnoreCase(columnName))
+            .findFirst();
     }
 }
