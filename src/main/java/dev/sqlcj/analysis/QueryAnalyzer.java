@@ -3,7 +3,11 @@ package dev.sqlcj.analysis;
 import dev.sqlcj.parser.Query;
 import dev.sqlcj.parser.QueryType;
 import dev.sqlcj.schema.Schema;
+import dev.sqlcj.sql.ParsedSql;
+import dev.sqlcj.type.DefaultTypeResolver;
+import dev.sqlcj.type.TypeResolver;
 import net.sf.jsqlparser.expression.Expression;
+import net.sf.jsqlparser.expression.JdbcNamedParameter;
 import net.sf.jsqlparser.expression.JdbcParameter;
 import net.sf.jsqlparser.expression.operators.conditional.AndExpression;
 import net.sf.jsqlparser.expression.operators.conditional.OrExpression;
@@ -13,6 +17,7 @@ import net.sf.jsqlparser.expression.operators.relational.ExpressionList;
 import net.sf.jsqlparser.expression.operators.relational.InExpression;
 import net.sf.jsqlparser.expression.operators.relational.ParenthesedExpressionList;
 import net.sf.jsqlparser.schema.Table;
+import net.sf.jsqlparser.statement.ReturningClause;
 import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.delete.Delete;
 import net.sf.jsqlparser.statement.insert.Insert;
@@ -29,14 +34,22 @@ import net.sf.jsqlparser.statement.update.UpdateSet;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public final class QueryAnalyzer {
 
-    private static final Pattern PLACEHOLDER = Pattern.compile("\\$\\d+");
+    private static final String ANONYMOUS_PARAMETER_REJECTION = """
+        Anonymous '?' parameters are not supported; use an indexed placeholder such as $1""";
+
+    /**
+     * Resolves the Java type of parameter occurrence, which decides whether a
+     * repeated placeholder index can share one generated parameter.
+     */
+    private final TypeResolver typeResolver = new DefaultTypeResolver();
 
     /**
      * One query source and the name it exposes to column references, which is
@@ -49,21 +62,25 @@ public final class QueryAnalyzer {
     private record ResolvedColumn(Source source, dev.sqlcj.schema.Column column) {
     }
 
-    public QueryModel analyze(Query query, Statement statement, Schema schema) {
+    public QueryModel analyze(Query query, ParsedSql parsedSql, Schema schema) {
+        requireIndexedPlaceholders(parsedSql);
+
+        Statement statement = parsedSql.statement();
+
         if (statement instanceof Select select) {
-            return analyzeSelect(query, select, schema);
+            return analyzeSelect(query, parsedSql, select, schema);
         }
 
         if (statement instanceof Insert insert) {
-            return analyzeInsert(query, insert, schema);
+            return analyzeInsert(query, parsedSql, insert, schema);
         }
 
         if (statement instanceof Update update) {
-            return analyzeUpdate(query, update, schema);
+            return analyzeUpdate(query, parsedSql, update, schema);
         }
 
         if (statement instanceof Delete delete) {
-            return analyzeDelete(query, delete, schema);
+            return analyzeDelete(query, parsedSql, delete, schema);
         }
 
         throw new UnsupportedOperationException(
@@ -71,7 +88,9 @@ public final class QueryAnalyzer {
         );
     }
 
-    private QueryModel analyzeSelect(Query query, Select select, Schema schema) {
+    private QueryModel analyzeSelect(Query query, ParsedSql parsedSql, Select select, Schema schema) {
+        requireResultQueryType(query);
+
         PlainSelect plainSelect = select.getPlainSelect();
         Table table = getTable(plainSelect);
 
@@ -83,28 +102,30 @@ public final class QueryAnalyzer {
 
         return toQueryModel(
             query,
+            parsedSql,
             table.getUnquotedName(),
             columns,
             bindingParameters
         );
     }
 
-    private QueryModel analyzeInsert(Query query, Insert insert, Schema schema) {
-        requireExecQueryType(query);
+    private QueryModel analyzeInsert(Query query, ParsedSql parsedSql, Insert insert, Schema schema) {
+        requireExecWrite(query, insert.getReturningClause());
 
         Table table = insert.getTable();
         dev.sqlcj.schema.Table schemaTable = findTable(schema, table.getUnquotedName());
 
         return toQueryModel(
             query,
+            parsedSql,
             table.getUnquotedName(),
             List.of(),
             resolveInsertParameters(insert, schemaTable)
         );
     }
 
-    private QueryModel analyzeUpdate(Query query, Update update, Schema schema) {
-        requireExecQueryType(query);
+    private QueryModel analyzeUpdate(Query query, ParsedSql parsedSql, Update update, Schema schema) {
+        requireExecWrite(query, update.getReturningClause());
 
         Table table = update.getTable();
         Source source = toSource(table, schema);
@@ -117,14 +138,15 @@ public final class QueryAnalyzer {
 
         return toQueryModel(
             query,
+            parsedSql,
             table.getUnquotedName(),
             List.of(),
             bindingParameters
         );
     }
 
-    private QueryModel analyzeDelete(Query query, Delete delete, Schema schema) {
-        requireExecQueryType(query);
+    private QueryModel analyzeDelete(Query query, ParsedSql parsedSql, Delete delete, Schema schema) {
+        requireExecWrite(query, delete.getReturningClause());
 
         Table table = delete.getTable();
         Source source = toSource(table, schema);
@@ -137,16 +159,31 @@ public final class QueryAnalyzer {
 
         return toQueryModel(
             query,
+            parsedSql,
             table.getUnquotedName(),
             List.of(),
             bindingParameters
         );
     }
 
-    private void requireExecQueryType(Query query) {
+    private void requireResultQueryType(Query query) {
+        if (query.type() != QueryType.ONE && query.type() != QueryType.MANY) {
+            throw new UnsupportedOperationException(
+                "SELECT queries must be declared as :one or :many"
+            );
+        }
+    }
+
+    private void requireExecWrite(Query query, ReturningClause returningClause) {
         if (query.type() != QueryType.EXEC) {
             throw new UnsupportedOperationException(
                 "Write queries must be declared as :exec"
+            );
+        }
+
+        if (returningClause != null) {
+            throw new UnsupportedOperationException(
+                "RETURNING is not supported"
             );
         }
     }
@@ -232,37 +269,108 @@ public final class QueryAnalyzer {
     }
 
     /**
-     * Builds the analyzed model from parameters collected in textual order,
-     * keeping that order for JDBC binding and exposing the parameters in
-     * logical placeholder-index order.
+     * Builds the analyzed model from the parameter occurrences collected in
+     * textual order, keeping that order for JDBC binding and exposing one
+     * logical parameter per placeholder index.
      */
     private QueryModel toQueryModel(
         Query query,
+        ParsedSql parsedSql,
         String tableName,
         List<QueryColumn> columns,
-        List<QueryParameter> bindingParameters
+        List<QueryParameter> occurrences
     ) {
-        List<Integer> bindingParameterIndexes = bindingParameters.stream()
-            .map(QueryParameter::index)
-            .toList();
-
-        List<QueryParameter> parameters = bindingParameters.stream()
-            .sorted(Comparator.comparingInt(QueryParameter::index))
-            .toList();
+        List<Integer> bindingParameterIndexes = requireAccountedOccurrences(parsedSql, occurrences);
 
         return new QueryModel(
             query.name(),
             query.type(),
             tableName,
-            toExecutableSql(query.sql()),
+            parsedSql.parameters().executableSql(),
             bindingParameterIndexes,
             columns,
-            parameters
+            toParameters(occurrences)
         );
     }
 
-    private String toExecutableSql(String sql) {
-        return PLACEHOLDER.matcher(sql).replaceAll("?");
+    /**
+     * Requires that the occurrences resolved against the schema are exactly the
+     * placeholder tokens the SQL parser reported, in the same textual order, so
+     * that every executable {@code ?} position has one typed binding source.
+     */
+    private List<Integer> requireAccountedOccurrences(ParsedSql parsedSql, List<QueryParameter> occurrences) {
+        List<Integer> analyzed = occurrences.stream()
+            .map(QueryParameter::index)
+            .toList();
+
+        List<Integer> placeholders = parsedSql.parameters().indexes();
+
+        if (!analyzed.equals(placeholders)) {
+            throw new UnsupportedOperationException(
+                "SQL placeholders %s are not the analyzed parameters %s; a placeholder is in an unsupported location"
+                    .formatted(placeholders, analyzed)
+            );
+        }
+
+        return analyzed;
+    }
+
+    /**
+     * Retains one parameter per placeholder index in logical index order. A
+     * repeated index keeps the name and type of its first occurrence and is
+     * accepted only when every occurrence resolves to the same Java type.
+     */
+    private List<QueryParameter> toParameters(List<QueryParameter> occurrences) {
+        Map<Integer, QueryParameter> parametersByIndex = new LinkedHashMap<>();
+
+        for (QueryParameter occurrence : occurrences) {
+            QueryParameter parameter = parametersByIndex.putIfAbsent(occurrence.index(), occurrence);
+
+            if (parameter != null) {
+                requireSameParameterType(parameter, occurrence);
+            }
+        }
+
+        List<QueryParameter> parameters = parametersByIndex.values().stream()
+            .sorted(Comparator.comparingInt(QueryParameter::index))
+            .toList();
+
+        requireContiguousIndexes(parameters);
+
+        return parameters;
+    }
+
+    private void requireSameParameterType(QueryParameter parameter, QueryParameter occurrence) {
+        String type = typeResolver.resolve(parameter.type());
+        String occurrenceType = typeResolver.resolve(occurrence.type());
+
+        if (!type.equals(occurrenceType)) {
+            throw new UnsupportedOperationException(
+                "Placeholder $%d has conflicting types: %s from '%s' and %s from '%s'"
+                    .formatted(
+                        parameter.index(),
+                        type,
+                        parameter.name(),
+                        occurrenceType,
+                        occurrence.name()
+                    )
+            );
+        }
+    }
+
+    private void requireContiguousIndexes(List<QueryParameter> parameters) {
+        for (int index = 0; index < parameters.size(); index++) {
+            if (parameters.get(index).index() != index + 1) {
+                throw new UnsupportedOperationException(
+                    "Placeholder indexes must start at $1 without gaps, but were %s"
+                        .formatted(
+                            parameters.stream()
+                                .map(QueryParameter::index)
+                                .toList()
+                        )
+                );
+            }
+        }
     }
 
     private Table getTable(PlainSelect plainSelect) {
@@ -470,6 +578,8 @@ public final class QueryAnalyzer {
 
         if (rightExpression instanceof ExpressionList<?> expressionList) {
             for (Expression expression : expressionList) {
+                requireIndexedParameter(expression);
+
                 if (expression instanceof JdbcParameter parameter) {
                     addParameter(parameter, schemaColumn, parameters);
                 }
@@ -492,6 +602,8 @@ public final class QueryAnalyzer {
         List<Source> sources,
         List<QueryParameter> parameters
     ) {
+        requireIndexedParameter(expression);
+
         if (expression instanceof JdbcParameter parameter) {
             addParameter(parameter, schemaColumn, parameters);
             return;
@@ -535,6 +647,8 @@ public final class QueryAnalyzer {
 
         if (expression instanceof ParenthesedExpressionList<?> expressionList) {
             for (Expression nestedExpression : expressionList) {
+                requireIndexedParameter(nestedExpression);
+
                 if (nestedExpression instanceof JdbcParameter parameter) {
                     addParameter(parameter, schemaColumn, parameters);
                 } else {
@@ -554,10 +668,10 @@ public final class QueryAnalyzer {
         List<Source> sources,
         List<QueryParameter> parameters
     ) {
-        if (
-            left instanceof net.sf.jsqlparser.schema.Column column
-                && right instanceof JdbcParameter parameter
-        ) {
+        requireIndexedParameter(left);
+        requireIndexedParameter(right);
+
+        if (left instanceof net.sf.jsqlparser.schema.Column column && right instanceof JdbcParameter parameter) {
             addParameter(
                 parameter,
                 resolveColumn(column, sources).column(),
@@ -566,10 +680,7 @@ public final class QueryAnalyzer {
             return;
         }
 
-        if (
-            left instanceof JdbcParameter parameter
-                && right instanceof net.sf.jsqlparser.schema.Column column
-        ) {
+        if (left instanceof JdbcParameter parameter && right instanceof net.sf.jsqlparser.schema.Column column) {
             addParameter(
                 parameter,
                 resolveColumn(column, sources).column(),
@@ -596,6 +707,10 @@ public final class QueryAnalyzer {
         dev.sqlcj.schema.Column column,
         List<QueryParameter> parameters
     ) {
+        if (!parameter.isUseFixedIndex()) {
+            throw new UnsupportedOperationException(ANONYMOUS_PARAMETER_REJECTION);
+        }
+
         parameters.add(
             new QueryParameter(
                 parameter.getIndex(),
@@ -603,6 +718,31 @@ public final class QueryAnalyzer {
                 column.type()
             )
         );
+    }
+
+    /**
+     * Rejects an anonymous placeholder reported anywhere in the SQL source,
+     * including a clause this analyzer does not traverse, so that an accepted
+     * query never keeps an unbound placeholder in its executable SQL.
+     */
+    private void requireIndexedPlaceholders(ParsedSql parsedSql) {
+        if (parsedSql.parameters().hasAnonymousParameter()) {
+            throw new UnsupportedOperationException(ANONYMOUS_PARAMETER_REJECTION);
+        }
+    }
+
+    /**
+     * Rejects a named placeholder where an indexed placeholder is supported, so
+     * that an accepted query never keeps an unbound placeholder in its
+     * executable SQL.
+     */
+    private void requireIndexedParameter(Expression expression) {
+        if (expression instanceof JdbcNamedParameter named) {
+            throw new UnsupportedOperationException(
+                "Named parameter ':%s' is not supported; use an indexed placeholder such as $1"
+                    .formatted(named.getName())
+            );
+        }
     }
 
     /**

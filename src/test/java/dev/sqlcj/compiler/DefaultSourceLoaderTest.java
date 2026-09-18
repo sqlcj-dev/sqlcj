@@ -216,6 +216,43 @@ class DefaultSourceLoaderTest {
         );
     }
 
+    @Test
+    void shouldCarrySourcePathsAndQueryLines() throws IOException {
+        Path schema = write("schema.sql", """
+            CREATE TABLE users
+            (
+                id BIGINT NOT NULL
+            );
+            """);
+
+        Path queries = write("queries.sql", """
+            -- name: GetUser :one
+            SELECT id
+            FROM users
+            WHERE id = $1;
+
+            -- name: ListUsers :many
+            SELECT id
+            FROM users;
+            """);
+
+        List<Source> sources = sourceLoader.load(
+            config(
+                new SqlConfig(
+                    schema.toString(),
+                    queries.toString()
+                )
+            )
+        );
+
+        Source source = sources.getFirst();
+
+        assertEquals(schema, source.schemaPath());
+        assertEquals(queries, source.queriesPath());
+        assertEquals(1, source.queries().getFirst().line());
+        assertEquals(6, source.queries().get(1).line());
+    }
+
     private List<String> names(Source source) {
         return source.queries().stream().map(Query::name).toList();
     }

@@ -7,11 +7,12 @@ import java.util.List;
 /**
  * Analyzed query facts required by code generation.
  *
- * @param executableSql            JDBC-executable SQL where supported {@code $N}
- *                                 placeholders are replaced by {@code ?}
+ * @param executableSql            JDBC-executable SQL where every parsed {@code $N}
+ *                                 parameter token is replaced by {@code ?}
  * @param bindingParameterIndexes  placeholder indexes in the textual order of the
  *                                 {@code ?} positions in {@link #executableSql()}
- * @param parameters               query parameters in logical placeholder-index order
+ * @param parameters               one query parameter per placeholder index, in
+ *                                 logical placeholder-index order
  */
 public record QueryModel(
     String name,

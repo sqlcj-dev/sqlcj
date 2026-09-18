@@ -17,7 +17,7 @@ WHERE id = $1
 -- name: GetUserById :one
 SELECT id, name
 FROM users
-WHERE id = ?;
+WHERE id = $1;
 
 -- name: FindUsers :many
 SELECT id, name

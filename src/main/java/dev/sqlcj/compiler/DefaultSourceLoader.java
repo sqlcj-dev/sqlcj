@@ -41,7 +41,14 @@ public final class DefaultSourceLoader implements SourceLoader {
                 }
             }
 
-            sources.add(new Source(schema, queries));
+            sources.add(
+                new Source(
+                    schemaPath,
+                    schema,
+                    queriesPath,
+                    queries
+                )
+            );
         }
 
         return sources;
