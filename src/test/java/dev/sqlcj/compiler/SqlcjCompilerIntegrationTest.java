@@ -14,6 +14,7 @@ import javax.tools.ToolProvider;
 import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
+import java.math.BigDecimal;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.file.Files;
@@ -33,6 +34,28 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SqlcjCompilerIntegrationTest {
+
+    private static final String JOIN_SCHEMA = """
+        CREATE TABLE users
+        (
+            id   BIGINT NOT NULL,
+            name VARCHAR(255)
+        );
+
+        CREATE TABLE profiles
+        (
+            id       BIGINT NOT NULL,
+            user_id  BIGINT NOT NULL,
+            nickname VARCHAR(255)
+        );
+
+        CREATE TABLE orders
+        (
+            id      BIGINT NOT NULL,
+            user_id BIGINT NOT NULL,
+            total   DECIMAL(10, 2)
+        );
+        """;
 
     @TempDir
     Path tempDir;
@@ -118,12 +141,12 @@ class SqlcjCompilerIntegrationTest {
         assertTrue(getUser.contains("LocalDateTime created_at"));
         assertTrue(getUser.contains("BigDecimal balance"));
         assertTrue(getUser.contains("private static final RowMapper<GetUserResult> ROW_MAPPER"));
-        assertTrue(getUser.contains("resultSet.getObject(\"id\", Long.class)"));
-        assertTrue(getUser.contains("resultSet.getObject(\"name\", String.class)"));
-        assertTrue(getUser.contains("resultSet.getObject(\"active\", Boolean.class)"));
-        assertTrue(getUser.contains("resultSet.getObject(\"birth_date\", LocalDate.class)"));
-        assertTrue(getUser.contains("resultSet.getObject(\"created_at\", LocalDateTime.class)"));
-        assertTrue(getUser.contains("resultSet.getObject(\"balance\", BigDecimal.class)"));
+        assertTrue(getUser.contains("resultSet.getObject(1, Long.class)"));
+        assertTrue(getUser.contains("resultSet.getObject(2, String.class)"));
+        assertTrue(getUser.contains("resultSet.getObject(3, Boolean.class)"));
+        assertTrue(getUser.contains("resultSet.getObject(4, LocalDate.class)"));
+        assertTrue(getUser.contains("resultSet.getObject(5, LocalDateTime.class)"));
+        assertTrue(getUser.contains("resultSet.getObject(6, BigDecimal.class)"));
 
         String listUsers = Files.readString(listUsersFile);
         assertTrue(listUsers.contains("public final class ListUsers"));
@@ -781,6 +804,146 @@ class SqlcjCompilerIntegrationTest {
     }
 
     @Test
+    void shouldExecuteGeneratedAliasedQualifiedQuery() throws Exception {
+        Path classesDirectory = generateAndCompile(
+            JOIN_SCHEMA,
+            """
+                -- name: GetUser :one
+                SELECT u.id, u.name
+                FROM users u
+                WHERE u.id = $1;
+                """,
+            "GetUser"
+        );
+
+        String source = Files.readString(tempDir.resolve("generated/generated/GetUser.java"));
+
+        assertTrue(source.contains("public GetUserResult getUser(Long id)"));
+        assertTrue(source.contains("resultSet.getObject(1, Long.class)"));
+        assertTrue(source.contains("resultSet.getObject(2, String.class)"));
+
+        QueryExecutor executor = new JdbcQueryExecutor(joinDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName("generated.GetUser", true, classLoader);
+
+            Object result = generatedClass
+                .getMethod("getUser", Long.class)
+                .invoke(
+                    generatedClass
+                        .getConstructor(QueryExecutor.class)
+                        .newInstance(executor),
+                    1L
+                );
+
+            assertNotNull(result);
+            assertEquals(1L, getRecordComponent(result, "id"));
+            assertEquals("Alice", getRecordComponent(result, "name"));
+        }
+    }
+
+    @Test
+    void shouldExecuteGeneratedJoinQueryWithDuplicateColumnNames() throws Exception {
+        Path classesDirectory = generateAndCompile(
+            JOIN_SCHEMA,
+            """
+                -- name: ListUserProfiles :many
+                SELECT u.id, p.id, p.nickname
+                FROM users u
+                JOIN profiles p ON p.user_id = u.id
+                WHERE p.nickname = $2
+                  AND u.id = $1;
+                """,
+            "ListUserProfiles"
+        );
+
+        String source = Files.readString(
+            tempDir.resolve("generated/generated/ListUserProfiles.java")
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<ListUserProfilesResult> listUserProfiles(Long id, String nickname)"
+            )
+        );
+
+        assertTrue(source.contains("List.of(nickname, id)"));
+        assertTrue(source.contains("Long id1"));
+        assertTrue(source.contains("Long id2"));
+
+        QueryExecutor executor = new JdbcQueryExecutor(joinDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName(
+                "generated.ListUserProfiles",
+                true,
+                classLoader
+            );
+
+            Object results = generatedClass
+                .getMethod("listUserProfiles", Long.class, String.class)
+                .invoke(
+                    generatedClass
+                        .getConstructor(QueryExecutor.class)
+                        .newInstance(executor),
+                    1L,
+                    "ali"
+                );
+
+            List<?> rows = assertInstanceOf(List.class, results);
+
+            assertEquals(1, rows.size());
+
+            Object row = rows.getFirst();
+
+            assertEquals(1L, getRecordComponent(row, "id1"));
+            assertEquals(10L, getRecordComponent(row, "id2"));
+            assertEquals("ali", getRecordComponent(row, "nickname"));
+        }
+    }
+
+    @Test
+    void shouldExecuteGeneratedMultipleJoinQuery() throws Exception {
+        Path classesDirectory = generateAndCompile(
+            JOIN_SCHEMA,
+            """
+                -- name: GetUserOrder :one
+                SELECT u.id, p.nickname, o.id, o.total
+                FROM users u
+                JOIN profiles p ON p.user_id = u.id
+                JOIN orders o ON o.user_id = u.id
+                WHERE u.id = $1;
+                """,
+            "GetUserOrder"
+        );
+
+        QueryExecutor executor = new JdbcQueryExecutor(joinDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName(
+                "generated.GetUserOrder",
+                true,
+                classLoader
+            );
+
+            Object result = generatedClass
+                .getMethod("getUserOrder", Long.class)
+                .invoke(
+                    generatedClass
+                        .getConstructor(QueryExecutor.class)
+                        .newInstance(executor),
+                    2L
+                );
+
+            assertNotNull(result);
+            assertEquals(2L, getRecordComponent(result, "id1"));
+            assertEquals("bob", getRecordComponent(result, "nickname"));
+            assertEquals(200L, getRecordComponent(result, "id2"));
+            assertEquals(new BigDecimal("20.00"), getRecordComponent(result, "total"));
+        }
+    }
+
+    @Test
     void shouldCompileConfiguredEntriesWithConfiguredPackage() throws IOException {
         Path usersSchema = tempDir.resolve("users-schema.sql");
         Path usersQueries = tempDir.resolve("users-queries.sql");
@@ -1019,12 +1182,12 @@ class SqlcjCompilerIntegrationTest {
             generatedDirectory.resolve("generated").resolve("Get_User.java")
         );
 
-        assertTrue(generated.contains("resultSet.getObject(\"id\", Long.class)"));
-        assertFalse(generated.contains("resultSet.getObject(\"name\", String.class)"));
+        assertTrue(generated.contains("resultSet.getObject(1, Long.class)"));
+        assertFalse(generated.contains("resultSet.getObject(1, String.class)"));
     }
 
     @Test
-    void shouldRejectGeneratedPathsThatDifferOnlyByCaseBeforeOverwriting() throws IOException {
+    void shouldRejectGeneratedPathsThatDifferOnlyByCaseBeforeOverwriting() {
         Path generatedDirectory = tempDir.resolve("generated");
 
         CompilationException exception = assertThrows(
@@ -1117,8 +1280,8 @@ class SqlcjCompilerIntegrationTest {
 
         assertTrue(source.contains("Long user_id"));
         assertTrue(source.contains("String class_"));
-        assertTrue(source.contains("resultSet.getObject(\"user id\", Long.class)"));
-        assertTrue(source.contains("resultSet.getObject(\"class\", String.class)"));
+        assertTrue(source.contains("resultSet.getObject(1, Long.class)"));
+        assertTrue(source.contains("resultSet.getObject(2, String.class)"));
         assertTrue(source.contains("listUserData(String class_)"));
         assertTrue(source.contains("WHERE \"class\" = ?"));
 
@@ -1177,13 +1340,7 @@ class SqlcjCompilerIntegrationTest {
     }
 
     private Path generateAndCompile(String queries, String queryName) throws IOException {
-        Path schemaFile = tempDir.resolve("schema.sql");
-        Path queriesFile = tempDir.resolve("queries.sql");
-        Path generatedDirectory = tempDir.resolve("generated");
-        Path classesDirectory = tempDir.resolve("classes");
-
-        Files.writeString(
-            schemaFile,
+        return generateAndCompile(
             """
                 CREATE TABLE users
                 (
@@ -1191,8 +1348,19 @@ class SqlcjCompilerIntegrationTest {
                     name   VARCHAR(255),
                     active BOOLEAN
                 );
-                """
+                """,
+            queries,
+            queryName
         );
+    }
+
+    private Path generateAndCompile(String schema, String queries, String queryName) throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+        Path classesDirectory = tempDir.resolve("classes");
+
+        Files.writeString(schemaFile, schema);
 
         Files.writeString(queriesFile, queries);
 
@@ -1268,6 +1436,59 @@ class SqlcjCompilerIntegrationTest {
                 VALUES
                     (1, 'Alice', TRUE),
                     (2, 'Bob', FALSE)
+                """);
+        }
+
+        return dataSource;
+    }
+
+    private JdbcDataSource joinDataSource() throws Exception {
+        JdbcDataSource dataSource = new JdbcDataSource();
+
+        dataSource.setURL(
+            "jdbc:h2:mem:" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1"
+        );
+
+        try (
+            Connection connection = dataSource.getConnection();
+            Statement statement = connection.createStatement()
+        ) {
+            statement.execute("""
+                CREATE TABLE users (
+                    id BIGINT PRIMARY KEY,
+                    name VARCHAR(255)
+                )
+                """);
+
+            statement.execute("""
+                CREATE TABLE profiles (
+                    id BIGINT PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    nickname VARCHAR(255)
+                )
+                """);
+
+            statement.execute("""
+                CREATE TABLE orders (
+                    id BIGINT PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    total DECIMAL(10, 2)
+                )
+                """);
+
+            statement.execute("""
+                INSERT INTO users (id, name)
+                VALUES (1, 'Alice'), (2, 'Bob')
+                """);
+
+            statement.execute("""
+                INSERT INTO profiles (id, user_id, nickname)
+                VALUES (10, 1, 'ali'), (20, 2, 'bob')
+                """);
+
+            statement.execute("""
+                INSERT INTO orders (id, user_id, total)
+                VALUES (100, 1, 15.50), (200, 2, 20.00)
                 """);
         }
 

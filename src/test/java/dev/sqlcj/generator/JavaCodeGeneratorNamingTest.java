@@ -19,6 +19,7 @@ import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -102,7 +103,7 @@ class JavaCodeGeneratorNamingTest {
     }
 
     @Test
-    void shouldKeepSqlLabelsWhenRenamingResultComponents() throws IOException {
+    void shouldReadRenamedResultComponentsByProjectionPosition() throws IOException {
         GeneratedFile file = codeGenerator.generate(
             query(
                 "ListUsers",
@@ -123,16 +124,16 @@ class JavaCodeGeneratorNamingTest {
         assertTrue(source.contains("String user_id1"));
         assertTrue(source.contains("String user_id2"));
 
-        assertTrue(source.contains("resultSet.getObject(\"class\", Long.class)"));
-        assertTrue(source.contains("resultSet.getObject(\"hashCode\", String.class)"));
-        assertTrue(source.contains("resultSet.getObject(\"user id\", String.class)"));
-        assertTrue(source.contains("resultSet.getObject(\"user-id\", String.class)"));
+        assertTrue(source.contains("resultSet.getObject(1, Long.class)"));
+        assertTrue(source.contains("resultSet.getObject(2, String.class)"));
+        assertTrue(source.contains("resultSet.getObject(3, String.class)"));
+        assertTrue(source.contains("resultSet.getObject(4, String.class)"));
 
         assertCompiles(file);
     }
 
     @Test
-    void shouldEscapeQuotedSqlLabelInRowMapper() throws IOException {
+    void shouldReadQuotedSqlColumnByProjectionPosition() throws IOException {
         GeneratedFile file = codeGenerator.generate(
             query(
                 "ListUsers",
@@ -144,7 +145,7 @@ class JavaCodeGeneratorNamingTest {
         String source = file.content();
 
         assertTrue(source.contains("String user_id"));
-        assertTrue(source.contains("resultSet.getObject(\"user\\\"id\", String.class)"));
+        assertTrue(source.contains("resultSet.getObject(1, String.class)"));
 
         assertCompiles(file);
     }
@@ -247,7 +248,7 @@ class JavaCodeGeneratorNamingTest {
                 .getConstructor(QueryExecutor.class)
                 .newInstance(executor);
 
-            Method method = List.of(generatedClass.getMethods()).stream()
+            Method method = Stream.of(generatedClass.getMethods())
                 .filter(candidate -> candidate.getName().equals(methodName))
                 .findFirst()
                 .orElseThrow();

@@ -380,6 +380,41 @@ class JavaCodeGeneratorTest {
         );
     }
 
+    @Test
+    void shouldGenerateDistinctComponentsAndPositionalReadsForDuplicateColumns() throws IOException {
+        QueryModel query = new QueryModel(
+            "ListUserProfiles",
+            QueryType.MANY,
+            "users",
+            """
+                SELECT u.id, p.id, p.nickname
+                FROM users u
+                JOIN profiles p ON p.user_id = u.id
+                """,
+            List.of(),
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("nickname", ColumnType.VARCHAR, true)
+            ),
+            List.of()
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        String source = file.content();
+
+        assertTrue(source.contains("Long id1"));
+        assertTrue(source.contains("Long id2"));
+        assertTrue(source.contains("String nickname"));
+
+        assertTrue(source.contains("resultSet.getObject(1, Long.class)"));
+        assertTrue(source.contains("resultSet.getObject(2, Long.class)"));
+        assertTrue(source.contains("resultSet.getObject(3, String.class)"));
+
+        assertEquals(0, compile(file, "ListUserProfiles.java"));
+    }
+
     @ParameterizedTest
     @CsvSource(
         {
@@ -666,8 +701,13 @@ class JavaCodeGeneratorTest {
 
         GeneratedFile file = codeGenerator.generate(query);
 
+        assertEquals(0, compile(file, "ListUsers.java"));
+    }
+
+    /** Compiles one generated source file in an isolated temporary location. */
+    private int compile(GeneratedFile file, String fileName) throws IOException {
         Path sourceDirectory = tempDir.resolve("generated");
-        Path sourceFile = sourceDirectory.resolve("ListUsers.java");
+        Path sourceFile = sourceDirectory.resolve(fileName);
         Path outputDirectory = tempDir.resolve("classes");
 
         Files.createDirectories(sourceDirectory);
@@ -679,20 +719,16 @@ class JavaCodeGeneratorTest {
 
         assertNotNull(compiler);
 
-        String classpath = System.getProperty("java.class.path");
-
-        int result = compiler.run(
+        return compiler.run(
             null,
             null,
             null,
             "-classpath",
-            classpath,
+            System.getProperty("java.class.path"),
             "-d",
             outputDirectory.toString(),
             sourceFile.toString()
         );
-
-        assertEquals(0, result);
     }
 
     @ParameterizedTest
@@ -847,31 +883,31 @@ class JavaCodeGeneratorTest {
 
         assertTrue(
             source.contains(
-                "resultSet.getObject(\"id\", Long.class)"
+                "resultSet.getObject(1, Long.class)"
             )
         );
 
         assertTrue(
             source.contains(
-                "resultSet.getObject(\"name\", String.class)"
+                "resultSet.getObject(2, String.class)"
             )
         );
 
         assertTrue(
             source.contains(
-                "resultSet.getObject(\"birth_date\", LocalDate.class)"
+                "resultSet.getObject(3, LocalDate.class)"
             )
         );
 
         assertTrue(
             source.contains(
-                "resultSet.getObject(\"created_at\", LocalDateTime.class)"
+                "resultSet.getObject(4, LocalDateTime.class)"
             )
         );
 
         assertTrue(
             source.contains(
-                "resultSet.getObject(\"balance\", BigDecimal.class)"
+                "resultSet.getObject(5, BigDecimal.class)"
             )
         );
     }
@@ -893,9 +929,9 @@ class JavaCodeGeneratorTest {
 
         String source = codeGenerator.generate(query).content();
 
-        int nameIndex = source.indexOf("resultSet.getObject(\"name\", String.class)");
+        int nameIndex = source.indexOf("resultSet.getObject(1, String.class)");
 
-        int idIndex = source.indexOf("resultSet.getObject(\"id\", Long.class)");
+        int idIndex = source.indexOf("resultSet.getObject(2, Long.class)");
 
         assertTrue(nameIndex < idIndex);
     }
@@ -931,13 +967,13 @@ class JavaCodeGeneratorTest {
 
         assertTrue(
             source.contains(
-                "resultSet.getObject(\"id\", Long.class)"
+                "resultSet.getObject(1, Long.class)"
             )
         );
 
         assertTrue(
             source.contains(
-                "resultSet.getObject(\"name\", String.class)"
+                "resultSet.getObject(2, String.class)"
             )
         );
     }

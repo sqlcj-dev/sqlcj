@@ -34,6 +34,37 @@ class QueryAnalyzerTest {
         )
     );
 
+    private static final Schema joinSchema = new Schema(
+        List.of(
+            new Table(
+                "users",
+                List.of(
+                    new Column("id", ColumnType.BIGINT, false),
+                    new Column("name", ColumnType.VARCHAR, true)
+                ),
+                List.of()
+            ),
+            new Table(
+                "profiles",
+                List.of(
+                    new Column("id", ColumnType.BIGINT, false),
+                    new Column("user_id", ColumnType.BIGINT, false),
+                    new Column("nickname", ColumnType.VARCHAR, true)
+                ),
+                List.of()
+            ),
+            new Table(
+                "orders",
+                List.of(
+                    new Column("id", ColumnType.BIGINT, false),
+                    new Column("user_id", ColumnType.BIGINT, false),
+                    new Column("total", ColumnType.DECIMAL, true)
+                ),
+                List.of()
+            )
+        )
+    );
+
     private final SqlParser parser = new SqlParser();
     private final QueryAnalyzer analyzer = new QueryAnalyzer();
 
@@ -1003,5 +1034,333 @@ class QueryAnalyzerTest {
         );
 
         assertTrue(model.bindingParameterIndexes().isEmpty());
+    }
+
+    @Test
+    void shouldAnalyzeAliasedSingleTableSelect() {
+        String sql = """
+            SELECT u.id, u.name
+            FROM users u
+            WHERE u.name = $1
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("GetUser", QueryType.ONE, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals("users", model.table());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "name", ColumnType.VARCHAR)),
+            model.parameters()
+        );
+    }
+
+    @Test
+    void shouldRejectTableNameHiddenByAlias() {
+        String sql = """
+            SELECT users.id
+            FROM users u
+            """;
+
+        Query query = new Query("GetUser", QueryType.ONE, sql);
+        Statement statement = parser.parse(sql);
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, statement, joinSchema)
+        );
+
+        assertTrue(exception.getMessage().contains("users"));
+    }
+
+    @Test
+    void shouldAnalyzeSingleInnerJoin() {
+        String sql = """
+            SELECT u.id, p.id, p.nickname
+            FROM users u
+            JOIN profiles p ON p.user_id = u.id
+            WHERE u.id = $1
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("GetUserProfile", QueryType.ONE, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("nickname", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            model.parameters()
+        );
+    }
+
+    @Test
+    void shouldAnalyzeExplicitInnerJoinWithMultipleSources() {
+        String sql = """
+            SELECT u.name, p.nickname, o.total
+            FROM users u
+            INNER JOIN profiles p ON p.user_id = u.id
+            INNER JOIN orders o ON o.user_id = u.id
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUserOrders", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("name", ColumnType.VARCHAR, true),
+                new QueryColumn("nickname", ColumnType.VARCHAR, true),
+                new QueryColumn("total", ColumnType.DECIMAL, true)
+            ),
+            model.columns()
+        );
+    }
+
+    @Test
+    void shouldExpandAllColumnsAcrossJoinedSourcesInOrder() {
+        String sql = """
+            SELECT *
+            FROM users u
+            JOIN profiles p ON p.user_id = u.id
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUserProfiles", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true),
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("user_id", ColumnType.BIGINT, false),
+                new QueryColumn("nickname", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+    }
+
+    @Test
+    void shouldExpandQualifiedAllColumnsForOneSource() {
+        String sql = """
+            SELECT p.*, u.name
+            FROM users u
+            JOIN profiles p ON p.user_id = u.id
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListProfiles", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("user_id", ColumnType.BIGINT, false),
+                new QueryColumn("nickname", ColumnType.VARCHAR, true),
+                new QueryColumn("name", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+    }
+
+    @Test
+    void shouldResolveUniqueUnqualifiedColumnInJoinedQuery() {
+        String sql = """
+            SELECT nickname, name
+            FROM users u
+            JOIN profiles p ON p.user_id = u.id
+            WHERE nickname = $1
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListNicknames", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("nickname", ColumnType.VARCHAR, true),
+                new QueryColumn("name", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "nickname", ColumnType.VARCHAR)),
+            model.parameters()
+        );
+    }
+
+    @Test
+    void shouldResolveJoinedParametersInTextualBindingOrder() {
+        String sql = """
+            SELECT u.id
+            FROM users u
+            JOIN profiles p ON p.user_id = u.id
+            WHERE p.nickname = $2
+              AND u.id = $1
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("FindUser", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "nickname", ColumnType.VARCHAR)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(2, 1), model.bindingParameterIndexes());
+    }
+
+    @Test
+    void shouldRejectAmbiguousUnqualifiedColumn() {
+        String sql = """
+            SELECT id
+            FROM users u
+            JOIN profiles p ON p.user_id = u.id
+            """;
+
+        Query query = new Query("ListIds", QueryType.MANY, sql);
+        Statement statement = parser.parse(sql);
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, statement, joinSchema)
+        );
+
+        assertTrue(exception.getMessage().contains("id"));
+    }
+
+    @Test
+    void shouldRejectUnknownColumnQualifier() {
+        String sql = """
+            SELECT o.id
+            FROM users u
+            JOIN profiles p ON p.user_id = u.id
+            """;
+
+        Query query = new Query("ListIds", QueryType.MANY, sql);
+        Statement statement = parser.parse(sql);
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, statement, joinSchema)
+        );
+
+        assertTrue(exception.getMessage().contains("o"));
+    }
+
+    @Test
+    void shouldRejectDuplicateExposedSourceName() {
+        String sql = """
+            SELECT u.id
+            FROM users u
+            JOIN profiles U ON U.user_id = u.id
+            """;
+
+        Query query = new Query("ListIds", QueryType.MANY, sql);
+        Statement statement = parser.parse(sql);
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, statement, joinSchema)
+        );
+
+        assertTrue(exception.getMessage().contains("U"));
+    }
+
+    /**
+     * {@link net.sf.jsqlparser.statement.select.Join#isInnerJoin()} also
+     * reports these shapes as inner joins, so the supported-shape gate must
+     * reject them explicitly.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "FROM users u, profiles p",
+            "FROM users u STRAIGHT_JOIN profiles p ON p.user_id = u.id"
+        }
+    )
+    void shouldRejectExcludedJoinReportedAsInnerJoin(String fromClause) {
+        String sql = """
+            SELECT u.id
+            %s
+            """.formatted(fromClause);
+
+        Query query = new Query("ListIds", QueryType.MANY, sql);
+        Statement statement = parser.parse(sql);
+
+        assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, statement, joinSchema)
+        );
+    }
+
+    @Test
+    void shouldRejectJoinWithoutSingleQualifiedEquality() {
+        String sql = """
+            SELECT u.id
+            FROM users u
+            JOIN profiles p ON p.user_id = u.id AND p.nickname = u.name
+            """;
+
+        Query query = new Query("ListIds", QueryType.MANY, sql);
+        Statement statement = parser.parse(sql);
+
+        assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, statement, joinSchema)
+        );
+    }
+
+    @Test
+    void shouldRejectJoinConditionWithoutEarlierSource() {
+        String sql = """
+            SELECT u.id
+            FROM users u
+            JOIN profiles p ON p.user_id = p.id
+            """;
+
+        Query query = new Query("ListIds", QueryType.MANY, sql);
+        Statement statement = parser.parse(sql);
+
+        assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, statement, joinSchema)
+        );
     }
 }
