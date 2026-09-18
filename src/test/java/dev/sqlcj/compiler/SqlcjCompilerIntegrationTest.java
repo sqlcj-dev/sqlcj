@@ -607,6 +607,109 @@ class SqlcjCompilerIntegrationTest {
     }
 
     @Test
+    void shouldExecuteGeneratedQueryWithRepeatedPlaceholder() throws Exception {
+        Path classesDirectory = generateAndCompile(
+            """
+                -- name: FindUser :one
+                SELECT id, name, active
+                FROM users
+                WHERE name = $2
+                  AND (id = $1 OR id = $1);
+                """,
+            "FindUser"
+        );
+
+        String source = Files.readString(tempDir.resolve("generated/generated/FindUser.java"));
+
+        assertTrue(
+            source.contains(
+                "public FindUserResult findUser(Long id, String name)"
+            )
+        );
+
+        assertTrue(source.contains("List.of(name, id, id)"));
+        assertTrue(source.contains("AND (id = ? OR id = ?)"));
+
+        QueryExecutor executor = new JdbcQueryExecutor(usersDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName(
+                "generated.FindUser",
+                true,
+                classLoader
+            );
+
+            Object generatedQuery = generatedClass
+                .getConstructor(QueryExecutor.class)
+                .newInstance(executor);
+
+            Method method = generatedClass.getMethod(
+                "findUser",
+                Long.class,
+                String.class
+            );
+
+            Object result = method.invoke(generatedQuery, 1L, "Alice");
+
+            assertNotNull(result);
+
+            assertEquals(1L, getRecordComponent(result, "id"));
+            assertEquals("Alice", getRecordComponent(result, "name"));
+
+            assertNull(method.invoke(generatedQuery, 2L, "Alice"));
+        }
+    }
+
+    @Test
+    void shouldExecuteGeneratedQueryWithProtectedPlaceholderText() throws Exception {
+        Path classesDirectory = generateAndCompile(
+            """
+                -- name: FindUser :one
+                -- Keeps $9 in a comment.
+                SELECT id, name
+                FROM users
+                WHERE name <> '$1 literal' /* keeps $8 */
+                  AND id = $1;
+                """,
+            "FindUser"
+        );
+
+        String source = Files.readString(tempDir.resolve("generated/generated/FindUser.java"));
+
+        assertTrue(source.contains("-- Keeps $9 in a comment."));
+        assertTrue(source.contains("WHERE name <> '$1 literal' /* keeps $8 */"));
+        assertTrue(source.contains("AND id = ?"));
+
+        assertTrue(
+            source.contains(
+                "public FindUserResult findUser(Long id)"
+            )
+        );
+
+        QueryExecutor executor = new JdbcQueryExecutor(usersDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName(
+                "generated.FindUser",
+                true,
+                classLoader
+            );
+
+            Object generatedQuery = generatedClass
+                .getConstructor(QueryExecutor.class)
+                .newInstance(executor);
+
+            Object result = generatedClass
+                .getMethod("findUser", Long.class)
+                .invoke(generatedQuery, 1L);
+
+            assertNotNull(result);
+
+            assertEquals("Alice", getRecordComponent(result, "name"));
+        }
+    }
+
+    @Test
     void shouldExecuteGeneratedQueryWithoutParameters() throws Exception {
         Path classesDirectory = generateAndCompile(
             """
@@ -1151,7 +1254,147 @@ class SqlcjCompilerIntegrationTest {
     }
 
     @Test
-    void shouldRejectNormalizedGeneratedPathCollisionBeforeOverwriting() throws IOException {
+    void shouldReportLateFailureAndLeavePreviousOutputIntact() throws IOException {
+        Path usersSchema = tempDir.resolve("users-schema.sql");
+        Path usersQueries = tempDir.resolve("users-queries.sql");
+        Path ordersSchema = tempDir.resolve("orders-schema.sql");
+        Path ordersQueries = tempDir.resolve("orders-queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Files.writeString(
+            usersSchema,
+            """
+                CREATE TABLE users
+                (
+                    id   BIGINT NOT NULL,
+                    name VARCHAR(255)
+                );
+                """
+        );
+
+        Files.writeString(
+            usersQueries,
+            """
+                -- name: GetUser :one
+                SELECT id
+                FROM users
+                WHERE id = $1;
+                """
+        );
+
+        new SqlcjCompiler().compile(
+            new Config(
+                List.of(new SqlConfig(usersSchema.toString(), usersQueries.toString())),
+                new JavaConfig(generatedDirectory.toString(), "dev.example.generated")
+            )
+        );
+
+        Path generatedFile = generatedDirectory
+            .resolve("dev/example/generated")
+            .resolve("GetUser.java");
+
+        String previous = Files.readString(generatedFile);
+
+        assertTrue(previous.contains("resultSet.getObject(1, Long.class)"));
+
+        Files.writeString(
+            usersQueries,
+            """
+                -- name: GetUser :one
+                SELECT name
+                FROM users
+                WHERE id = $1;
+                """
+        );
+
+        Files.writeString(
+            ordersSchema,
+            """
+                CREATE TABLE orders
+                (
+                    id BIGINT NOT NULL
+                );
+                """
+        );
+
+        Files.writeString(
+            ordersQueries,
+            """
+                -- name: ListOrders :many
+                SELECT id
+                FROM orders;
+
+                -- name: GetOrder :one
+                SELECT id
+                FROM orders
+                WHERE id = $2;
+                """
+        );
+
+        Config config = new Config(
+            List.of(
+                new SqlConfig(usersSchema.toString(), usersQueries.toString()),
+                new SqlConfig(ordersSchema.toString(), ordersQueries.toString())
+            ),
+            new JavaConfig(generatedDirectory.toString(), "dev.example.generated")
+        );
+
+        SqlcjCompiler compiler = new SqlcjCompiler();
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compiler.compile(config)
+        );
+
+        assertEquals(
+            "Invalid query 'GetOrder' in %s at line 5: "
+                .formatted(ordersQueries)
+                + "Placeholder indexes must start at $1 without gaps, but were [2]",
+            exception.getMessage()
+        );
+
+        assertEquals(previous, Files.readString(generatedFile));
+
+        assertFalse(
+            Files.exists(
+                generatedDirectory
+                    .resolve("dev/example/generated")
+                    .resolve("ListOrders.java")
+            )
+        );
+    }
+
+    @Test
+    void shouldRejectAnonymousPlaceholderBeforeWriting() {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileUsersQueries(
+                """
+                    -- name: ListUsers :many
+                    SELECT id
+                    FROM users
+                    WHERE id = $1
+                    LIMIT ?;
+                    """,
+                generatedDirectory
+            )
+        );
+
+        assertEquals(
+            "Invalid query 'ListUsers' in %s at line 1: "
+                .formatted(tempDir.resolve("queries.sql"))
+                + "Anonymous '?' parameters are not supported; "
+                + "use an indexed placeholder such as $1",
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    @Test
+    void shouldRejectNormalizedGeneratedPathCollisionBeforeWriting() throws IOException {
         Path generatedDirectory = tempDir.resolve("generated");
 
         CompilationException exception = assertThrows(
@@ -1178,16 +1421,11 @@ class SqlcjCompilerIntegrationTest {
             exception.getMessage()
         );
 
-        String generated = Files.readString(
-            generatedDirectory.resolve("generated").resolve("Get_User.java")
-        );
-
-        assertTrue(generated.contains("resultSet.getObject(1, Long.class)"));
-        assertFalse(generated.contains("resultSet.getObject(1, String.class)"));
+        assertFalse(Files.exists(generatedDirectory));
     }
 
     @Test
-    void shouldRejectGeneratedPathsThatDifferOnlyByCaseBeforeOverwriting() {
+    void shouldRejectGeneratedPathsThatDifferOnlyByCaseBeforeWriting() {
         Path generatedDirectory = tempDir.resolve("generated");
 
         CompilationException exception = assertThrows(
@@ -1216,17 +1454,7 @@ class SqlcjCompilerIntegrationTest {
             exception.getMessage()
         );
 
-        assertTrue(
-            Files.exists(
-                generatedDirectory.resolve("generated").resolve("GetUser.java")
-            )
-        );
-
-        assertFalse(
-            Files.exists(
-                generatedDirectory.resolve("generated").resolve("getuser.java")
-            )
-        );
+        assertFalse(Files.exists(generatedDirectory));
     }
 
     @Test

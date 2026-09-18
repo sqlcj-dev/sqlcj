@@ -119,6 +119,53 @@ class GenerateCommandTest {
         assertFalse(Files.exists(workingDirectory.resolve("generated")));
     }
 
+    @Test
+    void shouldFailWithConciseDiagnosticForInvalidQuery() throws Exception {
+        Files.writeString(workingDirectory.resolve("schema.sql"), SCHEMA);
+        Files.writeString(
+            workingDirectory.resolve("queries.sql"),
+            """
+                -- name: ListUsers :many
+                SELECT id
+                FROM users;
+
+                -- name: GetUser :one
+                SELECT id, name
+                FROM users
+                WHERE id = $1
+                  AND name = $3;
+                """
+        );
+        Files.writeString(
+            workingDirectory.resolve("sqlcj.yaml"),
+            """
+                version: "1"
+                sql:
+                  - schema: schema.sql
+                    queries: queries.sql
+                java:
+                  package: dev.example.generated
+                  out: generated
+                """
+        );
+
+        Result result = runGenerate();
+
+        assertEquals(1, result.exitCode(), result.error());
+
+        assertTrue(
+            result.error().contains(
+                "sqlcj: Invalid query 'GetUser' in %s at line 5: "
+                    .formatted(workingDirectory.resolve("queries.sql"))
+                    + "Placeholder indexes must start at $1 without gaps, but were [1, 3]"
+            ),
+            result.error()
+        );
+
+        assertFalse(result.error().contains("\tat "));
+        assertFalse(Files.exists(workingDirectory.resolve("generated")));
+    }
+
     private Result runGenerate() throws IOException, InterruptedException {
         Path java = Path.of(System.getProperty("java.home"), "bin", "java");
 

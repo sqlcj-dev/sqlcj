@@ -11,12 +11,13 @@ import dev.sqlcj.parser.Query;
 import dev.sqlcj.schema.Schema;
 import dev.sqlcj.schema.parser.DefaultSchemaParser;
 import dev.sqlcj.schema.parser.SchemaParser;
+import dev.sqlcj.sql.ParsedSql;
 import dev.sqlcj.sql.SqlParser;
-import net.sf.jsqlparser.statement.Statement;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -30,49 +31,101 @@ public final class SqlcjCompiler {
     private final GeneratedFileWriter generatedFileWriter = new GeneratedFileWriter();
     private final SchemaParser schemaParser = new DefaultSchemaParser();
 
+    /**
+     * Compiles every configured entry before any generated file is written, so
+     * a failure in a later source cannot leave a mixture of previously
+     * generated and newly generated output.
+     */
     public void compile(Config config) {
         List<Source> sources = sourceLoader.load(config);
 
         CodeGenerator codeGenerator = new JavaCodeGenerator(config.java().packageName());
 
+        List<GeneratedFile> files = generate(sources, codeGenerator);
+
         Path outputDirectory = Path.of(config.java().out());
 
-        Map<String, GeneratedQuery> generatedQueries = new HashMap<>();
-
-        for (Source source : sources) {
-            Schema schema = schemaParser.parse(source.schema());
-
-            for (Query query : source.queries()) {
-                compileQuery(
-                    query,
-                    schema,
-                    codeGenerator,
-                    outputDirectory,
-                    generatedQueries
-                );
-            }
+        for (GeneratedFile file : files) {
+            write(file, outputDirectory);
         }
     }
 
-    private void compileQuery(
+    private List<GeneratedFile> generate(List<Source> sources, CodeGenerator codeGenerator) {
+        List<GeneratedFile> files = new ArrayList<>();
+        Map<String, GeneratedQuery> generatedQueries = new HashMap<>();
+
+        for (Source source : sources) {
+            Schema schema = parseSchema(source);
+
+            for (Query query : source.queries()) {
+                GeneratedFile file = compileQuery(source, query, schema, codeGenerator);
+
+                checkGeneratedPath(query, file, generatedQueries);
+
+                files.add(file);
+            }
+        }
+
+        return files;
+    }
+
+    private Schema parseSchema(Source source) {
+        try {
+            return schemaParser.parse(source.schema());
+        } catch (RuntimeException e) {
+            throw new CompilationException(
+                "Invalid schema source %s: %s".formatted(source.schemaPath(), reason(e)),
+                e
+            );
+        }
+    }
+
+    /**
+     * Compiles one query, reporting a parse, analysis, or generation failure
+     * with the source, query, and header line it belongs to.
+     */
+    private GeneratedFile compileQuery(
+        Source source,
         Query query,
         Schema schema,
-        CodeGenerator codeGenerator,
-        Path outputDirectory,
-        Map<String, GeneratedQuery> generatedQueries
+        CodeGenerator codeGenerator
     ) {
-        Statement statement = sqlParser.parse(query.sql());
-        QueryModel model = queryAnalyzer.analyze(query, statement, schema);
-        GeneratedFile file = codeGenerator.generate(model);
+        try {
+            ParsedSql parsedSql = sqlParser.parse(query.sql());
+            QueryModel model = queryAnalyzer.analyze(query, parsedSql, schema);
 
-        checkGeneratedPath(query, file, generatedQueries);
+            return codeGenerator.generate(model);
+        } catch (RuntimeException e) {
+            throw new CompilationException(
+                "Invalid query '%s' in %s at line %d: %s"
+                    .formatted(
+                        query.name(),
+                        source.queriesPath(),
+                        query.line(),
+                        reason(e)
+                    ),
+                e
+            );
+        }
+    }
 
-        write(file, outputDirectory);
+    /** Uses the first message line so a diagnostic stays focused. */
+    private String reason(RuntimeException e) {
+        String message = e.getMessage();
+
+        if (message == null || message.isBlank()) {
+            return e.getClass().getSimpleName();
+        }
+
+        return message.lines()
+            .findFirst()
+            .orElse(message)
+            .trim();
     }
 
     /**
      * Rejects a generated path that repeats, or differs only by case from, an
-     * already generated path before the earlier file can be overwritten.
+     * already generated path before any file is written.
      */
     private void checkGeneratedPath(
         Query query,

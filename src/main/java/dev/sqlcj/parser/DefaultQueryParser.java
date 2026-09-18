@@ -15,17 +15,22 @@ public final class DefaultQueryParser implements QueryParser {
 
         String currentName = null;
         QueryType currentType = null;
+        int currentLine = 0;
+        int lineNumber = 0;
         StringBuilder builder = new StringBuilder();
 
         for (String line : source.lines().toList()) {
+            lineNumber++;
+
             if (line.startsWith(HEADER_PREFIX)) {
                 if (currentName != null) {
-                    queries.add(buildQuery(builder, currentName, currentType));
+                    queries.add(buildQuery(builder, currentName, currentType, currentLine));
                 }
 
                 QueryHeader header = parseHeader(line);
                 currentName = header.name();
                 currentType = header.type();
+                currentLine = lineNumber;
 
                 builder.setLength(0);
                 continue;
@@ -39,7 +44,7 @@ public final class DefaultQueryParser implements QueryParser {
         }
 
         if (currentName != null) {
-            queries.add(buildQuery(builder, currentName, currentType));
+            queries.add(buildQuery(builder, currentName, currentType, currentLine));
         }
 
         Set<String> names = new HashSet<>();
@@ -54,7 +59,12 @@ public final class DefaultQueryParser implements QueryParser {
         return queries;
     }
 
-    private Query buildQuery(StringBuilder builder, String currentName, QueryType currentType) {
+    private Query buildQuery(
+        StringBuilder builder,
+        String currentName,
+        QueryType currentType,
+        int currentLine
+    ) {
         String sql = builder.toString().trim();
 
         if (sql.isBlank()) {
@@ -66,7 +76,8 @@ public final class DefaultQueryParser implements QueryParser {
         return new Query(
             currentName,
             currentType,
-            sql
+            sql,
+            currentLine
         );
     }
 

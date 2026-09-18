@@ -6,8 +6,8 @@ import dev.sqlcj.schema.Column;
 import dev.sqlcj.schema.ColumnType;
 import dev.sqlcj.schema.Schema;
 import dev.sqlcj.schema.Table;
+import dev.sqlcj.sql.ParsedSql;
 import dev.sqlcj.sql.SqlParser;
-import net.sf.jsqlparser.statement.Statement;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -79,8 +79,8 @@ class QueryAnalyzerTest {
                 """
         );
 
-        Statement statement = parser.parse(query.sql());
-        QueryModel model = analyzer.analyze(query, statement, schema);
+        ParsedSql parsedSql = parser.parse(query.sql());
+        QueryModel model = analyzer.analyze(query, parsedSql, schema);
 
         assertEquals("ListUsers", model.name());
         assertEquals(QueryType.MANY, model.type());
@@ -100,8 +100,8 @@ class QueryAnalyzerTest {
                 """
         );
 
-        Statement statement = parser.parse(query.sql());
-        QueryModel model = analyzer.analyze(query, statement, schema);
+        ParsedSql parsedSql = parser.parse(query.sql());
+        QueryModel model = analyzer.analyze(query, parsedSql, schema);
 
         assertEquals("users", model.table());
         assertEquals(
@@ -125,8 +125,8 @@ class QueryAnalyzerTest {
                 """
         );
 
-        Statement statement = parser.parse(query.sql());
-        QueryModel model = analyzer.analyze(query, statement, schema);
+        ParsedSql parsedSql = parser.parse(query.sql());
+        QueryModel model = analyzer.analyze(query, parsedSql, schema);
 
         assertEquals("users", model.table());
         assertEquals(
@@ -308,11 +308,11 @@ class QueryAnalyzerTest {
                 """
         );
 
-        Statement statement = parser.parse(query.sql());
+        ParsedSql parsedSql = parser.parse(query.sql());
 
         UnsupportedOperationException exception = assertThrows(
             UnsupportedOperationException.class,
-            () -> analyzer.analyze(query, statement, schema)
+            () -> analyzer.analyze(query, parsedSql, schema)
         );
 
         assertEquals(
@@ -329,11 +329,11 @@ class QueryAnalyzerTest {
             "SELECT id, name FROM users WHERE id = $1"
         );
 
-        Statement statement = parser.parse(query.sql());
+        ParsedSql parsedSql = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
             query,
-            statement,
+            parsedSql,
             schema
         );
 
@@ -358,11 +358,11 @@ class QueryAnalyzerTest {
             "SELECT * FROM users"
         );
 
-        Statement statement = parser.parse(query.sql());
+        ParsedSql parsedSql = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
             query,
-            statement,
+            parsedSql,
             schema
         );
 
@@ -386,11 +386,11 @@ class QueryAnalyzerTest {
             "SELECT * FROM users WHERE id = $1"
         );
 
-        Statement statement = parser.parse(query.sql());
+        ParsedSql parsedSql = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
             query,
-            statement,
+            parsedSql,
             schema
         );
 
@@ -415,11 +415,11 @@ class QueryAnalyzerTest {
                 """
         );
 
-        Statement statement = parser.parse(query.sql());
+        ParsedSql parsedSql = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
             query,
-            statement,
+            parsedSql,
             schema
         );
 
@@ -440,11 +440,11 @@ class QueryAnalyzerTest {
             "SELECT * FROM users WHERE 1 = 1"
         );
 
-        Statement statement = parser.parse(query.sql());
+        ParsedSql parsedSql = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
             query,
-            statement,
+            parsedSql,
             schema
         );
 
@@ -459,11 +459,11 @@ class QueryAnalyzerTest {
             "SELECT * FROM orders"
         );
 
-        Statement statement = parser.parse(query.sql());
+        ParsedSql parsedSql = parser.parse(query.sql());
 
         assertThrows(
             IllegalArgumentException.class,
-            () -> analyzer.analyze(query, statement, schema)
+            () -> analyzer.analyze(query, parsedSql, schema)
         );
     }
 
@@ -475,11 +475,11 @@ class QueryAnalyzerTest {
             "SELECT username FROM users"
         );
 
-        Statement statement = parser.parse(query.sql());
+        ParsedSql parsedSql = parser.parse(query.sql());
 
         assertThrows(
             IllegalArgumentException.class,
-            () -> analyzer.analyze(query, statement, schema)
+            () -> analyzer.analyze(query, parsedSql, schema)
         );
     }
 
@@ -491,11 +491,11 @@ class QueryAnalyzerTest {
             "SELECT * FROM users WHERE id = $1"
         );
 
-        Statement statement = parser.parse(query.sql());
+        ParsedSql parsedSql = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
             query,
-            statement,
+            parsedSql,
             schema
         );
 
@@ -516,11 +516,11 @@ class QueryAnalyzerTest {
             "SELECT * FROM users WHERE id = $1 AND active = $2"
         );
 
-        Statement statement = parser.parse(query.sql());
+        ParsedSql parsedSql = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
             query,
-            statement,
+            parsedSql,
             schema
         );
 
@@ -545,11 +545,11 @@ class QueryAnalyzerTest {
             "SELECT * FROM users WHERE id = $1 AND id = $2"
         );
 
-        Statement statement = parser.parse(query.sql());
+        ParsedSql parsedSql = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
             query,
-            statement,
+            parsedSql,
             schema
         );
 
@@ -574,11 +574,11 @@ class QueryAnalyzerTest {
             "SELECT * FROM users WHERE active = $2 AND id = $1"
         );
 
-        Statement statement = parser.parse(query.sql());
+        ParsedSql parsedSql = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
             query,
-            statement,
+            parsedSql,
             schema
         );
 
@@ -603,11 +603,11 @@ class QueryAnalyzerTest {
             "SELECT * FROM users WHERE id = $1 OR active = $2"
         );
 
-        Statement statement = parser.parse(query.sql());
+        ParsedSql parsedSql = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
             query,
-            statement,
+            parsedSql,
             schema
         );
 
@@ -637,11 +637,11 @@ class QueryAnalyzerTest {
                 """
         );
 
-        Statement statement = parser.parse(query.sql());
+        ParsedSql parsedSql = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
             query,
-            statement,
+            parsedSql,
             schema
         );
 
@@ -676,11 +676,11 @@ class QueryAnalyzerTest {
                 """
         );
 
-        Statement statement = parser.parse(query.sql());
+        ParsedSql parsedSql = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
             query,
-            statement,
+            parsedSql,
             schema
         );
 
@@ -722,11 +722,11 @@ class QueryAnalyzerTest {
                 .formatted(operator)
         );
 
-        Statement statement = parser.parse(query.sql());
+        ParsedSql parsedSql = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
             query,
-            statement,
+            parsedSql,
             schema
         );
 
@@ -747,11 +747,11 @@ class QueryAnalyzerTest {
             "SELECT * FROM users WHERE $1 = id"
         );
 
-        Statement statement = parser.parse(query.sql());
+        ParsedSql parsedSql = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
             query,
-            statement,
+            parsedSql,
             schema
         );
 
@@ -772,11 +772,11 @@ class QueryAnalyzerTest {
             "SELECT * FROM users WHERE id IN ($1, $2, $3)"
         );
 
-        Statement statement = parser.parse(query.sql());
+        ParsedSql parsedSql = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
             query,
-            statement,
+            parsedSql,
             schema
         );
 
@@ -806,11 +806,11 @@ class QueryAnalyzerTest {
             "SELECT * FROM users WHERE id IN ($3, $1, $2)"
         );
 
-        Statement statement = parser.parse(query.sql());
+        ParsedSql parsedSql = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
             query,
-            statement,
+            parsedSql,
             schema
         );
 
@@ -845,11 +845,11 @@ class QueryAnalyzerTest {
                 """
         );
 
-        Statement statement = parser.parse(query.sql());
+        ParsedSql parsedSql = parser.parse(query.sql());
 
         QueryModel model = analyzer.analyze(
             query,
-            statement,
+            parsedSql,
             schema
         );
 
@@ -1074,11 +1074,11 @@ class QueryAnalyzerTest {
             """;
 
         Query query = new Query("GetUser", QueryType.ONE, sql);
-        Statement statement = parser.parse(sql);
+        ParsedSql parsedSql = parser.parse(sql);
 
         IllegalArgumentException exception = assertThrows(
             IllegalArgumentException.class,
-            () -> analyzer.analyze(query, statement, joinSchema)
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
         );
 
         assertTrue(exception.getMessage().contains("users"));
@@ -1255,11 +1255,11 @@ class QueryAnalyzerTest {
             """;
 
         Query query = new Query("ListIds", QueryType.MANY, sql);
-        Statement statement = parser.parse(sql);
+        ParsedSql parsedSql = parser.parse(sql);
 
         IllegalArgumentException exception = assertThrows(
             IllegalArgumentException.class,
-            () -> analyzer.analyze(query, statement, joinSchema)
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
         );
 
         assertTrue(exception.getMessage().contains("id"));
@@ -1274,11 +1274,11 @@ class QueryAnalyzerTest {
             """;
 
         Query query = new Query("ListIds", QueryType.MANY, sql);
-        Statement statement = parser.parse(sql);
+        ParsedSql parsedSql = parser.parse(sql);
 
         IllegalArgumentException exception = assertThrows(
             IllegalArgumentException.class,
-            () -> analyzer.analyze(query, statement, joinSchema)
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
         );
 
         assertTrue(exception.getMessage().contains("o"));
@@ -1293,11 +1293,11 @@ class QueryAnalyzerTest {
             """;
 
         Query query = new Query("ListIds", QueryType.MANY, sql);
-        Statement statement = parser.parse(sql);
+        ParsedSql parsedSql = parser.parse(sql);
 
         IllegalArgumentException exception = assertThrows(
             IllegalArgumentException.class,
-            () -> analyzer.analyze(query, statement, joinSchema)
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
         );
 
         assertTrue(exception.getMessage().contains("U"));
@@ -1322,11 +1322,11 @@ class QueryAnalyzerTest {
             """.formatted(fromClause);
 
         Query query = new Query("ListIds", QueryType.MANY, sql);
-        Statement statement = parser.parse(sql);
+        ParsedSql parsedSql = parser.parse(sql);
 
         assertThrows(
             UnsupportedOperationException.class,
-            () -> analyzer.analyze(query, statement, joinSchema)
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
         );
     }
 
@@ -1339,11 +1339,11 @@ class QueryAnalyzerTest {
             """;
 
         Query query = new Query("ListIds", QueryType.MANY, sql);
-        Statement statement = parser.parse(sql);
+        ParsedSql parsedSql = parser.parse(sql);
 
         assertThrows(
             UnsupportedOperationException.class,
-            () -> analyzer.analyze(query, statement, joinSchema)
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
         );
     }
 
@@ -1356,11 +1356,287 @@ class QueryAnalyzerTest {
             """;
 
         Query query = new Query("ListIds", QueryType.MANY, sql);
-        Statement statement = parser.parse(sql);
+        ParsedSql parsedSql = parser.parse(sql);
 
         assertThrows(
             UnsupportedOperationException.class,
-            () -> analyzer.analyze(query, statement, joinSchema)
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
+        );
+    }
+
+    @Test
+    void shouldRetainOneParameterForRepeatedIndex() {
+        String sql = """
+            SELECT *
+            FROM users
+            WHERE name = $2
+              AND (id = $1 OR id = $1)
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("FindUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(2, 1, 1), model.bindingParameterIndexes());
+
+        assertEquals(
+            """
+                SELECT *
+                FROM users
+                WHERE name = ?
+                  AND (id = ? OR id = ?)
+                """,
+            model.executableSql()
+        );
+    }
+
+    @Test
+    void shouldRetainFirstOccurrenceOfRepeatedIndexWithSameJavaType() {
+        Schema textSchema = new Schema(
+            List.of(
+                new Table(
+                    "users",
+                    List.of(
+                        new Column("name", ColumnType.VARCHAR, true),
+                        new Column("note", ColumnType.TEXT, true)
+                    ),
+                    List.of()
+                )
+            )
+        );
+
+        String sql = "SELECT name FROM users WHERE name = $1 AND note = $1";
+
+        QueryModel model = analyzer.analyze(
+            new Query("FindUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            textSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "name", ColumnType.VARCHAR)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 1), model.bindingParameterIndexes());
+    }
+
+    @Test
+    void shouldRejectRepeatedIndexWithConflictingType() {
+        String sql = "UPDATE users SET name = $1 WHERE id = $1";
+
+        Query query = new Query("UpdateUser", QueryType.EXEC, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(
+            "Placeholder $1 has conflicting types: String from 'name' and Long from 'id'",
+            exception.getMessage()
+        );
+    }
+
+    @Test
+    void shouldRejectGappedParameterIndexes() {
+        String sql = "SELECT * FROM users WHERE id = $1 AND name = $3";
+
+        Query query = new Query("FindUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(
+            "Placeholder indexes must start at $1 without gaps, but were [1, 3]",
+            exception.getMessage()
+        );
+    }
+
+    @Test
+    void shouldRejectZeroParameterIndex() {
+        String sql = "SELECT * FROM users WHERE id = $0";
+
+        Query query = new Query("FindUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(
+            "Placeholder indexes must start at $1 without gaps, but were [0]",
+            exception.getMessage()
+        );
+    }
+
+    @Test
+    void shouldRejectPlaceholderInUnsupportedLocation() {
+        String sql = "SELECT * FROM users WHERE id = $1 LIMIT $2";
+
+        Query query = new Query("FindUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(
+            "SQL placeholders [1, 2] are not the analyzed parameters [1]; "
+                + "a placeholder is in an unsupported location",
+            exception.getMessage()
+        );
+    }
+
+    @Test
+    void shouldRejectAnonymousParameter() {
+        String sql = "SELECT * FROM users WHERE id = ?";
+
+        Query query = new Query("FindUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(
+            "Anonymous '?' parameters are not supported; use an indexed placeholder such as $1",
+            exception.getMessage()
+        );
+    }
+
+    @Test
+    void shouldRejectAnonymousParameterInUnsupportedLocation() {
+        String sql = "SELECT id, name FROM users WHERE NOT (id = ?) AND name = $1";
+
+        Query query = new Query("FindUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(
+            "Anonymous '?' parameters are not supported; use an indexed placeholder such as $1",
+            exception.getMessage()
+        );
+    }
+
+    @Test
+    void shouldRejectNamedParameter() {
+        String sql = "SELECT * FROM users WHERE id = :userId";
+
+        Query query = new Query("FindUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(
+            "Named parameter ':userId' is not supported; use an indexed placeholder such as $1",
+            exception.getMessage()
+        );
+    }
+
+    @Test
+    void shouldRejectNamedParameterInInList() {
+        String sql = "SELECT * FROM users WHERE id IN ($1, :other)";
+
+        Query query = new Query("FindUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+    }
+
+    @Test
+    void shouldRejectSelectWithoutResultQueryType() {
+        String sql = "SELECT id FROM users WHERE id = $1";
+
+        Query query = new Query("GetUser", QueryType.EXEC, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(
+            "SELECT queries must be declared as :one or :many",
+            exception.getMessage()
+        );
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "INSERT INTO users (id) VALUES ($1) RETURNING id",
+            "UPDATE users SET name = $2 WHERE id = $1 RETURNING id",
+            "DELETE FROM users WHERE id = $1 RETURNING id"
+        }
+    )
+    void shouldRejectReturningWrite(String sql) {
+        Query query = new Query("WriteUser", QueryType.EXEC, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals("RETURNING is not supported", exception.getMessage());
+    }
+
+    @Test
+    void shouldKeepPlaceholderTextThatIsNotAParameter() {
+        String sql = """
+            SELECT id, name
+            FROM users -- keep $9
+            WHERE name = '$1 literal'
+              AND id = $1
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("FindUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            """
+                SELECT id, name
+                FROM users -- keep $9
+                WHERE name = '$1 literal'
+                  AND id = ?
+                """,
+            model.executableSql()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            model.parameters()
         );
     }
 }

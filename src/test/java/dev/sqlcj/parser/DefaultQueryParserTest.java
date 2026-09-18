@@ -188,4 +188,25 @@ class DefaultQueryParserTest {
         assertEquals("Second", queries.get(1).name());
         assertEquals("Third", queries.get(2).name());
     }
+
+    @Test
+    void parsesHeaderLineOfEachQuery() {
+        String source = """
+            -- A leading comment.
+
+            -- name: GetUser :one
+            SELECT *
+            FROM users
+            WHERE id = $1;
+
+            -- name: ListUsers :many
+            SELECT *
+            FROM users;
+            """;
+
+        List<Query> queries = parser.parse(source);
+
+        assertEquals(3, queries.getFirst().line());
+        assertEquals(8, queries.get(1).line());
+    }
 }

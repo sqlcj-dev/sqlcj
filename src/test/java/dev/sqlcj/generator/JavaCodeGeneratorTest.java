@@ -1254,6 +1254,44 @@ class JavaCodeGeneratorTest {
     }
 
     @Test
+    void shouldRepeatArgumentForRepeatedPlaceholderIndex() throws IOException {
+        QueryModel query = new QueryModel(
+            "FindUser",
+            QueryType.ONE,
+            "users",
+            """
+                SELECT id, name
+                FROM users
+                WHERE name = ?
+                  AND (id = ? OR id = ?)
+                """,
+            List.of(2, 1, 1),
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true)
+            ),
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR)
+            )
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        String source = file.content();
+
+        assertTrue(
+            source.contains(
+                "public FindUserResult findUser(Long id, String name)"
+            )
+        );
+
+        assertTrue(source.contains("List.of(name, id, id)"));
+
+        assertCompiles(file);
+    }
+
+    @Test
     void shouldGenerateEmptyArgumentListForQueryWithoutParameters() throws IOException {
         QueryModel query = new QueryModel(
             "GetFirstUser",
