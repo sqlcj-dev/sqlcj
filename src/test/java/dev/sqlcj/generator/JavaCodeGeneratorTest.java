@@ -357,7 +357,7 @@ class JavaCodeGeneratorTest {
         String source = file.content();
 
         assertTrue(source.contains("import java.util.List;"));
-        assertTrue(source.contains("List.of()"));
+        assertTrue(source.contains("java.util.Arrays.asList()"));
     }
 
     @Test
@@ -655,7 +655,7 @@ class JavaCodeGeneratorTest {
         String source = codeGenerator.generate(query).content();
 
         assertTrue(source.contains("return executor.query("));
-        assertTrue(source.contains("List.of(id)"));
+        assertTrue(source.contains("java.util.Arrays.asList(id)"));
         assertTrue(source.contains("ROW_MAPPER"));
         assertFalse(source.contains("UnsupportedOperationException"));
     }
@@ -1096,7 +1096,7 @@ class JavaCodeGeneratorTest {
 
         assertTrue(
             source.contains(
-                "List.of(id)"
+                "java.util.Arrays.asList(id)"
             )
         );
 
@@ -1162,7 +1162,7 @@ class JavaCodeGeneratorTest {
 
         assertTrue(
             source.contains(
-                "List.of(active)"
+                "java.util.Arrays.asList(active)"
             )
         );
 
@@ -1208,7 +1208,7 @@ class JavaCodeGeneratorTest {
 
         assertTrue(
             source.contains(
-                "List.of(active, id, name)"
+                "java.util.Arrays.asList(active, id, name)"
             )
         );
     }
@@ -1248,7 +1248,7 @@ class JavaCodeGeneratorTest {
 
         assertTrue(source.contains("WHERE active = ?"));
         assertTrue(source.contains("AND id = ?"));
-        assertTrue(source.contains("List.of(active, id)"));
+        assertTrue(source.contains("java.util.Arrays.asList(active, id)"));
 
         assertCompiles(file);
     }
@@ -1286,7 +1286,7 @@ class JavaCodeGeneratorTest {
             )
         );
 
-        assertTrue(source.contains("List.of(name, id, id)"));
+        assertTrue(source.contains("java.util.Arrays.asList(name, id, id)"));
 
         assertCompiles(file);
     }
@@ -1320,7 +1320,7 @@ class JavaCodeGeneratorTest {
         );
 
         assertTrue(source.contains("import java.util.List;"));
-        assertTrue(source.contains("List.of()"));
+        assertTrue(source.contains("java.util.Arrays.asList()"));
 
         assertCompiles(file);
     }
@@ -1355,7 +1355,7 @@ class JavaCodeGeneratorTest {
 
         assertTrue(source.contains("return executor.execute("));
         assertTrue(source.contains("INSERT INTO users (id, name)"));
-        assertTrue(source.contains("List.of(id, name)"));
+        assertTrue(source.contains("java.util.Arrays.asList(id, name)"));
 
         assertFalse(source.contains("public record InsertUserResult("));
         assertFalse(source.contains("RowMapper"));

@@ -352,13 +352,16 @@ public final class JavaCodeGenerator implements CodeGenerator {
     /**
      * Renders the executor arguments in the textual order of the JDBC
      * {@code ?} positions, using the logically ordered method parameter names.
+     *
+     * <p>The argument list is built with {@code java.util.Arrays.asList} rather
+     * than {@code List.of} so that a null argument can be bound.
      */
     private String generateParameterList(QueryModel query, JavaNames names) {
         Map<Integer, String> namesByIndex = generateParameterNamesByIndex(query, names);
 
         return query.bindingParameterIndexes().stream()
             .map(namesByIndex::get)
-            .collect(Collectors.joining(", ", "List.of(", ")"));
+            .collect(Collectors.joining(", ", "java.util.Arrays.asList(", ")"));
     }
 
     private Map<Integer, String> generateParameterNamesByIndex(QueryModel query, JavaNames names) {

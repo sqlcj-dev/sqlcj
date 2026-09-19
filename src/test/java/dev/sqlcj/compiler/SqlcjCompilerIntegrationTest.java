@@ -575,7 +575,7 @@ class SqlcjCompilerIntegrationTest {
             )
         );
 
-        assertTrue(source.contains("List.of(active, id)"));
+        assertTrue(source.contains("java.util.Arrays.asList(active, id)"));
 
         QueryExecutor executor = new JdbcQueryExecutor(usersDataSource());
 
@@ -627,7 +627,7 @@ class SqlcjCompilerIntegrationTest {
             )
         );
 
-        assertTrue(source.contains("List.of(name, id, id)"));
+        assertTrue(source.contains("java.util.Arrays.asList(name, id, id)"));
         assertTrue(source.contains("AND (id = ? OR id = ?)"));
 
         QueryExecutor executor = new JdbcQueryExecutor(usersDataSource());
@@ -729,7 +729,7 @@ class SqlcjCompilerIntegrationTest {
             )
         );
 
-        assertTrue(source.contains("List.of()"));
+        assertTrue(source.contains("java.util.Arrays.asList()"));
 
         QueryExecutor executor = new JdbcQueryExecutor(usersDataSource());
 
@@ -775,7 +775,7 @@ class SqlcjCompilerIntegrationTest {
         );
 
         assertTrue(source.contains("return executor.execute("));
-        assertTrue(source.contains("List.of(id, name, active)"));
+        assertTrue(source.contains("java.util.Arrays.asList(id, name, active)"));
         assertFalse(source.contains("public record InsertUserResult("));
         assertFalse(source.contains("RowMapper"));
 
@@ -829,7 +829,7 @@ class SqlcjCompilerIntegrationTest {
             )
         );
 
-        assertTrue(source.contains("List.of(name, id)"));
+        assertTrue(source.contains("java.util.Arrays.asList(name, id)"));
 
         QueryExecutor executor = new JdbcQueryExecutor(usersDataSource());
 
@@ -875,7 +875,7 @@ class SqlcjCompilerIntegrationTest {
         String source = Files.readString(tempDir.resolve("generated/generated/DeleteUser.java"));
 
         assertTrue(source.contains("public int deleteUser(Long id)"));
-        assertTrue(source.contains("List.of(id)"));
+        assertTrue(source.contains("java.util.Arrays.asList(id)"));
 
         QueryExecutor executor = new JdbcQueryExecutor(usersDataSource());
 
@@ -970,7 +970,7 @@ class SqlcjCompilerIntegrationTest {
             )
         );
 
-        assertTrue(source.contains("List.of(nickname, id)"));
+        assertTrue(source.contains("java.util.Arrays.asList(nickname, id)"));
         assertTrue(source.contains("Long id1"));
         assertTrue(source.contains("Long id2"));
 
