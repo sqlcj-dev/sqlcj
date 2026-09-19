@@ -9,5 +9,7 @@ public enum ColumnType {
     TEXT,
     DATE,
     TIMESTAMP,
-    DECIMAL
+    TIMESTAMP_WITH_TIME_ZONE,
+    DECIMAL,
+    UUID
 }

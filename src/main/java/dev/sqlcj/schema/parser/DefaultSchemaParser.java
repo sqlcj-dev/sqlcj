@@ -18,8 +18,12 @@ import net.sf.jsqlparser.statement.create.table.Index;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Pattern;
 
 public class DefaultSchemaParser implements SchemaParser {
+
+    /** One parenthesized type argument group, such as {@code (10, 2)}. */
+    private static final Pattern TYPE_ARGUMENTS = Pattern.compile("\\([^)]*\\)");
 
     @Override
     public Schema parse(String sql) {
@@ -66,14 +70,12 @@ public class DefaultSchemaParser implements SchemaParser {
     }
 
     private Column parseColumn(ColumnDefinition definition) {
-        String name = columnName(definition);
-        ColumnType type = parseColumnType(definition);
-        boolean nullable = isNullable(definition);
+        String typeName = typeName(definition);
 
         return new Column(
-            name,
-            type,
-            nullable
+            columnName(definition),
+            columnType(typeName),
+            !isSerial(typeName) && isNullable(definition)
         );
     }
 
@@ -84,31 +86,49 @@ public class DefaultSchemaParser implements SchemaParser {
         return MultiPartName.unquote(definition.getColumnName());
     }
 
-    private ColumnType parseColumnType(ColumnDefinition definition) {
-        String typeName = definition.getColDataType()
+    /**
+     * Returns the canonical spelling of a declared SQL type: upper case,
+     * without type arguments such as a length or a precision, and with single
+     * spaces between the remaining words.
+     */
+    private String typeName(ColumnDefinition definition) {
+        String dataType = definition.getColDataType()
             .getDataType()
             .toUpperCase(Locale.ROOT);
 
-        int parenthesisIndex = typeName.indexOf('(');
+        return TYPE_ARGUMENTS
+            .matcher(dataType)
+            .replaceAll(" ")
+            .replaceAll("\\s+", " ")
+            .trim();
+    }
 
-        if (parenthesisIndex >= 0) {
-            typeName = typeName.substring(0, parenthesisIndex).trim();
-        }
-
+    private ColumnType columnType(String typeName) {
         return switch (typeName) {
-            case "INTEGER", "INT" -> ColumnType.INTEGER;
-            case "BIGINT" -> ColumnType.BIGINT;
+            case "INTEGER", "INT", "SERIAL" -> ColumnType.INTEGER;
+            case "BIGINT", "BIGSERIAL" -> ColumnType.BIGINT;
             case "SMALLINT" -> ColumnType.SMALLINT;
             case "BOOLEAN", "BOOL" -> ColumnType.BOOLEAN;
             case "VARCHAR" -> ColumnType.VARCHAR;
             case "TEXT" -> ColumnType.TEXT;
             case "DATE" -> ColumnType.DATE;
             case "TIMESTAMP" -> ColumnType.TIMESTAMP;
+            case "TIMESTAMP WITH TIME ZONE" -> ColumnType.TIMESTAMP_WITH_TIME_ZONE;
             case "DECIMAL", "NUMERIC" -> ColumnType.DECIMAL;
+            case "UUID" -> ColumnType.UUID;
             default -> throw new UnsupportedOperationException(
                 "Unsupported SQL column type: " + typeName
             );
         };
+    }
+
+    /**
+     * PostgreSQL defines the serial spellings as an integer type with a
+     * sequence default and {@code NOT NULL}, so such a column is never
+     * nullable.
+     */
+    private boolean isSerial(String typeName) {
+        return "SERIAL".equals(typeName) || "BIGSERIAL".equals(typeName);
     }
 
     private boolean isNullable(ColumnDefinition definition) {

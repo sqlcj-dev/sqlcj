@@ -14,7 +14,9 @@ public class DefaultTypeResolver implements TypeResolver {
             case VARCHAR, TEXT -> "String";
             case DATE -> "LocalDate";
             case TIMESTAMP -> "LocalDateTime";
+            case TIMESTAMP_WITH_TIME_ZONE -> "OffsetDateTime";
             case DECIMAL -> "BigDecimal";
+            case UUID -> "UUID";
         };
     }
 }
