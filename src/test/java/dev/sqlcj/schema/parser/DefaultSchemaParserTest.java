@@ -7,10 +7,14 @@ import dev.sqlcj.schema.ConstraintType;
 import dev.sqlcj.schema.Schema;
 import dev.sqlcj.schema.Table;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -152,6 +156,138 @@ class DefaultSchemaParserTest {
                 )
             ),
             table.constraints()
+        );
+    }
+
+    @ParameterizedTest
+    @CsvSource(
+        {
+            "SERIAL, INTEGER",
+            "serial, INTEGER",
+            "BIGSERIAL, BIGINT",
+            "bigserial, BIGINT",
+            "UUID, UUID",
+            "uuid, UUID",
+            "TIMESTAMP WITH TIME ZONE, TIMESTAMP_WITH_TIME_ZONE",
+            "timestamp with time zone, TIMESTAMP_WITH_TIME_ZONE",
+            "TIMESTAMP(3) WITH TIME ZONE, TIMESTAMP_WITH_TIME_ZONE",
+            "timestamp(3) with time zone, TIMESTAMP_WITH_TIME_ZONE"
+        }
+    )
+    void shouldParseAddedColumnTypes(String sqlType, ColumnType expectedType) {
+        String sql = """
+            CREATE TABLE users (
+                value %s
+            );
+            """
+            .formatted(sqlType);
+
+        Schema schema = parser.parse(sql);
+
+        assertEquals(
+            expectedType,
+            schema.tables().getFirst().columns().getFirst().type()
+        );
+    }
+
+    @ParameterizedTest
+    @CsvSource(
+        {
+            "INTEGER, INTEGER",
+            "INT, INTEGER",
+            "BIGINT, BIGINT",
+            "SMALLINT, SMALLINT",
+            "BOOLEAN, BOOLEAN",
+            "BOOL, BOOLEAN",
+            "VARCHAR(255), VARCHAR",
+            "TEXT, TEXT",
+            "DATE, DATE",
+            "TIMESTAMP, TIMESTAMP",
+            "'DECIMAL(10, 2)', DECIMAL",
+            "NUMERIC, DECIMAL"
+        }
+    )
+    void shouldKeepParsingDeliveredColumnTypes(String sqlType, ColumnType expectedType) {
+        String sql = """
+            CREATE TABLE users (
+                value %s
+            );
+            """
+            .formatted(sqlType);
+
+        Schema schema = parser.parse(sql);
+
+        assertEquals(
+            expectedType,
+            schema.tables().getFirst().columns().getFirst().type()
+        );
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "SERIAL",
+            "BIGSERIAL"
+        }
+    )
+    void shouldParseSerialColumnAsNotNullable(String sqlType) {
+        String sql = """
+            CREATE TABLE users (
+                id %s PRIMARY KEY
+            );
+            """
+            .formatted(sqlType);
+
+        Schema schema = parser.parse(sql);
+
+        assertFalse(schema.tables().getFirst().columns().getFirst().nullable());
+    }
+
+    @Test
+    void shouldParseNullabilityOfAddedColumnTypes() {
+        String sql = """
+            CREATE TABLE users (
+                external_id UUID,
+                created_at  TIMESTAMP WITH TIME ZONE NOT NULL
+            );
+            """;
+
+        Schema schema = parser.parse(sql);
+
+        Table table = schema.tables().getFirst();
+
+        assertEquals(
+            new Column("external_id", ColumnType.UUID, true),
+            table.columns().get(0)
+        );
+
+        assertEquals(
+            new Column("created_at", ColumnType.TIMESTAMP_WITH_TIME_ZONE, false),
+            table.columns().get(1)
+        );
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "TIMESTAMPTZ",
+            "SERIAL4",
+            "SERIAL8",
+            "SMALLSERIAL",
+            "TIMESTAMP WITHOUT TIME ZONE"
+        }
+    )
+    void shouldRejectUnsupportedColumnType(String sqlType) {
+        String sql = """
+            CREATE TABLE users (
+                value %s
+            );
+            """
+            .formatted(sqlType);
+
+        assertThrows(
+            UnsupportedOperationException.class,
+            () -> parser.parse(sql)
         );
     }
 

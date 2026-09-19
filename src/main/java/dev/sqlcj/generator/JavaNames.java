@@ -36,6 +36,8 @@ final class JavaNames {
         "BigDecimal",
         "LocalDate",
         "LocalDateTime",
+        "OffsetDateTime",
+        "UUID",
         "Boolean",
         "Integer",
         "Long",

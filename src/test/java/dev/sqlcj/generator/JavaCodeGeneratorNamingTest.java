@@ -103,6 +103,28 @@ class JavaCodeGeneratorNamingTest {
     }
 
     @Test
+    void shouldRenameClassConflictingWithImportedUuidType() throws IOException {
+        GeneratedFile file = codeGenerator.generate(
+            query(
+                "UUID",
+                List.of(new QueryColumn("external_id", ColumnType.UUID, true)),
+                List.of()
+            )
+        );
+
+        String source = file.content();
+
+        assertEquals(Path.of("generated", "UUID_.java"), file.path());
+        assertTrue(source.contains("import java.util.UUID;"));
+        assertTrue(source.contains("public final class UUID_ {"));
+        assertTrue(source.contains("public record UUID_Result("));
+        assertTrue(source.contains("UUID external_id"));
+        assertTrue(source.contains("resultSet.getObject(1, UUID.class)"));
+
+        assertCompiles(file);
+    }
+
+    @Test
     void shouldReadRenamedResultComponentsByProjectionPosition() throws IOException {
         GeneratedFile file = codeGenerator.generate(
             query(

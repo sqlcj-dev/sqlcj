@@ -127,7 +127,9 @@ public final class JavaCodeGenerator implements CodeGenerator {
         return switch (type) {
             case DATE -> "java.time.LocalDate";
             case TIMESTAMP -> "java.time.LocalDateTime";
+            case TIMESTAMP_WITH_TIME_ZONE -> "java.time.OffsetDateTime";
             case DECIMAL -> "java.math.BigDecimal";
+            case UUID -> "java.util.UUID";
             default -> null;
         };
     }

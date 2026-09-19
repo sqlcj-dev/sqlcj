@@ -426,7 +426,9 @@ class JavaCodeGeneratorTest {
             "TEXT, String",
             "DATE, LocalDate",
             "TIMESTAMP, LocalDateTime",
-            "DECIMAL, BigDecimal"
+            "TIMESTAMP_WITH_TIME_ZONE, OffsetDateTime",
+            "DECIMAL, BigDecimal",
+            "UUID, UUID"
         }
     )
     void shouldGenerateJavaTypeForQueryParameter(
@@ -525,6 +527,62 @@ class JavaCodeGeneratorTest {
                 "import java.math.BigDecimal;"
             )
         );
+    }
+
+    @Test
+    void shouldGenerateImportsForUuidAndTimestampWithTimeZone() throws IOException {
+        QueryModel query = new QueryModel(
+            "GetUser",
+            QueryType.ONE,
+            "users",
+            SQL,
+            List.of(1, 2),
+            List.of(
+                new QueryColumn(
+                    "external_id",
+                    ColumnType.UUID,
+                    true
+                ),
+                new QueryColumn(
+                    "created_at",
+                    ColumnType.TIMESTAMP_WITH_TIME_ZONE,
+                    true
+                )
+            ),
+            List.of(
+                new QueryParameter(
+                    1,
+                    "externalId",
+                    ColumnType.UUID
+                ),
+                new QueryParameter(
+                    2,
+                    "createdAt",
+                    ColumnType.TIMESTAMP_WITH_TIME_ZONE
+                )
+            )
+        );
+
+        GeneratedFile file = codeGenerator.generate(query);
+
+        String source = file.content();
+
+        assertTrue(source.contains("import java.util.UUID;"));
+        assertTrue(source.contains("import java.time.OffsetDateTime;"));
+
+        assertTrue(
+            source.contains(
+                "public GetUserResult getUser(UUID externalId, OffsetDateTime createdAt)"
+            )
+        );
+
+        assertTrue(source.contains("UUID external_id"));
+        assertTrue(source.contains("OffsetDateTime created_at"));
+
+        assertTrue(source.contains("resultSet.getObject(1, UUID.class)"));
+        assertTrue(source.contains("resultSet.getObject(2, OffsetDateTime.class)"));
+
+        assertCompiles(file);
     }
 
     @Test
@@ -742,7 +800,9 @@ class JavaCodeGeneratorTest {
             "TEXT, String",
             "DATE, LocalDate",
             "TIMESTAMP, LocalDateTime",
-            "DECIMAL, BigDecimal"
+            "TIMESTAMP_WITH_TIME_ZONE, OffsetDateTime",
+            "DECIMAL, BigDecimal",
+            "UUID, UUID"
         }
     )
     void shouldGenerateJavaTypeForResultColumn(ColumnType columnType, String expectedJavaType) {
