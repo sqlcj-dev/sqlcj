@@ -11,8 +11,10 @@ import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.schema.MultiPartName;
 import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.Statements;
+import net.sf.jsqlparser.statement.create.table.CheckConstraint;
 import net.sf.jsqlparser.statement.create.table.ColumnDefinition;
 import net.sf.jsqlparser.statement.create.table.CreateTable;
+import net.sf.jsqlparser.statement.create.table.ForeignKeyIndex;
 import net.sf.jsqlparser.statement.create.table.Index;
 
 import java.util.ArrayList;
@@ -192,19 +194,13 @@ public class DefaultSchemaParser implements SchemaParser {
         List<Constraint> constraints = new ArrayList<>();
 
         for (Index index : indexes) {
-            String indexType = index.getType();
-
-            ConstraintType type = switch (indexType.toUpperCase(Locale.ROOT)) {
-                case "PRIMARY KEY" -> ConstraintType.PRIMARY_KEY;
-                case "UNIQUE" -> ConstraintType.UNIQUE;
-                default -> throw new UnsupportedOperationException(
-                    "Unsupported table constraint: " + indexType
-                );
-            };
+            if (isIgnoredTableConstraint(index)) {
+                continue;
+            }
 
             constraints.add(
                 new Constraint(
-                    type,
+                    constraintType(index),
                     index.getColumnsNames().stream()
                         .map(MultiPartName::unquote)
                         .toList()
@@ -213,5 +209,29 @@ public class DefaultSchemaParser implements SchemaParser {
         }
 
         return constraints;
+    }
+
+    /**
+     * Foreign key and check constraints are accepted but not modeled, because
+     * they do not affect the generated Java types.
+     */
+    private boolean isIgnoredTableConstraint(Index index) {
+        return index instanceof ForeignKeyIndex || index instanceof CheckConstraint;
+    }
+
+    private ConstraintType constraintType(Index index) {
+        String indexType = index.getType();
+
+        String declaredType = indexType == null
+            ? ""
+            : indexType.toUpperCase(Locale.ROOT);
+
+        return switch (declaredType) {
+            case "PRIMARY KEY" -> ConstraintType.PRIMARY_KEY;
+            case "UNIQUE" -> ConstraintType.UNIQUE;
+            default -> throw new UnsupportedOperationException(
+                "Unsupported table constraint: " + indexType
+            );
+        };
     }
 }
