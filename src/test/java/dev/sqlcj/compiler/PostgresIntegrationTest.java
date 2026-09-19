@@ -74,6 +74,35 @@ class PostgresIntegrationTest {
         );
         """;
 
+    /**
+     * A snapshot whose table-level foreign key and check constraints are
+     * accepted and ignored by the schema parser, together with the column
+     * defaults and named constraints that surround them.
+     */
+    private static final String CONSTRAINT_SCHEMA = """
+        CREATE TABLE customers
+        (
+            id   BIGINT       NOT NULL,
+            name VARCHAR(255) NOT NULL,
+            CONSTRAINT customers_pk PRIMARY KEY (id),
+            CONSTRAINT customers_name_unique UNIQUE (name)
+        );
+
+        CREATE TABLE customer_orders
+        (
+            id          BIGINT  NOT NULL,
+            customer_id BIGINT  NOT NULL,
+            quantity    INTEGER NOT NULL DEFAULT 1,
+            status      VARCHAR(32) DEFAULT 'new',
+            created_at  TIMESTAMP   DEFAULT now(),
+            PRIMARY KEY (id),
+            CONSTRAINT customer_orders_customer_fk FOREIGN KEY (customer_id)
+                REFERENCES customers (id) ON DELETE CASCADE,
+            CONSTRAINT customer_orders_quantity_check CHECK (quantity > 0),
+            CHECK (status <> '')
+        );
+        """;
+
     private static final UUID EXTERNAL_ID = UUID.fromString("3f2504e0-4f89-11d3-9a0c-0305e82c3301");
 
     private static final OffsetDateTime UPDATED_AT = OffsetDateTime.of(
@@ -128,6 +157,8 @@ class PostgresIntegrationTest {
      */
     @BeforeEach
     void resetDatabase() throws Exception {
+        execute("DROP TABLE IF EXISTS customer_orders");
+        execute("DROP TABLE IF EXISTS customers");
         execute("DROP TABLE IF EXISTS users");
         execute(SCHEMA);
     }
@@ -453,16 +484,64 @@ class PostgresIntegrationTest {
     }
 
     /**
-     * Compiles the schema snapshot and the given queries, then compiles every
+     * Proves that a snapshot carrying table-level foreign key and check
+     * constraints, column defaults, and named constraints is valid PostgreSQL
+     * DDL, compiles through the pipeline, and reads back the values the
+     * database defaults produced.
+     */
+    @Test
+    void shouldExecuteGeneratedQueryForSnapshotWithIgnoredTableConstraints() throws Exception {
+        execute(CONSTRAINT_SCHEMA);
+
+        Path classesDirectory = generateAndCompile(
+            CONSTRAINT_SCHEMA,
+            """
+                -- name: GetCustomerOrder :one
+                SELECT id, customer_id, quantity, status
+                FROM customer_orders
+                WHERE id = $1;
+                """
+        );
+
+        execute("INSERT INTO customers (id, name) VALUES (1, 'Alice')");
+        execute("INSERT INTO customer_orders (id, customer_id) VALUES (10, 1)");
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object query = newQuery(classLoader, "GetCustomerOrder");
+
+            Method method = query.getClass().getMethod("getCustomerOrder", Long.class);
+
+            Object result = method.invoke(query, 10L);
+
+            assertNotNull(result);
+
+            assertEquals(
+                List.of("id", "customer_id", "quantity", "status"),
+                recordComponentNames(result)
+            );
+
+            assertEquals(10L, component(result, "id"));
+            assertEquals(1L, component(result, "customer_id"));
+            assertEquals(1, component(result, "quantity"));
+            assertEquals("new", component(result, "status"));
+        }
+    }
+
+    private Path generateAndCompile(String queries) throws Exception {
+        return generateAndCompile(SCHEMA, queries);
+    }
+
+    /**
+     * Compiles the given schema snapshot and queries, then compiles every
      * generated Java file into an isolated temporary classes directory.
      */
-    private Path generateAndCompile(String queries) throws Exception {
+    private Path generateAndCompile(String schema, String queries) throws Exception {
         Path schemaFile = tempDir.resolve("schema.sql");
         Path queriesFile = tempDir.resolve("queries.sql");
         Path generatedDirectory = tempDir.resolve("generated");
         Path classesDirectory = tempDir.resolve("classes");
 
-        Files.writeString(schemaFile, SCHEMA);
+        Files.writeString(schemaFile, schema);
         Files.writeString(queriesFile, queries);
 
         Config config = new Config(
