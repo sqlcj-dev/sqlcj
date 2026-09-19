@@ -292,6 +292,134 @@ class DefaultSchemaParserTest {
     }
 
     @Test
+    void shouldParseColumnSpecificationsThatDoNotAffectTypes() {
+        String sql = """
+            CREATE TABLE orders (
+                id         BIGINT NOT NULL PRIMARY KEY,
+                quantity   INTEGER NOT NULL DEFAULT 0 CHECK (quantity > 0),
+                status     VARCHAR(32) DEFAULT 'new',
+                created_at TIMESTAMP DEFAULT now(),
+                user_id    BIGINT REFERENCES users (id),
+                owner_id   BIGINT REFERENCES users (id) ON DELETE CASCADE
+            );
+            """;
+
+        Schema schema = parser.parse(sql);
+
+        Table table = schema.tables().getFirst();
+
+        assertEquals(
+            List.of(
+                new Column("id", ColumnType.BIGINT, false),
+                new Column("quantity", ColumnType.INTEGER, false),
+                new Column("status", ColumnType.VARCHAR, true),
+                new Column("created_at", ColumnType.TIMESTAMP, true),
+                new Column("user_id", ColumnType.BIGINT, true),
+                new Column("owner_id", ColumnType.BIGINT, true)
+            ),
+            table.columns()
+        );
+
+        assertEquals(
+            List.of(
+                new Constraint(
+                    ConstraintType.PRIMARY_KEY,
+                    List.of("id")
+                )
+            ),
+            table.constraints()
+        );
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "FOREIGN KEY (user_id) REFERENCES users (id)",
+            "CONSTRAINT orders_user_fk FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE",
+            "CHECK (quantity > 0)",
+            "CONSTRAINT orders_quantity_check CHECK (quantity > 0)"
+        }
+    )
+    void shouldIgnoreForeignKeyAndCheckTableConstraints(String tableConstraint) {
+        String sql = """
+            CREATE TABLE orders (
+                id       BIGINT NOT NULL,
+                user_id  BIGINT NOT NULL,
+                quantity INTEGER NOT NULL,
+                %s
+            );
+            """
+            .formatted(tableConstraint);
+
+        Schema schema = parser.parse(sql);
+
+        Table table = schema.tables().getFirst();
+
+        assertEquals(
+            List.of(
+                new Column("id", ColumnType.BIGINT, false),
+                new Column("user_id", ColumnType.BIGINT, false),
+                new Column("quantity", ColumnType.INTEGER, false)
+            ),
+            table.columns()
+        );
+
+        assertTrue(table.constraints().isEmpty());
+    }
+
+    @Test
+    void shouldParseNamedTableConstraintsAlongsideIgnoredOnes() {
+        String sql = """
+            CREATE TABLE orders (
+                id       BIGINT NOT NULL,
+                code     VARCHAR(32) NOT NULL,
+                user_id  BIGINT NOT NULL,
+                quantity INTEGER NOT NULL DEFAULT 1,
+                CONSTRAINT orders_pk PRIMARY KEY (id),
+                CONSTRAINT orders_user_fk FOREIGN KEY (user_id) REFERENCES users (id),
+                CONSTRAINT orders_quantity_check CHECK (quantity > 0),
+                CONSTRAINT orders_code_unique UNIQUE (code),
+                FOREIGN KEY (code) REFERENCES codes (code),
+                CHECK (quantity < 100)
+            );
+            """;
+
+        Schema schema = parser.parse(sql);
+
+        Table table = schema.tables().getFirst();
+
+        assertEquals(
+            List.of(
+                new Constraint(
+                    ConstraintType.PRIMARY_KEY,
+                    List.of("id")
+                ),
+                new Constraint(
+                    ConstraintType.UNIQUE,
+                    List.of("code")
+                )
+            ),
+            table.constraints()
+        );
+    }
+
+    @Test
+    void shouldRejectUnsupportedSchemaStatement() {
+        String sql = """
+            CREATE TABLE users (
+                id BIGINT NOT NULL
+            );
+
+            ALTER TABLE users ADD COLUMN name VARCHAR(255);
+            """;
+
+        assertThrows(
+            UnsupportedOperationException.class,
+            () -> parser.parse(sql)
+        );
+    }
+
+    @Test
     void shouldThrowSchemaParseExceptionForInvalidSql() {
         String sql = """
             CREATE TABLE users (
