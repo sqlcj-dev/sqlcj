@@ -172,7 +172,7 @@ class JavaCodeGeneratorNamingTest {
             )
         );
 
-        assertTrue(source.contains("List.of(executor1, user_id1, user_id2)"));
+        assertTrue(source.contains("java.util.Arrays.asList(executor1, user_id1, user_id2)"));
 
         assertCompiles(file);
     }
