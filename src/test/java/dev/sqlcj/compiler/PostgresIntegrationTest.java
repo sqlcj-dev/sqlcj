@@ -31,9 +31,12 @@ import java.sql.Connection;
 import java.sql.Statement;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.UUID;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -55,17 +58,34 @@ class PostgresIntegrationTest {
     private static final String SCHEMA = """
         CREATE TABLE users
         (
-            id         BIGINT PRIMARY KEY,
-            code       INTEGER NOT NULL,
-            score      SMALLINT,
-            name       VARCHAR(255),
-            bio        TEXT,
-            active     BOOLEAN,
-            birth_date DATE,
-            created_at TIMESTAMP,
-            balance    DECIMAL(10, 2)
+            id          BIGINT PRIMARY KEY,
+            code        INTEGER NOT NULL,
+            score       SMALLINT,
+            name        VARCHAR(255),
+            bio         TEXT,
+            active      BOOLEAN,
+            birth_date  DATE,
+            created_at  TIMESTAMP,
+            balance     DECIMAL(10, 2),
+            serial_id   SERIAL,
+            revision    BIGSERIAL,
+            external_id UUID,
+            updated_at  TIMESTAMP(3) WITH TIME ZONE
         );
         """;
+
+    private static final UUID EXTERNAL_ID = UUID.fromString("3f2504e0-4f89-11d3-9a0c-0305e82c3301");
+
+    private static final OffsetDateTime UPDATED_AT = OffsetDateTime.of(
+        2026,
+        1,
+        1,
+        10,
+        0,
+        0,
+        0,
+        ZoneOffset.ofHours(3)
+    );
 
     private static PostgreSQLContainer<?> postgres;
 
@@ -291,11 +311,13 @@ class PostgresIntegrationTest {
         Path classesDirectory = generateAndCompile("""
             -- name: InsertUser :exec
             INSERT INTO users
-                (id, code, score, name, bio, active, birth_date, created_at, balance)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
+                (id, code, score, name, bio, active, birth_date, created_at, balance,
+                 external_id, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);
 
             -- name: GetUser :one
-            SELECT id, code, score, name, bio, active, birth_date, created_at, balance
+            SELECT id, code, score, name, bio, active, birth_date, created_at, balance,
+                   external_id, updated_at
             FROM users
             WHERE id = $1;
             """);
@@ -313,13 +335,17 @@ class PostgresIntegrationTest {
                 Boolean.class,
                 LocalDate.class,
                 LocalDateTime.class,
-                BigDecimal.class
+                BigDecimal.class,
+                UUID.class,
+                OffsetDateTime.class
             );
 
             Object affectedRows = insertMethod.invoke(
                 insert,
                 6L,
                 42,
+                null,
+                null,
                 null,
                 null,
                 null,
@@ -348,6 +374,81 @@ class PostgresIntegrationTest {
             assertNull(component(result, "birth_date"));
             assertNull(component(result, "created_at"));
             assertNull(component(result, "balance"));
+            assertNull(component(result, "external_id"));
+            assertNull(component(result, "updated_at"));
+        }
+    }
+
+    /**
+     * Covers the PostgreSQL round trip of the serial, UUID, and
+     * timestamptz mappings: every value is written through the generated
+     * write method and read back through the generated read method.
+     *
+     * <p>PostgreSQL normalizes a {@code timestamptz} to the session time zone,
+     * so the read value is compared by instant rather than by offset.
+     */
+    @Test
+    void shouldRoundTripSerialUuidAndTimestampWithTimeZoneValues() throws Exception {
+        Path classesDirectory = generateAndCompile("""
+            -- name: InsertUser :exec
+            INSERT INTO users (id, code, serial_id, revision, external_id, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6);
+
+            -- name: GetUser :one
+            SELECT id, serial_id, revision, external_id, updated_at
+            FROM users
+            WHERE id = $1;
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object insert = newQuery(classLoader, "InsertUser");
+
+            Method insertMethod = insert.getClass().getMethod(
+                "insertUser",
+                Long.class,
+                Integer.class,
+                Integer.class,
+                Long.class,
+                UUID.class,
+                OffsetDateTime.class
+            );
+
+            Object affectedRows = insertMethod.invoke(
+                insert,
+                7L,
+                42,
+                101,
+                202L,
+                EXTERNAL_ID,
+                UPDATED_AT
+            );
+
+            assertEquals(1, affectedRows);
+
+            Object query = newQuery(classLoader, "GetUser");
+
+            Method queryMethod = query.getClass().getMethod("getUser", Long.class);
+
+            Object result = queryMethod.invoke(query, 7L);
+
+            assertNotNull(result);
+
+            assertEquals(
+                List.of("id", "serial_id", "revision", "external_id", "updated_at"),
+                recordComponentNames(result)
+            );
+
+            assertEquals(7L, component(result, "id"));
+            assertEquals(101, component(result, "serial_id"));
+            assertEquals(202L, component(result, "revision"));
+            assertEquals(EXTERNAL_ID, component(result, "external_id"));
+
+            OffsetDateTime updatedAt = assertInstanceOf(
+                OffsetDateTime.class,
+                component(result, "updated_at")
+            );
+
+            assertEquals(UPDATED_AT.toInstant(), updatedAt.toInstant());
         }
     }
 
