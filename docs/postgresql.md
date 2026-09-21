@@ -12,10 +12,40 @@ blocking JDBC execution. There is no engine option and no dialect option in
 `sqlcj.yaml`; the full file format is documented separately.
 
 The application owns the database connection: sqlcj's runtime
-`dev.sqlcj.runtime.JdbcQueryExecutor` is constructed with a
-`javax.sql.DataSource` and executes each generated query as a JDBC
+`dev.sqlcj.runtime.JdbcQueryExecutor` executes each generated query as a JDBC
 `PreparedStatement`. sqlcj does not ship a JDBC driver, so the application also
 supplies the PostgreSQL driver.
+
+## Connection Ownership and Transactions
+
+`JdbcQueryExecutor` has two construction paths. Both share the same positional
+parameter binding, row mapping, single-row and multi-row result handling,
+affected-row counting, and exception translation, and both accept the same
+generated query classes without regeneration:
+
+| Construction | Connection ownership |
+| --- | --- |
+| `new JdbcQueryExecutor(javax.sql.DataSource)` | The executor obtains one connection per operation and closes it before the operation returns, so each operation runs on that connection's own transaction state, typically one auto-committed statement. |
+| `new JdbcQueryExecutor(java.sql.Connection)` | The executor runs every operation on the supplied connection and never closes, commits, or rolls it back, never changes its auto-commit setting, and never otherwise configures it. |
+
+The caller-owned connection path is how several generated operations take part
+in one application-controlled transaction: the application disables auto-commit,
+runs generated reads and writes through one executor, and then calls `commit` or
+`rollback` itself. sqlcj provides no transaction callback or template API, no
+savepoints, and no isolation configuration.
+
+In both paths the `PreparedStatement` and any `ResultSet` opened for an
+operation are closed before that operation returns, on success and on failure.
+
+Every `SQLException` raised while acquiring a connection, preparing a statement,
+binding parameters, executing, reading results, or closing a DataSource-acquired
+connection is translated into `dev.sqlcj.runtime.QueryExecutionException` with
+the message `Failed to execute query` and the `SQLException` as its cause. A
+failed operation on a caller-owned connection leaves the connection open, so the
+application decides whether to continue or roll back.
+
+The runtime is blocking and synchronous. An executor built on a caller-owned
+connection inherits that connection's confinement to a single thread at a time.
 
 Behavior is verified against PostgreSQL 16. The pipeline is executed end to end
 against a `postgres:16-alpine` container: the schema snapshot is run as
@@ -201,3 +231,20 @@ Nulls:
   `DefaultSchemaParserTest.shouldParseNullabilityOfAddedColumnTypes`, and
   `DefaultSchemaParserTest.shouldParseSerialColumnAsNotNullable` cover parsed
   nullability.
+
+Connection ownership and transactions:
+
+- `JdbcQueryExecutorTest` covers both construction paths for `query`,
+  `queryMany`, and `execute`, including
+  `shouldCloseAcquiredConnectionForEachDataSourceOperation`,
+  `shouldCloseAcquiredConnectionWhenDataSourceOperationFails`,
+  `shouldLeaveCallerOwnedConnectionOpenAndItsTransactionStateUnchanged`,
+  `shouldCloseStatementsAndResultSetsOfCallerOwnedConnection`,
+  `shouldCloseStatementWhenExecutionFailsOnCallerOwnedConnection`, and
+  `shouldWrapSqlExceptionForCallerOwnedConnection`.
+- `PostgresIntegrationTest.shouldCommitGeneratedOperationsOnCallerOwnedConnection`
+  and
+  `PostgresIntegrationTest.shouldRollBackGeneratedOperationsOnCallerOwnedConnection`
+  run a generated affected-row write, a generated returning write, and a
+  generated read on one caller-owned connection with auto-commit disabled, and
+  prove the application's own `commit` and `rollback`.
