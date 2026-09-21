@@ -41,6 +41,7 @@ import java.util.UUID;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -102,6 +103,26 @@ class PostgresIntegrationTest {
             CONSTRAINT customer_orders_quantity_check CHECK (quantity > 0),
             CHECK (status <> '')
         );
+        """;
+
+    /**
+     * Queries used by the caller-owned transaction tests: an affected-row
+     * write, a returning write, and a read.
+     */
+    private static final String TRANSACTION_QUERIES = """
+        -- name: InsertUser :exec
+        INSERT INTO users (id, code, name)
+        VALUES ($1, $2, $3);
+
+        -- name: InsertUserReturningRow :one
+        INSERT INTO users (id, code, name)
+        VALUES ($1, $2, $3)
+        RETURNING id, name;
+
+        -- name: ListUserNames :many
+        SELECT name
+        FROM users
+        ORDER BY id;
         """;
 
     private static final UUID EXTERNAL_ID = UUID.fromString("3f2504e0-4f89-11d3-9a0c-0305e82c3301");
@@ -726,6 +747,159 @@ class PostgresIntegrationTest {
         }
     }
 
+    /**
+     * Runs three generated operations on one caller-owned connection with
+     * auto-commit disabled: an affected-row write, a returning write, and a
+     * read that sees both uncommitted rows. The application's commit makes both
+     * rows durable, and the connection is neither closed nor reconfigured by the
+     * runtime.
+     */
+    @Test
+    void shouldCommitGeneratedOperationsOnCallerOwnedConnection() throws Exception {
+        Path classesDirectory = generateAndCompile(TRANSACTION_QUERIES);
+
+        try (
+            URLClassLoader classLoader = classLoader(classesDirectory);
+            Connection connection = dataSource.getConnection()
+        ) {
+            connection.setAutoCommit(false);
+
+            QueryExecutor transactional = new JdbcQueryExecutor(connection);
+
+            assertEquals(
+                1,
+                insertUser(classLoader, transactional, 1L, 42, "Alice")
+            );
+
+            Object returned = insertUserReturningRow(
+                classLoader,
+                transactional,
+                2L,
+                43,
+                "Bob"
+            );
+
+            assertNotNull(returned);
+            assertEquals(2L, component(returned, "id"));
+            assertEquals("Bob", component(returned, "name"));
+
+            assertEquals(
+                List.of("Alice", "Bob"),
+                listUserNames(classLoader, transactional)
+            );
+
+            assertFalse(connection.isClosed());
+            assertFalse(connection.getAutoCommit());
+
+            connection.commit();
+
+            assertFalse(connection.isClosed());
+            assertFalse(connection.getAutoCommit());
+
+            assertEquals(
+                List.of("Alice", "Bob"),
+                listUserNames(classLoader)
+            );
+        }
+    }
+
+    /**
+     * Runs the same generated operations on one caller-owned connection and
+     * rolls the transaction back: both writes are discarded, and the connection
+     * remains open and usable for a further generated read.
+     */
+    @Test
+    void shouldRollBackGeneratedOperationsOnCallerOwnedConnection() throws Exception {
+        Path classesDirectory = generateAndCompile(TRANSACTION_QUERIES);
+
+        try (
+            URLClassLoader classLoader = classLoader(classesDirectory);
+            Connection connection = dataSource.getConnection()
+        ) {
+            connection.setAutoCommit(false);
+
+            QueryExecutor transactional = new JdbcQueryExecutor(connection);
+
+            assertEquals(
+                1,
+                insertUser(classLoader, transactional, 3L, 44, "Carol")
+            );
+
+            assertNotNull(
+                insertUserReturningRow(classLoader, transactional, 4L, 45, "Dora")
+            );
+
+            assertEquals(
+                List.of("Carol", "Dora"),
+                listUserNames(classLoader, transactional)
+            );
+
+            connection.rollback();
+
+            assertFalse(connection.isClosed());
+            assertFalse(connection.getAutoCommit());
+
+            assertEquals(
+                List.of(),
+                listUserNames(classLoader, transactional)
+            );
+        }
+    }
+
+    private Object insertUser(
+        URLClassLoader classLoader,
+        QueryExecutor executor,
+        Long id,
+        Integer code,
+        String name
+    ) throws Exception {
+        Object insert = newQuery(classLoader, "InsertUser", executor);
+
+        return insert
+            .getClass()
+            .getMethod("insertUser", Long.class, Integer.class, String.class)
+            .invoke(insert, id, code, name);
+    }
+
+    private Object insertUserReturningRow(
+        URLClassLoader classLoader,
+        QueryExecutor executor,
+        Long id,
+        Integer code,
+        String name
+    ) throws Exception {
+        Object insert = newQuery(classLoader, "InsertUserReturningRow", executor);
+
+        return insert
+            .getClass()
+            .getMethod("insertUserReturningRow", Long.class, Integer.class, String.class)
+            .invoke(insert, id, code, name);
+    }
+
+    private List<Object> listUserNames(URLClassLoader classLoader) throws Exception {
+        return listUserNames(classLoader, new JdbcQueryExecutor(dataSource));
+    }
+
+    private List<Object> listUserNames(
+        URLClassLoader classLoader,
+        QueryExecutor executor
+    ) throws Exception {
+        Object query = newQuery(classLoader, "ListUserNames", executor);
+
+        List<?> rows = (List<?>) query
+            .getClass()
+            .getMethod("listUserNames")
+            .invoke(query);
+
+        List<Object> names = new ArrayList<>();
+
+        for (Object row : rows) {
+            names.add(component(row, "name"));
+        }
+
+        return names;
+    }
+
     private Path generateAndCompile(String queries) throws Exception {
         return generateAndCompile(SCHEMA, queries);
     }
@@ -800,6 +974,14 @@ class PostgresIntegrationTest {
     }
 
     private Object newQuery(URLClassLoader classLoader, String queryName) throws Exception {
+        return newQuery(classLoader, queryName, new JdbcQueryExecutor(dataSource));
+    }
+
+    private Object newQuery(
+        URLClassLoader classLoader,
+        String queryName,
+        QueryExecutor executor
+    ) throws Exception {
         Class<?> generatedClass = Class.forName(
             "generated." + queryName,
             true,
@@ -808,7 +990,7 @@ class PostgresIntegrationTest {
 
         Constructor<?> constructor = generatedClass.getConstructor(QueryExecutor.class);
 
-        return constructor.newInstance(new JdbcQueryExecutor(dataSource));
+        return constructor.newInstance(executor);
     }
 
     private void execute(String sql) throws Exception {
