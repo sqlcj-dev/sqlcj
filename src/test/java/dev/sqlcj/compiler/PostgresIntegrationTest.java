@@ -36,6 +36,7 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Stream;
 
@@ -524,6 +525,204 @@ class PostgresIntegrationTest {
             assertEquals(1L, component(result, "customer_id"));
             assertEquals(1, component(result, "quantity"));
             assertEquals("new", component(result, "status"));
+        }
+    }
+
+    /**
+     * Covers a returning insert: the database-generated serial values and the
+     * target-table order of {@code RETURNING *} are read through the generated
+     * typed result record.
+     */
+    @Test
+    void shouldExecuteGeneratedInsertReturningAgainstPostgres() throws Exception {
+        Path classesDirectory = generateAndCompile("""
+            -- name: InsertUserReturningSerialId :one
+            INSERT INTO users (id, code, name)
+            VALUES ($1, $2, $3)
+            RETURNING serial_id;
+
+            -- name: InsertUserReturningRow :one
+            INSERT INTO users (id, code, name)
+            VALUES ($1, $2, $3)
+            RETURNING *;
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object insertSerialId = newQuery(classLoader, "InsertUserReturningSerialId");
+
+            Method serialIdMethod = insertSerialId.getClass().getMethod(
+                "insertUserReturningSerialId",
+                Long.class,
+                Integer.class,
+                String.class
+            );
+
+            Object serialIdResult = serialIdMethod.invoke(insertSerialId, 1L, 42, "Alice");
+
+            assertNotNull(serialIdResult);
+
+            assertEquals(List.of("serial_id"), recordComponentNames(serialIdResult));
+            assertEquals(1, component(serialIdResult, "serial_id"));
+
+            Object insertRow = newQuery(classLoader, "InsertUserReturningRow");
+
+            Method rowMethod = insertRow.getClass().getMethod(
+                "insertUserReturningRow",
+                Long.class,
+                Integer.class,
+                String.class
+            );
+
+            Object row = rowMethod.invoke(insertRow, 2L, 43, "Bob");
+
+            assertNotNull(row);
+
+            assertEquals(
+                List.of(
+                    "id",
+                    "code",
+                    "score",
+                    "name",
+                    "bio",
+                    "active",
+                    "birth_date",
+                    "created_at",
+                    "balance",
+                    "serial_id",
+                    "revision",
+                    "external_id",
+                    "updated_at"
+                ),
+                recordComponentNames(row)
+            );
+
+            assertEquals(2L, component(row, "id"));
+            assertEquals(43, component(row, "code"));
+            assertEquals("Bob", component(row, "name"));
+            assertEquals(2, component(row, "serial_id"));
+            assertEquals(2L, component(row, "revision"));
+            assertNull(component(row, "score"));
+            assertNull(component(row, "bio"));
+            assertNull(component(row, "external_id"));
+        }
+    }
+
+    /**
+     * Covers a returning update: the repeated and out-of-order placeholders are
+     * bound in textual order, the returned columns keep their declared order,
+     * and a no-row update produces the {@code :one} null result.
+     */
+    @Test
+    void shouldExecuteGeneratedUpdateReturningAgainstPostgres() throws Exception {
+        Path classesDirectory = generateAndCompile("""
+            -- name: RenameUser :one
+            UPDATE users
+            SET name = $2,
+                bio = $2
+            WHERE id = $1
+              AND code = $3
+            RETURNING bio, id, name, score;
+            """);
+
+        execute("""
+            INSERT INTO users (id, code, name, bio)
+            VALUES (1, 42, 'Alice', 'first user')
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object update = newQuery(classLoader, "RenameUser");
+
+            Method method = update.getClass().getMethod(
+                "renameUser",
+                Long.class,
+                String.class,
+                Integer.class
+            );
+
+            Object result = method.invoke(update, 1L, "Renamed", 42);
+
+            assertNotNull(result);
+
+            assertEquals(
+                List.of("bio", "id", "name", "score"),
+                recordComponentNames(result)
+            );
+
+            assertEquals("Renamed", component(result, "bio"));
+            assertEquals(1L, component(result, "id"));
+            assertEquals("Renamed", component(result, "name"));
+            assertNull(component(result, "score"));
+
+            assertNull(method.invoke(update, 404L, "Missing", 42));
+        }
+    }
+
+    /**
+     * Covers a returning delete: every deleted row is returned to the
+     * {@code :many} result, and a delete that matches no row returns an empty
+     * list. PostgreSQL does not guarantee the returned row order, so the rows
+     * are compared as a set.
+     */
+    @Test
+    void shouldExecuteGeneratedDeleteReturningAgainstPostgres() throws Exception {
+        Path classesDirectory = generateAndCompile("""
+            -- name: DeleteUsersByActive :many
+            DELETE FROM users
+            WHERE active = $1
+            RETURNING id, name;
+            """);
+
+        execute("""
+            INSERT INTO users (id, code, name, active)
+            VALUES
+                (1, 1, 'Alice', TRUE),
+                (2, 2, 'Bob', FALSE),
+                (3, 3, 'Carol', TRUE)
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object delete = newQuery(classLoader, "DeleteUsersByActive");
+
+            Method method = delete.getClass().getMethod(
+                "deleteUsersByActive",
+                Boolean.class
+            );
+
+            List<?> deleted = assertInstanceOf(
+                List.class,
+                method.invoke(delete, Boolean.TRUE)
+            );
+
+            assertEquals(2, deleted.size());
+
+            assertEquals(
+                List.of("id", "name"),
+                recordComponentNames(deleted.getFirst())
+            );
+
+            List<List<Object>> rows = new ArrayList<>();
+
+            for (Object deletedRow : deleted) {
+                rows.add(
+                    List.of(
+                        component(deletedRow, "id"),
+                        component(deletedRow, "name")
+                    )
+                );
+            }
+
+            assertEquals(
+                Set.of(
+                    List.of(1L, "Alice"),
+                    List.of(3L, "Carol")
+                ),
+                Set.copyOf(rows)
+            );
+
+            assertEquals(
+                List.of(),
+                method.invoke(delete, Boolean.TRUE)
+            );
         }
     }
 
