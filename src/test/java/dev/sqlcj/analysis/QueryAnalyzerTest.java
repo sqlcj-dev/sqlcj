@@ -10,6 +10,7 @@ import dev.sqlcj.sql.ParsedSql;
 import dev.sqlcj.sql.SqlParser;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
@@ -316,7 +317,7 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(
-            "Write queries must be declared as :exec",
+            "Write queries without RETURNING must be declared as :exec",
             exception.getMessage()
         );
     }
@@ -1597,7 +1598,7 @@ class QueryAnalyzerTest {
             "DELETE FROM users WHERE id = $1 RETURNING id"
         }
     )
-    void shouldRejectReturningWrite(String sql) {
+    void shouldRejectReturningWriteDeclaredAsExec(String sql) {
         Query query = new Query("WriteUser", QueryType.EXEC, sql);
         ParsedSql parsedSql = parser.parse(sql);
 
@@ -1606,7 +1607,256 @@ class QueryAnalyzerTest {
             () -> analyzer.analyze(query, parsedSql, schema)
         );
 
-        assertEquals("RETURNING is not supported", exception.getMessage());
+        assertEquals(
+            "Write queries with RETURNING must be declared as :one or :many",
+            exception.getMessage()
+        );
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "INSERT INTO users (id) VALUES ($1) RETURNING id",
+            "UPDATE users SET name = $2 WHERE id = $1 RETURNING id",
+            "DELETE FROM users WHERE id = $1 RETURNING id"
+        }
+    )
+    void shouldAnalyzeReturningWriteForBothResultQueryTypes(String sql) {
+        for (QueryType type : List.of(QueryType.ONE, QueryType.MANY)) {
+            QueryModel model = analyzer.analyze(
+                new Query("WriteUser", type, sql),
+                parser.parse(sql),
+                schema
+            );
+
+            assertEquals(type, model.type());
+            assertEquals("users", model.table());
+
+            assertEquals(
+                List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+                model.columns()
+            );
+        }
+    }
+
+    @Test
+    void shouldAnalyzeInsertReturningColumnsInDeclaredOrder() {
+        Query query = new Query(
+            "InsertUser",
+            QueryType.ONE,
+            """
+                INSERT INTO users (id, name)
+                VALUES ($1, $2)
+                RETURNING name, id
+                """
+        );
+
+        QueryModel model = analyzer.analyze(
+            query,
+            parser.parse(query.sql()),
+            schema
+        );
+
+        assertEquals(QueryType.ONE, model.type());
+        assertEquals("users", model.table());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("name", ColumnType.VARCHAR, true),
+                new QueryColumn("id", ColumnType.BIGINT, false)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            """
+                INSERT INTO users (id, name)
+                VALUES (?, ?)
+                RETURNING name, id
+                """,
+            model.executableSql()
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+    }
+
+    @Test
+    void shouldExpandInsertReturningAllColumnsInSchemaOrder() {
+        Query query = new Query(
+            "InsertUser",
+            QueryType.ONE,
+            "INSERT INTO users (id) VALUES ($1) RETURNING *"
+        );
+
+        QueryModel model = analyzer.analyze(
+            query,
+            parser.parse(query.sql()),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true),
+                new QueryColumn("active", ColumnType.BOOLEAN, true)
+            ),
+            model.columns()
+        );
+    }
+
+    @Test
+    void shouldAnalyzeUpdateReturningWithRepeatedAndOutOfOrderParameters() {
+        Query query = new Query(
+            "UpdateUser",
+            QueryType.ONE,
+            """
+                UPDATE users
+                SET name = $2,
+                    active = $3
+                WHERE id = $1
+                  AND name = $2
+                RETURNING active, id, name
+                """
+        );
+
+        QueryModel model = analyzer.analyze(
+            query,
+            parser.parse(query.sql()),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("active", ColumnType.BOOLEAN, true),
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR),
+                new QueryParameter(3, "active", ColumnType.BOOLEAN)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(2, 3, 1, 2), model.bindingParameterIndexes());
+    }
+
+    @Test
+    void shouldAnalyzeDeleteReturningAllColumns() {
+        Query query = new Query(
+            "DeleteUsers",
+            QueryType.MANY,
+            "DELETE FROM users WHERE active = $1 RETURNING *"
+        );
+
+        QueryModel model = analyzer.analyze(
+            query,
+            parser.parse(query.sql()),
+            schema
+        );
+
+        assertEquals(QueryType.MANY, model.type());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true),
+                new QueryColumn("active", ColumnType.BOOLEAN, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "active", ColumnType.BOOLEAN)),
+            model.parameters()
+        );
+    }
+
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        value = {
+            "INSERT INTO users (id) VALUES ($1) RETURNING id AS user_id"
+                + "|RETURNING items must not be aliased.",
+            "INSERT INTO users (id) VALUES ($1) RETURNING id + 1"
+                + "|Unsupported RETURNING expression: Addition",
+            "INSERT INTO users (id) VALUES ($1) RETURNING users.*"
+                + "|Only an unqualified RETURNING * is supported.",
+            "DELETE FROM users WHERE id = $1 RETURNING count(id)"
+                + "|Unsupported RETURNING expression: Function"
+        }
+    )
+    void shouldRejectUnsupportedReturningItem(String sql, String message) {
+        Query query = new Query("WriteUser", QueryType.ONE, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(message, exception.getMessage());
+    }
+
+    @Test
+    void shouldRejectUnknownReturningColumn() {
+        String sql = "INSERT INTO users (id) VALUES ($1) RETURNING missing";
+
+        Query query = new Query("InsertUser", QueryType.ONE, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(
+            "Column not found in sources users: missing",
+            exception.getMessage()
+        );
+    }
+
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        value = {
+            "INSERT INTO users (id) VALUES ($1) ON CONFLICT DO NOTHING RETURNING id"
+                + "|INSERT ... ON CONFLICT is not supported.",
+            "INSERT INTO users (id) SELECT id FROM users RETURNING id"
+                + "|RETURNING requires an INSERT with a single VALUES row.",
+            "INSERT INTO users (id) VALUES ($1), ($2) RETURNING id"
+                + "|INSERT requires a single VALUES row.",
+            "WITH known AS (SELECT id FROM users) INSERT INTO users (id) VALUES ($1) RETURNING id"
+                + "|Common table expressions are not supported in a returning write.",
+            "UPDATE users SET name = $2 FROM profiles WHERE users.id = $1 RETURNING id"
+                + "|UPDATE ... FROM and joined updates are not supported.",
+            "DELETE FROM users USING profiles WHERE users.id = $1 RETURNING id"
+                + "|DELETE ... USING and joined deletes are not supported."
+        }
+    )
+    void shouldRejectExcludedReturningWriteForm(String sql, String message) {
+        Query query = new Query("WriteUser", QueryType.ONE, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(message, exception.getMessage());
     }
 
     @Test

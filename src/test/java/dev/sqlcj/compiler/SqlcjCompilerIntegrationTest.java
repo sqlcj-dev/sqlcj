@@ -1534,6 +1534,119 @@ class SqlcjCompilerIntegrationTest {
         );
     }
 
+    /**
+     * A returning write reuses the typed result record, positional row mapper,
+     * and result-producing executor call of a read, so the generated Java for
+     * every returning write kind is verified by compiling it.
+     */
+    @Test
+    void shouldGenerateCompilableJavaForReturningWrites() throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+        Path classesDirectory = tempDir.resolve("classes");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE users
+                (
+                    id     BIGINT NOT NULL,
+                    name   VARCHAR(255),
+                    active BOOLEAN
+                );
+                """
+        );
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: InsertUser :one
+                INSERT INTO users (id, name)
+                VALUES ($1, $2)
+                RETURNING *;
+
+                -- name: UpdateUser :one
+                UPDATE users
+                SET name = $2
+                WHERE id = $1
+                RETURNING name, id;
+
+                -- name: DeleteUsers :many
+                DELETE FROM users
+                WHERE active = $1
+                RETURNING id, name;
+                """
+        );
+
+        Config config = new Config(
+            List.of(
+                new SqlConfig(
+                    schemaFile.toString(),
+                    queriesFile.toString()
+                )
+            ),
+            new JavaConfig(
+                generatedDirectory.toString(),
+                "generated"
+            )
+        );
+
+        new SqlcjCompiler().compile(config);
+
+        Path insertUserFile = generatedDirectory.resolve("generated/InsertUser.java");
+        Path updateUserFile = generatedDirectory.resolve("generated/UpdateUser.java");
+        Path deleteUsersFile = generatedDirectory.resolve("generated/DeleteUsers.java");
+
+        String insertUser = Files.readString(insertUserFile);
+        assertTrue(insertUser.contains("public record InsertUserResult("));
+        assertTrue(insertUser.contains("Long id"));
+        assertTrue(insertUser.contains("String name"));
+        assertTrue(insertUser.contains("Boolean active"));
+        assertTrue(insertUser.contains("public InsertUserResult insertUser(Long id, String name)"));
+        assertTrue(insertUser.contains("return executor.query("));
+        assertTrue(insertUser.contains("VALUES (?, ?)"));
+        assertTrue(insertUser.contains("RETURNING *"));
+
+        String updateUser = Files.readString(updateUserFile);
+        assertTrue(updateUser.contains("public UpdateUserResult updateUser(Long id, String name)"));
+        assertTrue(updateUser.contains("resultSet.getObject(1, String.class)"));
+        assertTrue(updateUser.contains("resultSet.getObject(2, Long.class)"));
+        assertTrue(updateUser.contains("java.util.Arrays.asList(name, id)"));
+        assertTrue(updateUser.contains("RETURNING name, id"));
+
+        String deleteUsers = Files.readString(deleteUsersFile);
+        assertTrue(deleteUsers.contains("public List<DeleteUsersResult> deleteUsers(Boolean active)"));
+        assertTrue(deleteUsers.contains("return executor.queryMany("));
+        assertTrue(deleteUsers.contains("RETURNING id, name"));
+
+        Files.createDirectories(classesDirectory);
+
+        JavaCompiler compilerApi = ToolProvider.getSystemJavaCompiler();
+
+        assertNotNull(compilerApi);
+
+        assertEquals(
+            0,
+            compilerApi.run(
+                null,
+                null,
+                null,
+                "-classpath",
+                System.getProperty("java.class.path"),
+                "-d",
+                classesDirectory.toString(),
+                insertUserFile.toString(),
+                updateUserFile.toString(),
+                deleteUsersFile.toString()
+            )
+        );
+
+        assertTrue(Files.exists(classesDirectory.resolve("generated/InsertUser.class")));
+        assertTrue(Files.exists(classesDirectory.resolve("generated/UpdateUser.class")));
+        assertTrue(Files.exists(classesDirectory.resolve("generated/DeleteUsers.class")));
+    }
+
     private void compileUsersQueries(String queries, Path generatedDirectory) throws IOException {
         Path schemaFile = tempDir.resolve("schema.sql");
         Path queriesFile = tempDir.resolve("queries.sql");

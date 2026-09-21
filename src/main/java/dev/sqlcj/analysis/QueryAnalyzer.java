@@ -110,25 +110,45 @@ public final class QueryAnalyzer {
     }
 
     private QueryModel analyzeInsert(Query query, ParsedSql parsedSql, Insert insert, Schema schema) {
-        requireExecWrite(query, insert.getReturningClause());
+        ReturningClause returningClause = insert.getReturningClause();
+
+        requireWriteQueryType(query, returningClause);
 
         Table table = insert.getTable();
-        dev.sqlcj.schema.Table schemaTable = findTable(schema, table.getUnquotedName());
+        Source source = toSource(table, schema);
+
+        List<QueryColumn> columns = List.of();
+
+        if (returningClause != null) {
+            requireSupportedReturningInsert(insert);
+
+            columns = resolveReturningColumns(returningClause, source);
+        }
 
         return toQueryModel(
             query,
             parsedSql,
             table.getUnquotedName(),
-            List.of(),
-            resolveInsertParameters(insert, schemaTable)
+            columns,
+            resolveInsertParameters(insert, source.table())
         );
     }
 
     private QueryModel analyzeUpdate(Query query, ParsedSql parsedSql, Update update, Schema schema) {
-        requireExecWrite(query, update.getReturningClause());
+        ReturningClause returningClause = update.getReturningClause();
+
+        requireWriteQueryType(query, returningClause);
 
         Table table = update.getTable();
         Source source = toSource(table, schema);
+
+        List<QueryColumn> columns = List.of();
+
+        if (returningClause != null) {
+            requireSupportedReturningUpdate(update);
+
+            columns = resolveReturningColumns(returningClause, source);
+        }
 
         List<QueryParameter> bindingParameters = resolveUpdateSetParameters(update, source.table());
 
@@ -140,16 +160,26 @@ public final class QueryAnalyzer {
             query,
             parsedSql,
             table.getUnquotedName(),
-            List.of(),
+            columns,
             bindingParameters
         );
     }
 
     private QueryModel analyzeDelete(Query query, ParsedSql parsedSql, Delete delete, Schema schema) {
-        requireExecWrite(query, delete.getReturningClause());
+        ReturningClause returningClause = delete.getReturningClause();
+
+        requireWriteQueryType(query, returningClause);
 
         Table table = delete.getTable();
         Source source = toSource(table, schema);
+
+        List<QueryColumn> columns = List.of();
+
+        if (returningClause != null) {
+            requireSupportedReturningDelete(delete);
+
+            columns = resolveReturningColumns(returningClause, source);
+        }
 
         List<QueryParameter> bindingParameters = new ArrayList<>();
 
@@ -161,7 +191,7 @@ public final class QueryAnalyzer {
             query,
             parsedSql,
             table.getUnquotedName(),
-            List.of(),
+            columns,
             bindingParameters
         );
     }
@@ -174,16 +204,150 @@ public final class QueryAnalyzer {
         }
     }
 
-    private void requireExecWrite(Query query, ReturningClause returningClause) {
-        if (query.type() != QueryType.EXEC) {
+    /**
+     * Requires the annotation that matches the write shape: a write without
+     * {@code RETURNING} reports an affected-row count, and a returning write
+     * produces rows like a read.
+     */
+    private void requireWriteQueryType(Query query, ReturningClause returningClause) {
+        if (returningClause == null) {
+            if (query.type() != QueryType.EXEC) {
+                throw new UnsupportedOperationException(
+                    "Write queries without RETURNING must be declared as :exec"
+                );
+            }
+
+            return;
+        }
+
+        if (query.type() != QueryType.ONE && query.type() != QueryType.MANY) {
             throw new UnsupportedOperationException(
-                "Write queries must be declared as :exec"
+                "Write queries with RETURNING must be declared as :one or :many"
+            );
+        }
+    }
+
+    /**
+     * Resolves the returned columns in declared order against the single write
+     * target, expanding a bare {@code *} in schema column order.
+     */
+    private List<QueryColumn> resolveReturningColumns(ReturningClause returningClause, Source source) {
+        if (
+            returningClause.getKeyword() != ReturningClause.Keyword.RETURNING
+                || returningClause.getDataItems() != null
+        ) {
+            throw new UnsupportedOperationException(
+                "Only a RETURNING clause without data items is supported."
             );
         }
 
-        if (returningClause != null) {
+        List<QueryColumn> columns = new ArrayList<>();
+
+        for (SelectItem<?> returningItem : returningClause) {
+            if (returningItem.getAlias() != null) {
+                throw new UnsupportedOperationException(
+                    "RETURNING items must not be aliased."
+                );
+            }
+
+            columns.addAll(
+                resolveReturningItem(returningItem.getExpression(), source)
+            );
+        }
+
+        return List.copyOf(columns);
+    }
+
+    /**
+     * Resolves one returned item, which is either a bare {@code *} or a direct
+     * column of the write target. A computed item has no schema type to
+     * generate, so it is rejected instead of analyzed.
+     */
+    private List<QueryColumn> resolveReturningItem(Expression expression, Source source) {
+        if (expression instanceof AllTableColumns) {
             throw new UnsupportedOperationException(
-                "RETURNING is not supported"
+                "Only an unqualified RETURNING * is supported."
+            );
+        }
+
+        if (expression instanceof AllColumns allColumns) {
+            if (allColumns.getExceptColumns() != null || allColumns.getReplaceExpressions() != null) {
+                throw new UnsupportedOperationException(
+                    "RETURNING * must not be modified."
+                );
+            }
+
+            return resolveAllColumns(source);
+        }
+
+        if (expression instanceof net.sf.jsqlparser.schema.Column column) {
+            dev.sqlcj.schema.Column schemaColumn = resolveColumn(column, List.of(source)).column();
+
+            return List.of(
+                new QueryColumn(
+                    schemaColumn.name(),
+                    schemaColumn.type(),
+                    schemaColumn.nullable()
+                )
+            );
+        }
+
+        throw new UnsupportedOperationException(
+            "Unsupported RETURNING expression: "
+                + expression.getClass().getSimpleName()
+        );
+    }
+
+    /**
+     * Rejects the {@code INSERT} forms whose returned rows this subset does not
+     * model, so a returning insert never silently analyzes a wider statement.
+     */
+    private void requireSupportedReturningInsert(Insert insert) {
+        if (!(insert.getSelect() instanceof Values)) {
+            throw new UnsupportedOperationException(
+                "RETURNING requires an INSERT with a single VALUES row."
+            );
+        }
+
+        if (insert.getConflictTarget() != null || insert.getConflictAction() != null) {
+            throw new UnsupportedOperationException(
+                "INSERT ... ON CONFLICT is not supported."
+            );
+        }
+
+        requireNoCommonTableExpressions(insert.getWithItemsList());
+    }
+
+    private void requireSupportedReturningUpdate(Update update) {
+        if (
+            update.getFromItem() != null
+                || update.getJoins() != null
+                || update.getStartJoins() != null
+        ) {
+            throw new UnsupportedOperationException(
+                "UPDATE ... FROM and joined updates are not supported."
+            );
+        }
+
+        requireNoCommonTableExpressions(update.getWithItemsList());
+    }
+
+    private void requireSupportedReturningDelete(Delete delete) {
+        boolean using = delete.getUsingList() != null && !delete.getUsingList().isEmpty();
+
+        if (using || delete.getJoins() != null) {
+            throw new UnsupportedOperationException(
+                "DELETE ... USING and joined deletes are not supported."
+            );
+        }
+
+        requireNoCommonTableExpressions(delete.getWithItemsList());
+    }
+
+    private void requireNoCommonTableExpressions(List<?> withItems) {
+        if (withItems != null && !withItems.isEmpty()) {
+            throw new UnsupportedOperationException(
+                "Common table expressions are not supported in a returning write."
             );
         }
     }
