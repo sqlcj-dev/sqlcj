@@ -9,7 +9,9 @@ use.
 
 Configuration version `"1"` means PostgreSQL schema and query input and
 blocking JDBC execution. There is no engine option and no dialect option in
-`sqlcj.yaml`; the full file format is documented separately.
+`sqlcj.yaml`; the full file format is documented in
+[Configuration](configuration.md), and the accepted query shapes in
+[Queries](queries.md).
 
 The application owns the database connection: sqlcj's runtime
 `dev.sqlcj.runtime.JdbcQueryExecutor` executes each generated query as a JDBC
@@ -32,7 +34,8 @@ The caller-owned connection path is how several generated operations take part
 in one application-controlled transaction: the application disables auto-commit,
 runs generated reads and writes through one executor, and then calls `commit` or
 `rollback` itself. sqlcj provides no transaction callback or template API, no
-savepoints, and no isolation configuration.
+savepoints, and no isolation configuration. The [Quickstart](quickstart.md)
+runs that pattern end to end.
 
 In both paths the `PreparedStatement` and any `ResultSet` opened for an
 operation are closed before that operation returns, on success and on failure.
@@ -180,10 +183,12 @@ accepted:
 ### Failure Behavior
 
 An unsupported type or an unsupported statement stops compilation. `sqlcj
-generate` prints a single message on standard error, exits with a non-zero
-status, and writes no generated file for that run, because every configured
-source is compiled before any file is written. Output written by an earlier
-successful run is left unchanged.
+generate` prints a single message on standard error and exits with a non-zero
+status. Because every configured source is analyzed and generated before the
+run writes its first file, such a failure writes no generated file, and output
+written by an earlier successful run is left unchanged. The writing step itself
+is sequential rather than atomic; see
+[Generated Output and Failures](configuration.md#generated-output-and-failures).
 
 The message names the schema source and the offending type or statement:
 
