@@ -14,9 +14,23 @@ concurrency:
 
 jobs:
   test:
-    name: Maven test
+    name: Maven test and release verification
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: quickstart
+          POSTGRES_USER: quickstart
+          POSTGRES_PASSWORD: quickstart
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready --username quickstart --dbname quickstart"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -32,4 +46,11 @@ jobs:
           cache-dependency-path: pom.xml
 
       - name: Run tests
-        run: mvn --batch-mode --no-transfer-progress test
+        run: mvn --batch-mode --no-transfer-progress -Dsqlcj.test.requireDocker=true test
+
+      - name: Verify staged artifacts with the external Maven sample
+        env:
+          SQLCJ_SAMPLE_JDBC_URL: jdbc:postgresql://localhost:${{ job.services.postgres.ports['5432'] }}/quickstart
+          SQLCJ_SAMPLE_DB_USER: quickstart
+          SQLCJ_SAMPLE_DB_PASSWORD: quickstart
+        run: scripts/verify-release.sh

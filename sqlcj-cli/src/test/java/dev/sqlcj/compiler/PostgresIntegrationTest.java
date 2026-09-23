@@ -52,10 +52,20 @@ import static org.junit.jupiter.api.Assertions.assertNull;
  * generated Java is compiled, and the generated classes are executed through
  * the JDBC runtime.
  *
- * <p>The whole class is skipped when Docker is unavailable.
+ * <p>The whole class is skipped when Docker is unavailable, so that
+ * {@code mvn test} stays runnable without Docker. Setting
+ * {@code -Dsqlcj.test.requireDocker=true}, as continuous integration does,
+ * turns an unavailable Docker into a failure instead of a skip.
  */
 @EnabledIf("dockerAvailable")
 class PostgresIntegrationTest {
+
+    /**
+     * System property that forbids skipping these tests. Continuous
+     * integration sets it so that a broken Docker environment fails the build
+     * instead of silently reducing coverage.
+     */
+    private static final String REQUIRE_DOCKER_PROPERTY = "sqlcj.test.requireDocker";
 
     private static final String SCHEMA = """
         CREATE TABLE users
@@ -146,7 +156,15 @@ class PostgresIntegrationTest {
     Path tempDir;
 
     static boolean dockerAvailable() {
-        return DockerClientFactory.instance().isDockerAvailable();
+        boolean available = DockerClientFactory.instance().isDockerAvailable();
+
+        if (!available && Boolean.getBoolean(REQUIRE_DOCKER_PROPERTY)) {
+            throw new IllegalStateException(
+                "Docker is unavailable, but " + REQUIRE_DOCKER_PROPERTY + " requires these tests to run."
+            );
+        }
+
+        return available;
     }
 
     @BeforeAll
