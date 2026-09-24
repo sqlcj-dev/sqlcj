@@ -347,7 +347,8 @@ class JavaNamesTest {
                 .map(QueryParameter::index)
                 .toList(),
             columns,
-            parameters
+            parameters,
+            null
         );
     }
 }

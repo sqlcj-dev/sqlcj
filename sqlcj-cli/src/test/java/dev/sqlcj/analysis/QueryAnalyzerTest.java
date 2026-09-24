@@ -16,6 +16,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -1239,6 +1240,102 @@ class QueryAnalyzerTest {
             ),
             model.columns()
         );
+    }
+
+    /**
+     * A query whose result is one complete table row carries the schema's own
+     * spelling of that table, so every such query shares one row identity
+     * regardless of the alias or spelling it used.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "SELECT * FROM users",
+            "SELECT * FROM Users",
+            "SELECT u.* FROM users u",
+            "SELECT u.* FROM USERS u"
+        }
+    )
+    void shouldResolveRowTableForFullRowSelect(String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals("users", model.rowTable());
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "INSERT INTO users (id) VALUES ($1) RETURNING *",
+            "UPDATE Users SET name = $2 WHERE id = $1 RETURNING *",
+            "DELETE FROM users WHERE id = $1 RETURNING *"
+        }
+    )
+    void shouldResolveRowTableForReturningAllColumns(String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("WriteUser", QueryType.ONE, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals("users", model.rowTable());
+    }
+
+    /**
+     * Every other result shape stays specific to its query, including an
+     * explicit list of every column and a wildcard combined with another item.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "SELECT id, name, active FROM users",
+            "SELECT *, id FROM users",
+            "SELECT id, * FROM users",
+            "INSERT INTO users (id) VALUES ($1) RETURNING id, name, active",
+            "DELETE FROM users WHERE id = $1 RETURNING id"
+        }
+    )
+    void shouldNotResolveRowTableForQuerySpecificResult(String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("ReadUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertNull(model.rowTable());
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "SELECT * FROM users u JOIN profiles p ON p.user_id = u.id",
+            "SELECT u.* FROM users u JOIN profiles p ON p.user_id = u.id"
+        }
+    )
+    void shouldNotResolveRowTableForJoinedWildcard(String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("ListUserProfiles", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertNull(model.rowTable());
+    }
+
+    @Test
+    void shouldNotResolveRowTableForExecWrite() {
+        String sql = "DELETE FROM users WHERE id = $1";
+
+        QueryModel model = analyzer.analyze(
+            new Query("DeleteUser", QueryType.EXEC, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertNull(model.rowTable());
     }
 
     @Test

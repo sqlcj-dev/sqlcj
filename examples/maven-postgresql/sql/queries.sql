@@ -1,15 +1,15 @@
 -- name: CreateAuthor :one
 INSERT INTO authors (name, bio)
 VALUES ($1, $2)
-RETURNING id, name, bio;
+RETURNING *;
 
 -- name: GetAuthor :one
-SELECT id, name, bio
+SELECT *
 FROM authors
 WHERE id = $1;
 
 -- name: ListAuthors :many
-SELECT id, name
+SELECT *
 FROM authors
 ORDER BY id;
 

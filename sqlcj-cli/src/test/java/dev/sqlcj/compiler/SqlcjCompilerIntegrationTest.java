@@ -151,13 +151,27 @@ class SqlcjCompilerIntegrationTest {
                 .count()
         );
 
-        assertTrue(repository.contains("public GetUserResult getUser(LocalDateTime createdAt)"));
+        assertTrue(repository.contains("public UsersRow getUser(LocalDateTime createdAt)"));
+        assertFalse(repository.contains("GetUserResult"));
         assertTrue(repository.contains("Long id"));
         assertTrue(repository.contains("String name"));
         assertTrue(repository.contains("LocalDate birthDate"));
         assertTrue(repository.contains("LocalDateTime createdAt"));
         assertTrue(repository.contains("BigDecimal balance"));
-        assertTrue(repository.contains("private static final RowMapper<GetUserResult> getUserRowMapper"));
+
+        assertEquals(
+            List.of(
+                "Long id",
+                "String name",
+                "Boolean active",
+                "LocalDate birthDate",
+                "LocalDateTime createdAt",
+                "BigDecimal balance"
+            ),
+            recordComponents(repository, "UsersRow")
+        );
+
+        assertTrue(repository.contains("private static final RowMapper<UsersRow> usersRowMapper"));
         assertTrue(repository.contains("resultSet.getObject(1, Long.class)"));
         assertTrue(repository.contains("resultSet.getObject(2, String.class)"));
         assertTrue(repository.contains("resultSet.getObject(3, Boolean.class)"));
@@ -186,7 +200,7 @@ class SqlcjCompilerIntegrationTest {
         assertTrue(repository.contains("private static final RowMapper<FindUsersResult> findUsersRowMapper"));
 
         assertTrue(
-            repository.indexOf("public GetUserResult getUser(") < repository
+            repository.indexOf("public UsersRow getUser(") < repository
                 .indexOf("public List<ListUsersResult> listUsers(")
         );
 
@@ -1738,11 +1752,13 @@ class SqlcjCompilerIntegrationTest {
 
         String repository = Files.readString(repositoryFile);
 
-        assertTrue(repository.contains("public record InsertUserResult("));
+        assertTrue(repository.contains("public record UsersRow("));
+        assertFalse(repository.contains("InsertUserResult"));
         assertTrue(repository.contains("Long id"));
         assertTrue(repository.contains("String name"));
         assertTrue(repository.contains("Boolean active"));
-        assertTrue(repository.contains("public InsertUserResult insertUser(Long id, String name)"));
+        assertTrue(repository.contains("public UsersRow insertUser(Long id, String name)"));
+        assertTrue(repository.contains("private static final RowMapper<UsersRow> usersRowMapper"));
         assertTrue(repository.contains("return executor.query("));
         assertTrue(repository.contains("VALUES (?, ?)"));
         assertTrue(repository.contains("RETURNING *"));

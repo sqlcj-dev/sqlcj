@@ -45,6 +45,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Executes the compiler pipeline end to end against a real PostgreSQL
@@ -688,6 +689,63 @@ class PostgresIntegrationTest {
             assertNull(component(result, "score"));
 
             assertNull(method.invoke(repository, 404L, "Missing", 42));
+        }
+    }
+
+    /**
+     * Covers the shared row record: a {@code RETURNING *} write, a
+     * {@code SELECT *} read, and a qualified {@code :many} full-row read of one
+     * table all execute into instances of the repository's single row type.
+     */
+    @Test
+    void shouldExecuteGeneratedFullRowQueriesIntoOneSharedRowTypeAgainstPostgres() throws Exception {
+        Path classesDirectory = generateAndCompile("""
+            -- name: InsertUserRow :one
+            INSERT INTO users (id, code, name)
+            VALUES ($1, $2, $3)
+            RETURNING *;
+
+            -- name: GetUserRow :one
+            SELECT *
+            FROM users
+            WHERE id = $1;
+
+            -- name: ListUserRows :many
+            SELECT u.*
+            FROM users u
+            ORDER BY u.id;
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Object inserted = repository
+                .getClass()
+                .getMethod("insertUserRow", Long.class, Integer.class, String.class)
+                .invoke(repository, 1L, 42, "Alice");
+
+            Object read = repository
+                .getClass()
+                .getMethod("getUserRow", Long.class)
+                .invoke(repository, 1L);
+
+            List<?> listed = assertInstanceOf(
+                List.class,
+                repository.getClass().getMethod("listUserRows").invoke(repository)
+            );
+
+            assertNotNull(inserted);
+            assertNotNull(read);
+            assertEquals(1, listed.size());
+
+            Class<?> rowType = inserted.getClass();
+
+            assertTrue(rowType.getSimpleName().endsWith("Row"), rowType.getSimpleName());
+            assertEquals(rowType, read.getClass());
+            assertEquals(rowType, listed.getFirst().getClass());
+
+            assertEquals("Alice", component(read, "name"));
+            assertEquals(42, component(listed.getFirst(), "code"));
         }
     }
 

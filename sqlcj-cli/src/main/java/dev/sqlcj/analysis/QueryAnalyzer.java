@@ -106,7 +106,8 @@ public final class QueryAnalyzer {
             parsedSql,
             table.getUnquotedName(),
             columns,
-            bindingParameters
+            bindingParameters,
+            resolveSelectRowTable(plainSelect, sources)
         );
     }
 
@@ -119,11 +120,13 @@ public final class QueryAnalyzer {
         Source source = toSource(table, schema);
 
         List<QueryColumn> columns = List.of();
+        String rowTable = null;
 
         if (returningClause != null) {
             requireSupportedReturningInsert(insert);
 
             columns = resolveReturningColumns(returningClause, source);
+            rowTable = resolveReturningRowTable(returningClause, source);
         }
 
         return toQueryModel(
@@ -131,7 +134,8 @@ public final class QueryAnalyzer {
             parsedSql,
             table.getUnquotedName(),
             columns,
-            resolveInsertParameters(insert, source.table())
+            resolveInsertParameters(insert, source.table()),
+            rowTable
         );
     }
 
@@ -144,11 +148,13 @@ public final class QueryAnalyzer {
         Source source = toSource(table, schema);
 
         List<QueryColumn> columns = List.of();
+        String rowTable = null;
 
         if (returningClause != null) {
             requireSupportedReturningUpdate(update);
 
             columns = resolveReturningColumns(returningClause, source);
+            rowTable = resolveReturningRowTable(returningClause, source);
         }
 
         List<QueryParameter> bindingParameters = resolveUpdateSetParameters(update, source.table());
@@ -162,7 +168,8 @@ public final class QueryAnalyzer {
             parsedSql,
             table.getUnquotedName(),
             columns,
-            bindingParameters
+            bindingParameters,
+            rowTable
         );
     }
 
@@ -175,11 +182,13 @@ public final class QueryAnalyzer {
         Source source = toSource(table, schema);
 
         List<QueryColumn> columns = List.of();
+        String rowTable = null;
 
         if (returningClause != null) {
             requireSupportedReturningDelete(delete);
 
             columns = resolveReturningColumns(returningClause, source);
+            rowTable = resolveReturningRowTable(returningClause, source);
         }
 
         List<QueryParameter> bindingParameters = new ArrayList<>();
@@ -193,7 +202,8 @@ public final class QueryAnalyzer {
             parsedSql,
             table.getUnquotedName(),
             columns,
-            bindingParameters
+            bindingParameters,
+            rowTable
         );
     }
 
@@ -257,6 +267,23 @@ public final class QueryAnalyzer {
         }
 
         return List.copyOf(columns);
+    }
+
+    /**
+     * Reports the table whose complete row a returning write returns, which is
+     * the write target when the clause is exactly a bare {@code *}, and
+     * {@code null} for a returned column list. The name is the schema's own
+     * spelling of the table, so every query returning that row shares one row
+     * identity.
+     */
+    private String resolveReturningRowTable(ReturningClause returningClause, Source source) {
+        if (returningClause.size() != 1) {
+            return null;
+        }
+
+        return returningClause.getFirst().getExpression() instanceof AllColumns
+            ? source.table().name()
+            : null;
     }
 
     /**
@@ -443,7 +470,8 @@ public final class QueryAnalyzer {
         ParsedSql parsedSql,
         String tableName,
         List<QueryColumn> columns,
-        List<QueryParameter> occurrences
+        List<QueryParameter> occurrences,
+        String rowTable
     ) {
         List<Integer> bindingParameterIndexes = requireAccountedOccurrences(parsedSql, occurrences);
 
@@ -454,7 +482,8 @@ public final class QueryAnalyzer {
             parsedSql.parameters().executableSql(),
             bindingParameterIndexes,
             columns,
-            toParameters(occurrences)
+            toParameters(occurrences),
+            rowTable
         );
     }
 
@@ -963,6 +992,25 @@ public final class QueryAnalyzer {
         }
 
         return columns;
+    }
+
+    /**
+     * Reports the table whose complete row a read returns, which is the single
+     * query source when the projection is exactly {@code *} or
+     * {@code qualifier.*}, and {@code null} for every other projection. The
+     * name is the schema's own spelling of the table, so a query-side alias or
+     * spelling never splits one row identity.
+     */
+    private String resolveSelectRowTable(PlainSelect plainSelect, List<Source> sources) {
+        List<SelectItem<?>> selectItems = plainSelect.getSelectItems();
+
+        if (sources.size() != 1 || selectItems.size() != 1) {
+            return null;
+        }
+
+        return selectItems.getFirst().getExpression() instanceof AllColumns
+            ? sources.getFirst().table().name()
+            : null;
     }
 
     /**

@@ -21,6 +21,10 @@ import java.util.Objects;
  * context: once from the {@code DataSource}-backed executor, and once more per
  * transaction from a caller-owned connection.
  *
+ * <p>Create, read, and list each return one complete {@code authors} row, so
+ * all three share the repository's single
+ * {@link AuthorRepository.AuthorsRow} record.
+ *
  * <p>Every step is checked, so the process exits non-zero as soon as one
  * generated operation returns an unexpected result.
  *
@@ -39,7 +43,7 @@ public final class App {
 
         AuthorRepository authors = new AuthorRepository(executor);
 
-        AuthorRepository.CreateAuthorResult created = authors.createAuthor("Ada Lovelace", "First programmer");
+        AuthorRepository.AuthorsRow created = authors.createAuthor("Ada Lovelace", "First programmer");
 
         check(created != null, "CreateAuthor returned no row");
         check(created.id() != null, "CreateAuthor returned no database-generated id");
@@ -48,7 +52,7 @@ public final class App {
 
         System.out.println("created: " + created.id() + " " + created.name());
 
-        AuthorRepository.GetAuthorResult read = authors.getAuthor(created.id());
+        AuthorRepository.AuthorsRow read = authors.getAuthor(created.id());
 
         check(read != null, "GetAuthor returned no row for the created author");
         checkEquals(created.id(), read.id(), "GetAuthor id");
@@ -57,7 +61,7 @@ public final class App {
 
         System.out.println("read: " + read.name() + " / " + read.bio());
 
-        List<AuthorRepository.ListAuthorsResult> listed = authors.listAuthors();
+        List<AuthorRepository.AuthorsRow> listed = authors.listAuthors();
 
         checkEquals(1, listed.size(), "ListAuthors row count after create");
         checkEquals(created.id(), listed.get(0).id(), "ListAuthors id");
@@ -78,7 +82,7 @@ public final class App {
 
         Long committedId = writeAndCommit(dataSource);
 
-        AuthorRepository.GetAuthorResult committed = authors.getAuthor(committedId);
+        AuthorRepository.AuthorsRow committed = authors.getAuthor(committedId);
 
         check(committed != null, "the committed author is not readable after commit");
         checkEquals("Grace Hopper", committed.name(), "committed name");
@@ -99,7 +103,7 @@ public final class App {
 
         System.out.println("deleted rows: " + deletedRows);
 
-        List<AuthorRepository.ListAuthorsResult> remaining = authors.listAuthors();
+        List<AuthorRepository.AuthorsRow> remaining = authors.listAuthors();
 
         checkEquals(1, remaining.size(), "ListAuthors row count after delete");
         checkEquals(committedId, remaining.get(0).id(), "remaining author id");
@@ -117,7 +121,7 @@ public final class App {
 
             AuthorRepository transactionalAuthors = new AuthorRepository(new JdbcQueryExecutor(connection));
 
-            AuthorRepository.CreateAuthorResult author = transactionalAuthors.createAuthor("Grace Hopper", null);
+            AuthorRepository.AuthorsRow author = transactionalAuthors.createAuthor("Grace Hopper", null);
 
             check(author != null, "CreateAuthor returned no row inside the committed transaction");
             checkEquals(null, author.bio(), "committed bio before update");
@@ -142,7 +146,7 @@ public final class App {
 
             AuthorRepository transactionalAuthors = new AuthorRepository(new JdbcQueryExecutor(connection));
 
-            AuthorRepository.CreateAuthorResult author = transactionalAuthors.createAuthor("Temporary Author", null);
+            AuthorRepository.AuthorsRow author = transactionalAuthors.createAuthor("Temporary Author", null);
 
             check(author != null, "CreateAuthor returned no row inside the rolled back transaction");
 
