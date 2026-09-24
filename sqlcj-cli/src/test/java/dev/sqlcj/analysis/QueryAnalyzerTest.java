@@ -36,6 +36,21 @@ class QueryAnalyzerTest {
         )
     );
 
+    /** A schema with both text column types, for the text predicate forms. */
+    private static final Schema predicateSchema = new Schema(
+        List.of(
+            new Table(
+                "users",
+                List.of(
+                    new Column("id", ColumnType.BIGINT, false),
+                    new Column("name", ColumnType.VARCHAR, true),
+                    new Column("bio", ColumnType.TEXT, true)
+                ),
+                List.of()
+            )
+        )
+    );
+
     private static final Schema joinSchema = new Schema(
         List.of(
             new Table(
@@ -764,6 +779,165 @@ class QueryAnalyzerTest {
         assertEquals(1, parameter.index());
         assertEquals("id", parameter.name());
         assertEquals(ColumnType.BIGINT, parameter.type());
+    }
+
+    @Test
+    void shouldResolveLikePatternParameterInTextualBindingOrder() {
+        String sql = "SELECT id FROM users WHERE name ILIKE $2 AND id > $1";
+
+        QueryModel model = analyzer.analyze(
+            new Query("SearchUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(2, 1), model.bindingParameterIndexes());
+
+        assertEquals(
+            "SELECT id FROM users WHERE name ILIKE ? AND id > ?",
+            model.executableSql()
+        );
+    }
+
+    @Test
+    void shouldResolveLikePatternParameterFromTextColumn() {
+        String sql = "SELECT id FROM users WHERE bio LIKE $1";
+
+        QueryModel model = analyzer.analyze(
+            new Query("SearchUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            predicateSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "bio", ColumnType.TEXT)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+    }
+
+    @Test
+    void shouldNotCreateParameterForLiteralLikePattern() {
+        String sql = "SELECT id FROM users WHERE name LIKE 'A%' AND id = $1";
+
+        QueryModel model = analyzer.analyze(
+            new Query("SearchUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            model.parameters()
+        );
+
+        assertEquals(
+            "SELECT id FROM users WHERE name LIKE 'A%' AND id = ?",
+            model.executableSql()
+        );
+    }
+
+    @Test
+    void shouldResolveNullPredicateColumnsWithoutParameters() {
+        String sql = """
+            SELECT u.id
+            FROM users u
+            WHERE u.bio IS NOT NULL
+              AND bio IS NULL
+              AND u.id = $1
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("FindUser", QueryType.OPTIONAL, sql),
+            parser.parse(sql),
+            predicateSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+    }
+
+    @Test
+    void shouldRejectUnknownColumnInNullPredicate() {
+        String sql = "SELECT id FROM users WHERE missing IS NULL";
+
+        Query query = new Query("ListUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(
+            "Column not found in sources users: missing",
+            exception.getMessage()
+        );
+    }
+
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "SELECT id FROM users WHERE name NOT LIKE $1"
+                + "|A negated LIKE pattern placeholder is not supported.",
+            "SELECT id FROM users WHERE name NOT ILIKE $1"
+                + "|A negated LIKE pattern placeholder is not supported.",
+            "SELECT id FROM users WHERE name SIMILAR TO $1"
+                + "|Only LIKE and ILIKE pattern placeholders are supported, but was: SIMILAR_TO",
+            "SELECT id FROM users WHERE name LIKE $1 ESCAPE '!'"
+                + "|A LIKE pattern placeholder must not have an ESCAPE clause.",
+            "SELECT id FROM users WHERE name LIKE BINARY $1"
+                + "|A binary LIKE pattern placeholder is not supported.",
+            "SELECT id FROM users WHERE id LIKE $1"
+                + "|A LIKE pattern placeholder requires a VARCHAR or TEXT column, but id is BIGINT.",
+            "SELECT id FROM users WHERE $1 LIKE name"
+                + "|A LIKE placeholder must be the pattern, not the tested value.",
+            "SELECT id FROM users WHERE name LIKE :pattern"
+                + "|Named parameter ':pattern' is not supported; use an indexed placeholder such as $1"
+        }
+    )
+    void shouldRejectUnsupportedLikePlaceholderForm(String sql, String message) {
+        Query query = new Query("SearchUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(message, exception.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "SELECT id FROM users WHERE name LIKE '%' || $1 || '%'",
+            "SELECT id FROM users WHERE $1 IS NULL"
+        }
+    )
+    void shouldRejectPlaceholderThatIsNotAnAnalyzedPredicateOperand(String sql) {
+        Query query = new Query("SearchUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
     }
 
     @Test

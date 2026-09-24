@@ -113,7 +113,23 @@ A `WHERE` clause may combine:
 - the comparisons `=`, `<>`, `>`, `>=`, `<`, `<=` between a direct column and a
   `$N` placeholder, in either order,
 - `AND`, `OR`, and parentheses,
-- `IN` with a fixed list of `$N` placeholders, such as `id IN ($1, $2)`.
+- `IN` with a fixed list of `$N` placeholders, such as `id IN ($1, $2)`,
+- `LIKE` and `ILIKE` between a direct column and a `$N` pattern placeholder,
+  such as `name LIKE $1`,
+- `IS NULL` and `IS NOT NULL` on a direct column, such as `bio IS NULL`.
+
+A `LIKE` or `ILIKE` pattern placeholder requires a `VARCHAR` or `TEXT` column
+and takes that column's type, so it is a `String` method parameter. sqlcj passes
+the pattern through unchanged, so the caller supplies the `%` and `_` wildcards
+in the argument, as in `"Al%"`. A negated `NOT LIKE` or `NOT ILIKE`, another
+keyword such as `SIMILAR TO`, an `ESCAPE` clause, a `BINARY` modifier, a
+non-text tested column, and a placeholder as the tested value are rejected. A
+placeholder inside a computed pattern, such as `'%' || $1 || '%'`, is rejected
+as an unanalyzed placeholder location.
+
+`IS NULL` and `IS NOT NULL` bind no placeholder, but their column is resolved
+against the query sources, so an unknown, ambiguous, or badly qualified column
+is rejected.
 
 A comparison that binds no placeholder, such as `active = TRUE`, contributes no
 generated parameter and reaches the database as written.
@@ -384,9 +400,13 @@ name, and its header line.
 - A `FROM` item that is not a table, a comma-separated source list, a join that
   is not a plain inner join, a join predicate that is not one qualified
   equality, and a set operation such as `UNION`.
-- A placeholder in a location sqlcj does not analyze, including `LIKE $1`,
-  `BETWEEN $1 AND $2`, and `LIMIT $1`, so parameterized pagination and dynamic
-  `IN` expansion are unavailable.
+- A placeholder in a location sqlcj does not analyze, including
+  `BETWEEN $1 AND $2`, `LIMIT $1`, and a computed `LIKE` pattern such as
+  `'%' || $1 || '%'`, so parameterized pagination and dynamic `IN` expansion are
+  unavailable.
+- A `LIKE`-family pattern placeholder that is negated, uses another keyword such
+  as `SIMILAR TO`, carries an `ESCAPE` clause or a `BINARY` modifier, tests a
+  non-text column, or stands as the tested value.
 - Anonymous `?` and named `:name` placeholders, and non-contiguous or
   non-positive placeholder indexes.
 - An `INSERT` without an explicit column list, with more than one `VALUES` row,
@@ -405,8 +425,9 @@ the generated Java describes only the part sqlcj did analyze. Do not rely on
 them:
 
 - `DISTINCT`, `GROUP BY`, and `HAVING`,
-- predicate forms other than the listed comparisons, `AND`/`OR`, and fixed `IN`
-  lists, such as `IS NULL`, `LIKE` with a literal, or `IN` with a subquery,
+- predicate forms other than the listed comparisons, `AND`/`OR`, fixed `IN`
+  lists, pattern placeholders, and null tests, such as `LIKE` with a literal
+  pattern or `IN` with a subquery,
 - common table expressions, and subqueries outside the `FROM` item,
 - `LIMIT` and `OFFSET` with literal values,
 - `ON CONFLICT`, `UPDATE ... FROM`, and `DELETE ... USING` on a non-returning
@@ -484,6 +505,17 @@ Reads:
 - `PostgresIntegrationTest.shouldExecuteGeneratedOneQueryAgainstPostgres` and
   `PostgresIntegrationTest.shouldExecuteGeneratedManyQueryAgainstPostgres`
   execute an ordered list read against PostgreSQL 16.
+- `QueryAnalyzerTest.shouldResolveLikePatternParameterInTextualBindingOrder`,
+  `QueryAnalyzerTest.shouldResolveLikePatternParameterFromTextColumn`,
+  `QueryAnalyzerTest.shouldNotCreateParameterForLiteralLikePattern`,
+  `QueryAnalyzerTest.shouldResolveNullPredicateColumnsWithoutParameters`,
+  `QueryAnalyzerTest.shouldRejectUnknownColumnInNullPredicate`,
+  `QueryAnalyzerTest.shouldRejectUnsupportedLikePlaceholderForm`, and
+  `QueryAnalyzerTest.shouldRejectPlaceholderThatIsNotAnAnalyzedPredicateOperand`
+  cover the pattern and null predicates, and
+  `PostgresIntegrationTest.shouldExecuteGeneratedTextAndNullPredicatesAgainstPostgres`
+  executes `LIKE`, a case-insensitive `ILIKE`, `IS NULL`, and `IS NOT NULL`
+  reads against PostgreSQL 16.
 - `QueryAnalyzerTest.shouldResolveRowTableForFullRowSelect`,
   `QueryAnalyzerTest.shouldNotResolveRowTableForQuerySpecificResult`,
   `QueryAnalyzerTest.shouldNotResolveRowTableForJoinedWildcard`, and
