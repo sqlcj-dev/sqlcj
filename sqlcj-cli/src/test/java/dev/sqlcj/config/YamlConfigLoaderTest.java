@@ -2,6 +2,8 @@ package dev.sqlcj.config;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -24,7 +26,8 @@ class YamlConfigLoaderTest {
         Path configFile = write("""
             version: "1"
             sql:
-              - schema: schema.sql
+              - name: Users
+                schema: schema.sql
                 queries: queries.sql
             java:
               package: dev.example.generated
@@ -35,6 +38,7 @@ class YamlConfigLoaderTest {
 
         assertEquals("1", config.version());
         assertEquals(1, config.sql().size());
+        assertEquals("Users", config.sql().getFirst().name());
         assertEquals(
             tempDir.resolve("schema.sql").toString(),
             config.sql().getFirst().schema()
@@ -58,9 +62,11 @@ class YamlConfigLoaderTest {
         Path configFile = write("""
             version: "1"
             sql:
-              - schema: users.sql
+              - name: Users
+                schema: users.sql
                 queries: user-queries.sql
-              - schema: orders.sql
+              - name: Orders
+                schema: orders.sql
                 queries: order-queries.sql
             java:
               package: dev.example.generated
@@ -97,7 +103,8 @@ class YamlConfigLoaderTest {
         Files.writeString(configFile, """
             version: "1"
             sql:
-              - schema: ../sql/schema.sql
+              - name: Users
+                schema: ../sql/schema.sql
                 queries: ./queries.sql
             java:
               package: dev.example.generated
@@ -134,7 +141,8 @@ class YamlConfigLoaderTest {
             """
                 version: "1"
                 sql:
-                  - schema: %s
+                  - name: Users
+                    schema: %s
                     queries: %s
                 java:
                   package: dev.example.generated
@@ -203,7 +211,8 @@ class YamlConfigLoaderTest {
         Path configFile = write("""
             version: "1"
             sql:
-              - schema: schema.sql
+              - name: Users
+                schema: schema.sql
                 queries: queries.sql
             java:
               package: dev.example.generated
@@ -235,7 +244,8 @@ class YamlConfigLoaderTest {
         Path configFile = write("""
             version: "1"
             sql:
-              - schema: 42
+              - name: Users
+                schema: 42
                 queries: queries.sql
             java:
               package: dev.example.generated
@@ -254,7 +264,8 @@ class YamlConfigLoaderTest {
         Path configFile = write("""
             version: "1"
             sql:
-              - schema: schema.sql
+              - name: Users
+                schema: schema.sql
                 queries: queries.sql
             java:
               package: dev.example.generated
@@ -273,7 +284,8 @@ class YamlConfigLoaderTest {
         Path configFile = write("""
             version: 1
             sql:
-              - schema: schema.sql
+              - name: Users
+                schema: schema.sql
                 queries: queries.sql
             java:
               package: dev.example.generated
@@ -291,7 +303,8 @@ class YamlConfigLoaderTest {
     void shouldRejectMissingVersion() throws IOException {
         Path configFile = write("""
             sql:
-              - schema: schema.sql
+              - name: Users
+                schema: schema.sql
                 queries: queries.sql
             java:
               package: dev.example.generated
@@ -306,7 +319,8 @@ class YamlConfigLoaderTest {
         Path configFile = write("""
             version: "2"
             sql:
-              - schema: schema.sql
+              - name: Users
+                schema: schema.sql
                 queries: queries.sql
             java:
               package: dev.example.generated
@@ -349,7 +363,8 @@ class YamlConfigLoaderTest {
         Path configFile = write("""
             version: "1"
             sql:
-              - schema: schema.sql
+              - name: Users
+                schema: schema.sql
                 queries: queries.sql
               -
             java:
@@ -365,7 +380,8 @@ class YamlConfigLoaderTest {
         Path configFile = write("""
             version: "1"
             sql:
-              - schema: schema.sql
+              - name: Users
+                schema: schema.sql
                 queries: "  "
             java:
               package: dev.example.generated
@@ -376,11 +392,102 @@ class YamlConfigLoaderTest {
     }
 
     @Test
-    void shouldRejectMissingJavaSection() throws IOException {
+    void shouldRejectMissingSqlEntryName() throws IOException {
         Path configFile = write("""
             version: "1"
             sql:
               - schema: schema.sql
+                queries: queries.sql
+            java:
+              package: dev.example.generated
+              out: generated
+            """);
+
+        assertInvalid(configFile, "'sql[0].name' is required");
+    }
+
+    @Test
+    void shouldRejectBlankSqlEntryName() throws IOException {
+        Path configFile = write("""
+            version: "1"
+            sql:
+              - name: "  "
+                schema: schema.sql
+                queries: queries.sql
+            java:
+              package: dev.example.generated
+              out: generated
+            """);
+
+        assertInvalid(configFile, "'sql[0].name' must not be blank");
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "Author Repository",
+            "1Author",
+            "Author.Repository",
+            "class",
+            "true",
+            "null",
+            "_",
+            "var",
+            "record"
+        }
+    )
+    void shouldRejectSqlEntryNameThatIsNotAJavaIdentifier(String name) throws IOException {
+        Path configFile = write(
+            """
+                version: "1"
+                sql:
+                  - name: "%s"
+                    schema: schema.sql
+                    queries: queries.sql
+                java:
+                  package: dev.example.generated
+                  out: generated
+                """
+                .formatted(name)
+        );
+
+        assertInvalid(
+            configFile,
+            "'sql[0].name' value '%s' is not a valid Java identifier for a generated repository name"
+                .formatted(name)
+        );
+    }
+
+    @Test
+    void shouldPreserveSqlEntryNameWhileResolvingPaths() throws IOException {
+        Path configFile = write("""
+            version: "1"
+            sql:
+              - name: Author
+                schema: sql/schema.sql
+                queries: sql/queries.sql
+            java:
+              package: dev.example.generated
+              out: generated
+            """);
+
+        Config config = configLoader.load(configFile);
+
+        assertEquals("Author", config.sql().getFirst().name());
+
+        assertEquals(
+            tempDir.resolve("sql/schema.sql").toString(),
+            config.sql().getFirst().schema()
+        );
+    }
+
+    @Test
+    void shouldRejectMissingJavaSection() throws IOException {
+        Path configFile = write("""
+            version: "1"
+            sql:
+              - name: Users
+                schema: schema.sql
                 queries: queries.sql
             """);
 
@@ -392,7 +499,8 @@ class YamlConfigLoaderTest {
         Path configFile = write("""
             version: "1"
             sql:
-              - schema: schema.sql
+              - name: Users
+                schema: schema.sql
                 queries: queries.sql
             java:
               package: dev.example.generated
@@ -406,7 +514,8 @@ class YamlConfigLoaderTest {
         Path configFile = write("""
             version: "1"
             sql:
-              - schema: schema.sql
+              - name: Users
+                schema: schema.sql
                 queries: queries.sql
             java:
               package: dev.class.generated

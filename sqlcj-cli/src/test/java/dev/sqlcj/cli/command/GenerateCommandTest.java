@@ -45,7 +45,8 @@ class GenerateCommandTest {
             """
                 version: "1"
                 sql:
-                  - schema: schema.sql
+                  - name: Users
+                    schema: schema.sql
                     queries: queries.sql
                 java:
                   package: dev.example.generated
@@ -57,14 +58,15 @@ class GenerateCommandTest {
 
         assertEquals(0, result.exitCode(), result.error());
 
-        Path generated = workingDirectory.resolve("generated/dev/example/generated/GetUser.java");
+        Path generated = workingDirectory.resolve("generated/dev/example/generated/UsersRepository.java");
 
         assertTrue(Files.exists(generated), result.error());
 
-        assertTrue(
-            Files.readString(generated)
-                .startsWith("package dev.example.generated;")
-        );
+        String source = Files.readString(generated);
+
+        assertTrue(source.startsWith("package dev.example.generated;"));
+        assertTrue(source.contains("public final class UsersRepository {"));
+        assertTrue(source.contains("public GetUserResult getUser(Long id)"));
     }
 
     @Test
@@ -74,7 +76,8 @@ class GenerateCommandTest {
             """
                 version: "1"
                 sql:
-                  - schema: schema.sql
+                  - name: Users
+                    schema: schema.sql
                     queries: queries.sql
                 java:
                   package: dev.example.generated
@@ -98,7 +101,8 @@ class GenerateCommandTest {
             """
                 version: "1"
                 sql:
-                  - schema: schema.sql
+                  - name: Users
+                    schema: schema.sql
                     queries: missing.sql
                 java:
                   package: dev.example.generated
@@ -141,7 +145,8 @@ class GenerateCommandTest {
             """
                 version: "1"
                 sql:
-                  - schema: schema.sql
+                  - name: Users
+                    schema: schema.sql
                     queries: queries.sql
                 java:
                   package: dev.example.generated

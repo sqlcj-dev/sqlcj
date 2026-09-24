@@ -3,12 +3,38 @@ package dev.sqlcj.config;
 import javax.lang.model.SourceVersion;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Validates the structure and values of a loaded configuration against the
  * supported version {@code "1"} contract.
  */
 final class ConfigValidator {
+
+    private static final SourceVersion SOURCE_VERSION = SourceVersion.RELEASE_21;
+
+    /**
+     * Java 21 restricted identifiers. They are rejected as a group name so that
+     * the configured value can be used unchanged as a generated type-name
+     * prefix.
+     */
+    private static final Set<String> RESTRICTED_IDENTIFIERS = Set.of(
+        "exports",
+        "module",
+        "open",
+        "opens",
+        "permits",
+        "provides",
+        "record",
+        "requires",
+        "sealed",
+        "to",
+        "transitive",
+        "uses",
+        "var",
+        "with",
+        "yield"
+    );
 
     void validate(Config config, Path configFile) {
         validateVersion(config.version(), configFile);
@@ -44,9 +70,35 @@ final class ConfigValidator {
                 throw invalid(configFile, "'sql[%d]' must not be null".formatted(i));
             }
 
+            validateName(entry.name(), i, configFile);
+
             requireValue(entry.schema(), "sql[%d].schema".formatted(i), configFile);
             requireValue(entry.queries(), "sql[%d].queries".formatted(i), configFile);
         }
+    }
+
+    /**
+     * Requires a group name that can be used unchanged as the prefix of the
+     * generated repository type name.
+     */
+    private void validateName(String name, int index, Path configFile) {
+        String field = "sql[%d].name".formatted(index);
+
+        requireValue(name, field, configFile);
+
+        if (!isGroupName(name)) {
+            throw invalid(
+                configFile,
+                "'%s' value '%s' is not a valid Java identifier for a generated repository name"
+                    .formatted(field, name)
+            );
+        }
+    }
+
+    private boolean isGroupName(String name) {
+        return SourceVersion.isIdentifier(name)
+            && !SourceVersion.isKeyword(name, SOURCE_VERSION)
+            && !RESTRICTED_IDENTIFIERS.contains(name);
     }
 
     private void validateJava(JavaConfig java, Path configFile) {

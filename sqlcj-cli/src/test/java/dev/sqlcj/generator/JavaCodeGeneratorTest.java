@@ -1,6 +1,7 @@
 package dev.sqlcj.generator;
 
 import dev.sqlcj.analysis.QueryColumn;
+import dev.sqlcj.analysis.QueryGroupModel;
 import dev.sqlcj.analysis.QueryModel;
 import dev.sqlcj.analysis.QueryParameter;
 import dev.sqlcj.parser.QueryType;
@@ -26,6 +27,8 @@ class JavaCodeGeneratorTest {
 
     private static final String SQL = "SELECT 1";
 
+    private static final String GROUP = "Users";
+
     private final CodeGenerator codeGenerator = new JavaCodeGenerator();
 
     @TempDir
@@ -45,10 +48,10 @@ class JavaCodeGeneratorTest {
             List.of()
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         assertEquals(
-            Path.of("generated", "GetUser.java"),
+            Path.of("generated", "UsersRepository.java"),
             file.path()
         );
     }
@@ -65,9 +68,9 @@ class JavaCodeGeneratorTest {
             List.of()
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
-        assertTrue(file.content().contains("public final class GetUser"));
+        assertTrue(file.content().contains("public final class UsersRepository"));
     }
 
     @Test
@@ -82,14 +85,14 @@ class JavaCodeGeneratorTest {
             List.of()
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         assertTrue(file.content().contains("getUser("));
     }
 
     @Test
     void shouldGenerateSingleParameter() {
-        GeneratedFile file = codeGenerator.generate(
+        GeneratedFile file = generate(
             query(
                 "GetUser",
                 QueryType.ONE,
@@ -106,7 +109,7 @@ class JavaCodeGeneratorTest {
 
     @Test
     void shouldGenerateMultipleParameters() {
-        GeneratedFile file = codeGenerator.generate(
+        GeneratedFile file = generate(
             query(
                 "ListUsersByIdAndName",
                 QueryType.MANY,
@@ -126,7 +129,7 @@ class JavaCodeGeneratorTest {
 
     @Test
     void shouldGenerateMethodWithoutParameters() {
-        GeneratedFile file = codeGenerator.generate(
+        GeneratedFile file = generate(
             query(
                 "ListUsers",
                 QueryType.MANY,
@@ -143,7 +146,7 @@ class JavaCodeGeneratorTest {
 
     @Test
     void shouldGenerateJavaDoc() {
-        GeneratedFile file = codeGenerator.generate(
+        GeneratedFile file = generate(
             query(
                 "GetUser",
                 QueryType.ONE,
@@ -162,7 +165,7 @@ class JavaCodeGeneratorTest {
 
     @Test
     void shouldGeneratePackageDeclaration() {
-        GeneratedFile file = codeGenerator.generate(
+        GeneratedFile file = generate(
             query(
                 "GetUser",
                 QueryType.ONE,
@@ -195,10 +198,10 @@ class JavaCodeGeneratorTest {
             )
         );
 
-        GeneratedFile file = generator.generate(query);
+        GeneratedFile file = generate(generator, query);
 
         assertEquals(
-            Path.of("dev", "example", "generated", "GetUser.java"),
+            Path.of("dev", "example", "generated", "UsersRepository.java"),
             file.path()
         );
 
@@ -225,7 +228,7 @@ class JavaCodeGeneratorTest {
             List.of()
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         String source = file.content();
 
@@ -250,7 +253,7 @@ class JavaCodeGeneratorTest {
             List.of()
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         assertTrue(
             file.content().contains(
@@ -274,7 +277,7 @@ class JavaCodeGeneratorTest {
             List.of()
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         assertTrue(file.content().contains("import java.util.List;"));
 
@@ -303,7 +306,7 @@ class JavaCodeGeneratorTest {
             )
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         assertTrue(
             file.content().contains(
@@ -329,7 +332,7 @@ class JavaCodeGeneratorTest {
             )
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         assertTrue(
             file.content().contains(
@@ -352,7 +355,7 @@ class JavaCodeGeneratorTest {
             List.of()
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         String source = file.content();
 
@@ -371,7 +374,7 @@ class JavaCodeGeneratorTest {
             )
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         assertTrue(
             file.content().contains(
@@ -400,7 +403,7 @@ class JavaCodeGeneratorTest {
             List.of()
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         String source = file.content();
 
@@ -412,7 +415,7 @@ class JavaCodeGeneratorTest {
         assertTrue(source.contains("resultSet.getObject(2, Long.class)"));
         assertTrue(source.contains("resultSet.getObject(3, String.class)"));
 
-        assertEquals(0, compile(file, "ListUserProfiles.java"));
+        assertEquals(0, compile(file, "UsersRepository.java"));
     }
 
     @ParameterizedTest
@@ -435,7 +438,7 @@ class JavaCodeGeneratorTest {
         ColumnType columnType,
         String expectedJavaType
     ) {
-        GeneratedFile file = codeGenerator.generate(
+        GeneratedFile file = generate(
             query(
                 "GetUser",
                 QueryType.ONE,
@@ -466,7 +469,7 @@ class JavaCodeGeneratorTest {
             List.of()
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         assertTrue(
             file.content().contains(
@@ -493,7 +496,7 @@ class JavaCodeGeneratorTest {
             List.of()
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         assertTrue(
             file.content().contains(
@@ -520,7 +523,7 @@ class JavaCodeGeneratorTest {
             List.of()
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         assertTrue(
             file.content().contains(
@@ -563,7 +566,7 @@ class JavaCodeGeneratorTest {
             )
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         String source = file.content();
 
@@ -609,7 +612,7 @@ class JavaCodeGeneratorTest {
             )
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         assertTrue(
             file.content().contains(
@@ -642,7 +645,7 @@ class JavaCodeGeneratorTest {
             )
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         String source = file.content();
 
@@ -677,7 +680,7 @@ class JavaCodeGeneratorTest {
             List.of()
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         String source = file.content();
 
@@ -710,11 +713,11 @@ class JavaCodeGeneratorTest {
             )
         );
 
-        String source = codeGenerator.generate(query).content();
+        String source = generate(query).content();
 
         assertTrue(source.contains("return executor.query("));
         assertTrue(source.contains("java.util.Arrays.asList(id)"));
-        assertTrue(source.contains("ROW_MAPPER"));
+        assertTrue(source.contains("getUserRowMapper"));
         assertFalse(source.contains("UnsupportedOperationException"));
     }
 
@@ -757,9 +760,9 @@ class JavaCodeGeneratorTest {
             )
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
-        assertEquals(0, compile(file, "ListUsers.java"));
+        assertEquals(0, compile(file, "UsersRepository.java"));
     }
 
     /** Compiles one generated source file in an isolated temporary location. */
@@ -822,7 +825,7 @@ class JavaCodeGeneratorTest {
             List.of()
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         assertTrue(
             file.content().contains(
@@ -849,7 +852,7 @@ class JavaCodeGeneratorTest {
             List.of()
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         assertTrue(
             file.content().contains("Long id")
@@ -874,7 +877,7 @@ class JavaCodeGeneratorTest {
             List.of()
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         assertTrue(
             file.content().contains("Long id")
@@ -898,7 +901,7 @@ class JavaCodeGeneratorTest {
             )
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         assertTrue(
             file.content().contains(
@@ -925,7 +928,7 @@ class JavaCodeGeneratorTest {
             List.of()
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         String source = file.content();
 
@@ -937,7 +940,7 @@ class JavaCodeGeneratorTest {
 
         assertTrue(
             source.contains(
-                "private static final RowMapper<GetUserResult> ROW_MAPPER"
+                "private static final RowMapper<GetUserResult> getUserRowMapper"
             )
         );
 
@@ -987,7 +990,7 @@ class JavaCodeGeneratorTest {
             List.of()
         );
 
-        String source = codeGenerator.generate(query).content();
+        String source = generate(query).content();
 
         int nameIndex = source.indexOf("resultSet.getObject(1, String.class)");
 
@@ -1011,7 +1014,7 @@ class JavaCodeGeneratorTest {
             List.of()
         );
 
-        String source = codeGenerator.generate(query).content();
+        String source = generate(query).content();
 
         assertTrue(
             source.contains(
@@ -1021,7 +1024,7 @@ class JavaCodeGeneratorTest {
 
         assertTrue(
             source.contains(
-                "private static final RowMapper<ListUsersResult> ROW_MAPPER"
+                "private static final RowMapper<ListUsersResult> listUsersRowMapper"
             )
         );
 
@@ -1050,7 +1053,7 @@ class JavaCodeGeneratorTest {
             List.of()
         );
 
-        String source = codeGenerator.generate(query).content();
+        String source = generate(query).content();
 
         assertTrue(
             source.contains(
@@ -1071,7 +1074,7 @@ class JavaCodeGeneratorTest {
             List.of()
         );
 
-        String source = codeGenerator.generate(query).content();
+        String source = generate(query).content();
 
         assertTrue(
             source.contains(
@@ -1092,11 +1095,11 @@ class JavaCodeGeneratorTest {
             List.of()
         );
 
-        String source = codeGenerator.generate(query).content();
+        String source = generate(query).content();
 
         assertTrue(
             source.contains(
-                "public GetUser(QueryExecutor executor)"
+                "public UsersRepository(QueryExecutor executor)"
             )
         );
 
@@ -1140,7 +1143,7 @@ class JavaCodeGeneratorTest {
             )
         );
 
-        String source = codeGenerator.generate(query).content();
+        String source = generate(query).content();
 
         assertTrue(
             source.contains("""
@@ -1162,7 +1165,7 @@ class JavaCodeGeneratorTest {
 
         assertTrue(
             source.contains(
-                "ROW_MAPPER"
+                "getUserRowMapper"
             )
         );
 
@@ -1212,7 +1215,7 @@ class JavaCodeGeneratorTest {
             )
         );
 
-        String source = codeGenerator.generate(query).content();
+        String source = generate(query).content();
 
         assertTrue(
             source.contains("""
@@ -1228,7 +1231,7 @@ class JavaCodeGeneratorTest {
 
         assertTrue(
             source.contains(
-                "ROW_MAPPER"
+                "listUsersRowMapper"
             )
         );
 
@@ -1264,7 +1267,7 @@ class JavaCodeGeneratorTest {
             )
         );
 
-        String source = codeGenerator.generate(query).content();
+        String source = generate(query).content();
 
         assertTrue(
             source.contains(
@@ -1296,7 +1299,7 @@ class JavaCodeGeneratorTest {
             )
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         String source = file.content();
 
@@ -1336,7 +1339,7 @@ class JavaCodeGeneratorTest {
             )
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         String source = file.content();
 
@@ -1369,7 +1372,7 @@ class JavaCodeGeneratorTest {
             List.of()
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         String source = file.content();
 
@@ -1403,7 +1406,7 @@ class JavaCodeGeneratorTest {
             )
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         String source = file.content();
 
@@ -1453,6 +1456,145 @@ class JavaCodeGeneratorTest {
         );
 
         assertEquals(0, result);
+    }
+
+    /**
+     * One group holding every supported query kind becomes one repository with
+     * one executor field, one constructor, and one method per query.
+     */
+    @Test
+    void shouldGenerateOneRepositoryForEveryQueryOfTheGroup() throws IOException {
+        QueryModel createUser = new QueryModel(
+            "CreateUser",
+            QueryType.ONE,
+            "users",
+            "INSERT INTO users (name) VALUES (?) RETURNING id, name",
+            List.of(1),
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true)
+            ),
+            List.of(new QueryParameter(1, "name", ColumnType.VARCHAR))
+        );
+
+        QueryModel getUser = new QueryModel(
+            "GetUser",
+            QueryType.ONE,
+            "users",
+            "SELECT id FROM users WHERE id = ?",
+            List.of(1),
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT))
+        );
+
+        QueryModel listUsers = new QueryModel(
+            "ListUsers",
+            QueryType.MANY,
+            "users",
+            "SELECT id, birth_date FROM users",
+            List.of(),
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("birth_date", ColumnType.DATE, true)
+            ),
+            List.of()
+        );
+
+        QueryModel deleteUser = new QueryModel(
+            "DeleteUser",
+            QueryType.EXEC,
+            "users",
+            "DELETE FROM users WHERE id = ?",
+            List.of(1),
+            List.of(),
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT))
+        );
+
+        GeneratedFile file = codeGenerator.generate(
+            new QueryGroupModel(
+                GROUP,
+                List.of(createUser, getUser, listUsers, deleteUser)
+            )
+        );
+
+        String source = file.content();
+
+        assertEquals(Path.of("generated", "UsersRepository.java"), file.path());
+
+        assertEquals(
+            1,
+            source.lines()
+                .filter(line -> line.equals("    private final QueryExecutor executor;"))
+                .count()
+        );
+
+        assertEquals(
+            1,
+            source.lines()
+                .filter(line -> line.contains("public UsersRepository(QueryExecutor executor)"))
+                .count()
+        );
+
+        assertTrue(source.contains("public CreateUserResult createUser(String name)"));
+        assertTrue(source.contains("public GetUserResult getUser(Long id)"));
+        assertTrue(source.contains("public List<ListUsersResult> listUsers()"));
+        assertTrue(source.contains("public int deleteUser(Long id)"));
+
+        assertTrue(source.contains("public record CreateUserResult("));
+        assertTrue(source.contains("public record GetUserResult("));
+        assertTrue(source.contains("public record ListUsersResult("));
+        assertFalse(source.contains("public record DeleteUserResult("));
+
+        assertTrue(source.contains("private static final RowMapper<CreateUserResult> createUserRowMapper"));
+        assertTrue(source.contains("private static final RowMapper<GetUserResult> getUserRowMapper"));
+        assertTrue(source.contains("private static final RowMapper<ListUsersResult> listUsersRowMapper"));
+
+        assertTrue(source.contains("import java.time.LocalDate;"));
+
+        assertEquals(
+            1,
+            source.lines()
+                .filter(line -> line.equals("import dev.sqlcj.runtime.RowMapper;"))
+                .count()
+        );
+
+        assertTrue(source.indexOf("createUser(") < source.indexOf("getUser("));
+        assertTrue(source.indexOf("getUser(") < source.indexOf("listUsers("));
+        assertTrue(source.indexOf("listUsers(") < source.indexOf("deleteUser("));
+
+        assertCompiles(file);
+    }
+
+    @Test
+    void shouldGenerateRepositoryWithoutMethodsForEmptyGroup() throws IOException {
+        GeneratedFile file = codeGenerator.generate(
+            new QueryGroupModel(GROUP, List.of())
+        );
+
+        String source = file.content();
+
+        assertEquals(Path.of("generated", "UsersRepository.java"), file.path());
+        assertTrue(source.contains("public final class UsersRepository {"));
+        assertTrue(source.contains("private final QueryExecutor executor;"));
+        assertTrue(source.contains("public UsersRepository(QueryExecutor executor)"));
+        assertFalse(source.contains("RowMapper"));
+        assertFalse(source.contains("public record"));
+
+        assertCompiles(file);
+    }
+
+    private GeneratedFile generate(QueryModel query) {
+        return generate(codeGenerator, query);
+    }
+
+    /** Generates the repository of a single-query group. */
+    private GeneratedFile generate(CodeGenerator generator, QueryModel query) {
+        return generator.generate(
+            new QueryGroupModel(
+                GROUP,
+                List.of(query)
+            )
+        );
     }
 
     private QueryModel query(String name, QueryType type, List<QueryParameter> parameters) {

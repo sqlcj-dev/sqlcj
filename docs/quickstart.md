@@ -139,12 +139,17 @@ Two details matter:
 ```yaml
 version: "1"
 sql:
-  - schema: sql/schema.sql
+  - name: Author
+    schema: sql/schema.sql
     queries: sql/queries.sql
 java:
   package: com.example.app.db
   out: target/generated-sources/sqlcj
 ```
+
+`sql[].name` is the identity of the query group. It names the generated
+repository, so the entry above generates one `AuthorRepository` holding every
+query of `sql/queries.sql`.
 
 `sqlcj generate` reads `sqlcj.yaml` from the directory it is run in, and the
 relative paths above are resolved against the directory that contains the file.
@@ -198,21 +203,18 @@ FROM authors
 WHERE id = $1;
 ```
 
-Each query generates one class named after it: `CreateAuthor`, `GetAuthor`,
-`ListAuthors`, `UpdateAuthorBio`, and `DeleteAuthor`. A `:one` or `:many` query
-also generates a nested result record such as `GetAuthor.GetAuthorResult`. The
-full query contract is documented in [Queries](queries.md).
+All five queries become methods of the one generated `AuthorRepository`:
+`createAuthor`, `getAuthor`, `listAuthors`, `updateAuthorBio`, and
+`deleteAuthor`. A `:one` or `:many` query also generates a nested result record
+such as `AuthorRepository.GetAuthorResult`. The full query contract is
+documented in [Queries](queries.md).
 
 ## 8. `src/main/java/com/example/app/App.java`
 
 ```java
 package com.example.app;
 
-import com.example.app.db.CreateAuthor;
-import com.example.app.db.DeleteAuthor;
-import com.example.app.db.GetAuthor;
-import com.example.app.db.ListAuthors;
-import com.example.app.db.UpdateAuthorBio;
+import com.example.app.db.AuthorRepository;
 import dev.sqlcj.runtime.JdbcQueryExecutor;
 import dev.sqlcj.runtime.QueryExecutor;
 import org.postgresql.ds.PGSimpleDataSource;
@@ -228,61 +230,60 @@ public final class App {
 
         QueryExecutor executor = new JdbcQueryExecutor(dataSource);
 
-        CreateAuthor.CreateAuthorResult created = new CreateAuthor(executor)
-                .createAuthor("Ada Lovelace", "First programmer");
+        AuthorRepository authors = new AuthorRepository(executor);
+
+        AuthorRepository.CreateAuthorResult created =
+                authors.createAuthor("Ada Lovelace", "First programmer");
 
         System.out.println("created: " + created.id() + " " + created.name());
 
-        GetAuthor.GetAuthorResult read = new GetAuthor(executor).getAuthor(created.id());
+        AuthorRepository.GetAuthorResult read = authors.getAuthor(created.id());
 
         System.out.println("read: " + read.name() + " / " + read.bio());
 
-        int updatedRows = new UpdateAuthorBio(executor)
-                .updateAuthorBio(created.id(), "Mathematician");
+        int updatedRows = authors.updateAuthorBio(created.id(), "Mathematician");
 
         System.out.println("updated rows: " + updatedRows);
 
-        for (ListAuthors.ListAuthorsResult author : new ListAuthors(executor).listAuthors()) {
+        for (AuthorRepository.ListAuthorsResult author : authors.listAuthors()) {
             System.out.println("listed: " + author.id() + " " + author.name());
         }
 
-        System.out.println("missing row: " + new GetAuthor(executor).getAuthor(-1L));
+        System.out.println("missing row: " + authors.getAuthor(-1L));
 
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
 
-            QueryExecutor transactional = new JdbcQueryExecutor(connection);
+            AuthorRepository transactionalAuthors =
+                    new AuthorRepository(new JdbcQueryExecutor(connection));
 
-            CreateAuthor.CreateAuthorResult committed = new CreateAuthor(transactional)
-                    .createAuthor("Grace Hopper", null);
+            AuthorRepository.CreateAuthorResult committed =
+                    transactionalAuthors.createAuthor("Grace Hopper", null);
 
-            new UpdateAuthorBio(transactional).updateAuthorBio(committed.id(), "Compiler pioneer");
+            transactionalAuthors.updateAuthorBio(committed.id(), "Compiler pioneer");
 
             connection.commit();
 
-            System.out.println(
-                    "committed: " + new GetAuthor(executor).getAuthor(committed.id()).bio()
-            );
+            System.out.println("committed: " + authors.getAuthor(committed.id()).bio());
         }
 
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
 
-            QueryExecutor transactional = new JdbcQueryExecutor(connection);
+            AuthorRepository transactionalAuthors =
+                    new AuthorRepository(new JdbcQueryExecutor(connection));
 
-            CreateAuthor.CreateAuthorResult discarded = new CreateAuthor(transactional)
-                    .createAuthor("Temporary Author", null);
+            AuthorRepository.CreateAuthorResult discarded =
+                    transactionalAuthors.createAuthor("Temporary Author", null);
 
-            new UpdateAuthorBio(transactional).updateAuthorBio(discarded.id(), "never stored");
+            transactionalAuthors.updateAuthorBio(discarded.id(), "never stored");
 
             connection.rollback();
 
-            System.out.println(
-                    "rolled back: " + new GetAuthor(executor).getAuthor(discarded.id())
-            );
+            System.out.println("rolled back: " + authors.getAuthor(discarded.id()));
         }
 
-        System.out.println("deleted rows: " + new DeleteAuthor(executor).deleteAuthor(created.id()));
+        System.out.println("deleted rows: " + authors.deleteAuthor(created.id()));
     }
 
     private static DataSource dataSource() {
@@ -296,6 +297,10 @@ public final class App {
     }
 }
 ```
+
+One repository instance serves the whole `DataSource`-backed execution context,
+and each transaction constructs another repository over its caller-owned
+connection. No code constructs a type per query.
 
 ## 9. Start PostgreSQL and apply the schema
 
@@ -336,14 +341,10 @@ mvn exec:java
 - `mvn compile` then compiles `src/main/java` together with
   `target/generated-sources/sqlcj`.
 
-Generation writes one file per query:
+Generation writes one file per configured entry:
 
 ```text
-target/generated-sources/sqlcj/com/example/app/db/CreateAuthor.java
-target/generated-sources/sqlcj/com/example/app/db/DeleteAuthor.java
-target/generated-sources/sqlcj/com/example/app/db/GetAuthor.java
-target/generated-sources/sqlcj/com/example/app/db/ListAuthors.java
-target/generated-sources/sqlcj/com/example/app/db/UpdateAuthorBio.java
+target/generated-sources/sqlcj/com/example/app/db/AuthorRepository.java
 ```
 
 `mvn exec:java` prints:
@@ -361,6 +362,8 @@ deleted rows: 1
 
 That output is the whole MVP contract in one run:
 
+- One `AuthorRepository` instance answers every call, and each generated method
+  keeps the types and order of its named query.
 - `CreateAuthor` is a `:one` write whose `RETURNING` clause reads back the
   database-generated `BIGSERIAL` identifier as a typed `Long`.
 - `GetAuthor` is a `:one` read, and returns `null` when no row matches.

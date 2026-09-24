@@ -23,7 +23,7 @@ supplies the PostgreSQL driver.
 `JdbcQueryExecutor` has two construction paths. Both share the same positional
 parameter binding, row mapping, single-row and multi-row result handling,
 affected-row counting, and exception translation, and both accept the same
-generated query classes without regeneration:
+generated repositories without regeneration:
 
 | Construction | Connection ownership |
 | --- | --- |
@@ -32,8 +32,9 @@ generated query classes without regeneration:
 
 The caller-owned connection path is how several generated operations take part
 in one application-controlled transaction: the application disables auto-commit,
-runs generated reads and writes through one executor, and then calls `commit` or
-`rollback` itself. sqlcj provides no transaction callback or template API, no
+constructs another repository instance over an executor bound to that
+connection, runs generated reads and writes through it, and then calls `commit`
+or `rollback` itself. sqlcj provides no transaction callback or template API, no
 savepoints, and no isolation configuration. The [Quickstart](quickstart.md)
 runs that pattern end to end.
 
@@ -52,7 +53,7 @@ connection inherits that connection's confinement to a single thread at a time.
 
 Behavior is verified against PostgreSQL 16. The pipeline is executed end to end
 against a `postgres:16-alpine` container: the schema snapshot is run as
-PostgreSQL DDL, the generated Java is compiled, and the generated classes are
+PostgreSQL DDL, the generated Java is compiled, and the generated repository is
 executed through the JDBC runtime. Those tests are skipped when Docker is
 unavailable.
 
@@ -96,7 +97,7 @@ accepted and map exactly like their unparameterized spellings.
 
 Any spelling that is not listed above is rejected.
 
-The generated class imports `java.time.LocalDate`, `java.time.LocalDateTime`,
+The generated repository imports `java.time.LocalDate`, `java.time.LocalDateTime`,
 `java.time.OffsetDateTime`, `java.math.BigDecimal`, and `java.util.UUID` as
 needed; the remaining types need no import. Each result column is read with
 `resultSet.getObject(position, JavaType.class)` at its one-based position in the

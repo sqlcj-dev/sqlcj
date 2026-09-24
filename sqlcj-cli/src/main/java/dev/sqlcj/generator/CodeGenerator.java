@@ -1,8 +1,8 @@
 package dev.sqlcj.generator;
 
-import dev.sqlcj.analysis.QueryModel;
+import dev.sqlcj.analysis.QueryGroupModel;
 
 public interface CodeGenerator {
 
-    GeneratedFile generate(QueryModel query);
+    GeneratedFile generate(QueryGroupModel group);
 }

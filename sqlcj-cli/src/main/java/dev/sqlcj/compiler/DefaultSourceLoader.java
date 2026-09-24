@@ -11,19 +11,21 @@ import dev.sqlcj.parser.QueryParser;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 public final class DefaultSourceLoader implements SourceLoader {
 
     private final FileLoader fileLoader = new DefaultFileLoader();
     private final QueryParser queryParser = new DefaultQueryParser();
 
+    /**
+     * Loads every configured entry as its own query group. A query name is
+     * scoped to the group that declares it, so two groups may name the same
+     * query.
+     */
     @Override
     public List<Source> load(Config config) {
         List<Source> sources = new ArrayList<>();
-        Set<String> queryNames = new HashSet<>();
 
         for (SqlConfig sqlConfig : config.sql()) {
             Path schemaPath = Path.of(sqlConfig.schema());
@@ -32,17 +34,9 @@ public final class DefaultSourceLoader implements SourceLoader {
             String schema = read(schemaPath, "schema");
             List<Query> queries = parse(read(queriesPath, "queries"), queriesPath);
 
-            for (Query query : queries) {
-                if (!queryNames.add(query.name())) {
-                    throw new CompilationException(
-                        "Duplicate query name '%s' in query source: %s"
-                            .formatted(query.name(), queriesPath)
-                    );
-                }
-            }
-
             sources.add(
                 new Source(
+                    sqlConfig.name(),
                     schemaPath,
                     schema,
                     queriesPath,

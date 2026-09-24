@@ -59,8 +59,8 @@ class DefaultSourceLoaderTest {
 
         List<Source> sources = sourceLoader.load(
             config(
-                new SqlConfig(userSchema.toString(), userQueries.toString()),
-                new SqlConfig(orderSchema.toString(), orderQueries.toString())
+                new SqlConfig("Users", userSchema.toString(), userQueries.toString()),
+                new SqlConfig("Orders", orderSchema.toString(), orderQueries.toString())
             )
         );
 
@@ -81,7 +81,7 @@ class DefaultSourceLoaderTest {
     }
 
     @Test
-    void shouldRejectDuplicateQueryNameAcrossEntries() throws IOException {
+    void shouldLoadTheSameQueryNameInTwoEntries() throws IOException {
         Path schema = write("schema.sql", """
             CREATE TABLE users
             (
@@ -102,20 +102,18 @@ class DefaultSourceLoaderTest {
             FROM users;
             """);
 
-        CompilationException exception = assertThrows(
-            CompilationException.class,
-            () -> sourceLoader.load(
-                config(
-                    new SqlConfig(schema.toString(), firstQueries.toString()),
-                    new SqlConfig(schema.toString(), secondQueries.toString())
-                )
+        List<Source> sources = sourceLoader.load(
+            config(
+                new SqlConfig("Users", schema.toString(), firstQueries.toString()),
+                new SqlConfig("Orders", schema.toString(), secondQueries.toString())
             )
         );
 
-        assertEquals(
-            "Duplicate query name 'GetUser' in query source: " + secondQueries,
-            exception.getMessage()
-        );
+        assertEquals(List.of("GetUser"), names(sources.getFirst()));
+        assertEquals(List.of("GetUser"), names(sources.get(1)));
+
+        assertEquals("Users", sources.getFirst().name());
+        assertEquals("Orders", sources.get(1).name());
     }
 
     @Test
@@ -134,6 +132,7 @@ class DefaultSourceLoaderTest {
             () -> sourceLoader.load(
                 config(
                     new SqlConfig(
+                        "Users",
                         schema.toString(),
                         missingQueries.toString()
                     )
@@ -163,6 +162,7 @@ class DefaultSourceLoaderTest {
             () -> sourceLoader.load(
                 config(
                     new SqlConfig(
+                        "Users",
                         missingSchema.toString(),
                         queries.toString()
                     )
@@ -201,6 +201,7 @@ class DefaultSourceLoaderTest {
             () -> sourceLoader.load(
                 config(
                     new SqlConfig(
+                        "Users",
                         schema.toString(),
                         queries.toString()
                     )
@@ -239,6 +240,7 @@ class DefaultSourceLoaderTest {
         List<Source> sources = sourceLoader.load(
             config(
                 new SqlConfig(
+                    "Users",
                     schema.toString(),
                     queries.toString()
                 )
@@ -247,6 +249,7 @@ class DefaultSourceLoaderTest {
 
         Source source = sources.getFirst();
 
+        assertEquals("Users", source.name());
         assertEquals(schema, source.schemaPath());
         assertEquals(queries, source.queriesPath());
         assertEquals(1, source.queries().getFirst().line());
