@@ -4,11 +4,19 @@ sqlcj is a SQL compiler and type-safe Java code generator for PostgreSQL,
 inspired by [sqlc](https://github.com/sqlc-dev/sqlc).
 
 You write a PostgreSQL schema snapshot and named SQL queries. sqlcj analyzes
-them against the schema and generates readable Java classes with typed
-parameters and typed result records, which execute through a small JDBC runtime:
+them against the schema and generates one readable Java repository per named
+query group, with typed parameters and typed result records, which executes
+through a small JDBC runtime:
 
 ```text
 schema + named SQL  ->  sqlcj generate  ->  generated Java  ->  JDBC
+```
+
+```yaml
+sql:
+  - name: Author
+    schema: sql/schema.sql
+    queries: sql/queries.sql
 ```
 
 ```sql
@@ -19,8 +27,13 @@ WHERE id = $1;
 ```
 
 ```java
-GetAuthor.GetAuthorResult author = new GetAuthor(executor).getAuthor(1L);
+AuthorRepository authors = new AuthorRepository(executor);
+
+AuthorRepository.GetAuthorResult author = authors.getAuthor(1L);
 ```
+
+Every query of `sql/queries.sql` becomes a method of that one
+`AuthorRepository`.
 
 The SQL stays visible and owned by the application. sqlcj is not an ORM, a
 migration tool, or a query builder: it does not run migrations, inspect a live
@@ -75,8 +88,8 @@ operations, including an application-controlled commit and rollback.
   empty directory.
 - [Queries](docs/queries.md) — query annotations, the supported SQL shapes,
   parameter and binding order, the generated API, and what is not supported.
-- [Configuration](docs/configuration.md) — the `sqlcj.yaml` format, path
-  resolution, and generated Java naming.
+- [Configuration](docs/configuration.md) — the `sqlcj.yaml` format, query-group
+  names, path resolution, and generated Java naming.
 - [PostgreSQL Support](docs/postgresql.md) — the engine contract, accepted
   column types and `CREATE TABLE` constructs, null handling, and connection
   ownership.
