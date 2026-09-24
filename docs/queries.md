@@ -116,7 +116,9 @@ A `WHERE` clause may combine:
 - `IN` with a fixed list of `$N` placeholders, such as `id IN ($1, $2)`,
 - `LIKE` and `ILIKE` between a direct column and a `$N` pattern placeholder,
   such as `name LIKE $1`,
-- `IS NULL` and `IS NOT NULL` on a direct column, such as `bio IS NULL`.
+- `IS NULL` and `IS NOT NULL` on a direct column, such as `bio IS NULL`,
+- `BETWEEN` and `NOT BETWEEN` on a direct column, such as
+  `code BETWEEN $1 AND $2`.
 
 A `LIKE` or `ILIKE` pattern placeholder requires a `VARCHAR` or `TEXT` column
 and takes that column's type, so it is a `String` method parameter. sqlcj passes
@@ -130,6 +132,17 @@ as an unanalyzed placeholder location.
 `IS NULL` and `IS NOT NULL` bind no placeholder, but their column is resolved
 against the query sources, so an unknown, ambiguous, or badly qualified column
 is rejected.
+
+A `BETWEEN` or `NOT BETWEEN` bound that is a `$N` placeholder takes the tested
+column's type, so `code BETWEEN $1 AND $2` binds two `Integer` parameters named
+after `code` and disambiguated as `code1` and `code2`. The bounds are bound in
+textual order, the start bound before the end bound, whatever their placeholder
+indexes are. A placeholder bound beside a literal bound, as in
+`code BETWEEN $1 AND 10`, is typed the same way and binds one parameter. A named
+bound such as `code BETWEEN :lo AND :hi` is rejected like any other named
+placeholder, while a placeholder as the tested value, as in
+`$1 BETWEEN code AND code`, and a placeholder inside a computed bound, as in
+`code BETWEEN $1 + 1 AND $2`, are rejected as unanalyzed placeholder locations.
 
 A comparison that binds no placeholder, such as `active = TRUE`, contributes no
 generated parameter and reaches the database as written.
@@ -400,13 +413,16 @@ name, and its header line.
 - A `FROM` item that is not a table, a comma-separated source list, a join that
   is not a plain inner join, a join predicate that is not one qualified
   equality, and a set operation such as `UNION`.
-- A placeholder in a location sqlcj does not analyze, including
-  `BETWEEN $1 AND $2`, `LIMIT $1`, and a computed `LIKE` pattern such as
-  `'%' || $1 || '%'`, so parameterized pagination and dynamic `IN` expansion are
-  unavailable.
+- A placeholder in a location sqlcj does not analyze, including `LIMIT $1`, a
+  computed `LIKE` pattern such as `'%' || $1 || '%'`, a placeholder as the
+  tested value of a range such as `$1 BETWEEN id AND id`, and a computed range
+  bound such as `id BETWEEN $1 + 1 AND $2`, so parameterized pagination and
+  dynamic `IN` expansion are unavailable.
 - A `LIKE`-family pattern placeholder that is negated, uses another keyword such
   as `SIMILAR TO`, carries an `ESCAPE` clause or a `BINARY` modifier, tests a
   non-text column, or stands as the tested value.
+- A named range bound such as `id BETWEEN :lo AND :hi`, which fails with the
+  named-placeholder diagnostic.
 - Anonymous `?` and named `:name` placeholders, and non-contiguous or
   non-positive placeholder indexes.
 - An `INSERT` without an explicit column list, with more than one `VALUES` row,
@@ -426,8 +442,9 @@ them:
 
 - `DISTINCT`, `GROUP BY`, and `HAVING`,
 - predicate forms other than the listed comparisons, `AND`/`OR`, fixed `IN`
-  lists, pattern placeholders, and null tests, such as `LIKE` with a literal
-  pattern or `IN` with a subquery,
+  lists, pattern placeholders, null tests, and ranges, such as `LIKE` with a
+  literal pattern, a range whose bounds are both literal such as
+  `id BETWEEN 1 AND 10`, or `IN` with a subquery,
 - common table expressions, and subqueries outside the `FROM` item,
 - `LIMIT` and `OFFSET` with literal values,
 - `ON CONFLICT`, `UPDATE ... FROM`, and `DELETE ... USING` on a non-returning
@@ -516,6 +533,17 @@ Reads:
   `PostgresIntegrationTest.shouldExecuteGeneratedTextAndNullPredicatesAgainstPostgres`
   executes `LIKE`, a case-insensitive `ILIKE`, `IS NULL`, and `IS NOT NULL`
   reads against PostgreSQL 16.
+- `QueryAnalyzerTest.shouldResolveRangeBoundParametersFromTestedColumn`,
+  `QueryAnalyzerTest.shouldResolveNegatedRangeBoundParameters`,
+  `QueryAnalyzerTest.shouldResolveRangeBoundParametersInTextualBindingOrder`,
+  `QueryAnalyzerTest.shouldResolveRangeBoundParameterBesideLiteralBound`,
+  `QueryAnalyzerTest.shouldNotCreateParameterForLiteralRange`,
+  `QueryAnalyzerTest.shouldRejectUnknownColumnInRangePredicate`, and
+  `QueryAnalyzerTest.shouldRejectNamedRangeBound` cover the range predicates,
+  and
+  `PostgresIntegrationTest.shouldExecuteGeneratedRangePredicatesAgainstPostgres`
+  executes a `BETWEEN` read and a `NOT BETWEEN` read whose bounds use
+  out-of-order placeholder indexes against PostgreSQL 16.
 - `QueryAnalyzerTest.shouldResolveRowTableForFullRowSelect`,
   `QueryAnalyzerTest.shouldNotResolveRowTableForQuerySpecificResult`,
   `QueryAnalyzerTest.shouldNotResolveRowTableForJoinedWildcard`, and
