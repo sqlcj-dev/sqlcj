@@ -21,9 +21,9 @@ supplies the PostgreSQL driver.
 ## Connection Ownership and Transactions
 
 `JdbcQueryExecutor` has two construction paths. Both share the same positional
-parameter binding, row mapping, single-row and multi-row result handling,
-affected-row counting, and exception translation, and both accept the same
-generated repositories without regeneration:
+parameter binding, row mapping, cardinality enforcement, affected-row counting,
+and exception translation, and both accept the same generated repositories
+without regeneration:
 
 | Construction | Connection ownership |
 | --- | --- |
@@ -39,14 +39,38 @@ savepoints, and no isolation configuration. The [Quickstart](quickstart.md)
 runs that pattern end to end.
 
 In both paths the `PreparedStatement` and any `ResultSet` opened for an
-operation are closed before that operation returns, on success and on failure.
+operation are closed before that operation returns, on success, on a cardinality
+failure, and on any other failure.
+
+Every generated method passes the generated repository's class name and its
+query name to the executor, so every runtime failure names the query the
+application called.
 
 Every `SQLException` raised while acquiring a connection, preparing a statement,
 binding parameters, executing, reading results, or closing a DataSource-acquired
 connection is translated into `dev.sqlcj.runtime.QueryExecutionException` with
-the message `Failed to execute query` and the `SQLException` as its cause. A
-failed operation on a caller-owned connection leaves the connection open, so the
-application decides whether to continue or roll back.
+the message `Failed to execute query '<query>' in <repository>` and the
+`SQLException` as its cause:
+
+```text
+Failed to execute query 'GetAuthor' in AuthorRepository
+```
+
+A row count an annotation does not allow raises
+`dev.sqlcj.runtime.QueryCardinalityException`, a subclass of
+`QueryExecutionException` that carries only a message:
+
+```text
+Query 'GetAuthor' in AuthorRepository returned no row; expected exactly one
+Query 'GetAuthor' in AuthorRepository returned more than one row; expected exactly one
+Query 'FindAuthor' in AuthorRepository returned more than one row; expected at most one
+```
+
+A cardinality check runs after the statement has executed, so a returning write
+that fails it has already changed the database.
+
+A failed operation on a caller-owned connection leaves the connection open, so
+the application decides whether to continue or roll back.
 
 The runtime is blocking and synchronous. An executor built on a caller-owned
 connection inherits that connection's confinement to a single thread at a time.
@@ -130,8 +154,18 @@ input and is not carried into the model at all.
 ## Nulls
 
 Every generated method parameter and every generated result component uses a
-reference type, so each of them can represent SQL `NULL`. `Optional` and custom
-nullable wrappers are not used.
+reference type, so each of them can represent SQL `NULL`. A result component may
+be `null` exactly when its column is modeled nullable by the schema snapshot.
+
+Row absence is a different thing from a null component, and the two are never
+mixed:
+
+- absence is expressed only by the query's annotation: `:optional` returns
+  `Optional.empty()`, and `:one` fails with
+  `dev.sqlcj.runtime.QueryCardinalityException`,
+- `Optional` is used only as the return type of an `:optional` query. No record
+  component and no method parameter is wrapped in `Optional`, and no custom
+  nullable wrapper is used.
 
 Null handling is uniform and independent of the column type:
 
@@ -233,6 +267,9 @@ Nulls:
 - `PostgresIntegrationTest.shouldBindAndReadNullValuesThroughGeneratedCode`
   binds null arguments and reads null results through generated code against
   PostgreSQL.
+- `PostgresIntegrationTest.shouldEnforceResultCardinalitiesAgainstPostgres`
+  proves that row absence is reported by `:optional` and `:one` rather than by a
+  null result.
 - `DefaultSchemaParserTest.shouldParseColumns`,
   `DefaultSchemaParserTest.shouldParseNullabilityOfAddedColumnTypes`, and
   `DefaultSchemaParserTest.shouldParseSerialColumnAsNotNullable` cover parsed
@@ -240,13 +277,15 @@ Nulls:
 
 Connection ownership and transactions:
 
-- `JdbcQueryExecutorTest` covers both construction paths for `query`,
-  `queryMany`, and `execute`, including
+- `JdbcQueryExecutorTest` covers both construction paths for `queryOne`,
+  `queryOptional`, `queryMany`, and `execute`, including
   `shouldCloseAcquiredConnectionForEachDataSourceOperation`,
   `shouldCloseAcquiredConnectionWhenDataSourceOperationFails`,
+  `shouldCloseAcquiredConnectionWhenCardinalityFails`,
   `shouldLeaveCallerOwnedConnectionOpenAndItsTransactionStateUnchanged`,
   `shouldCloseStatementsAndResultSetsOfCallerOwnedConnection`,
-  `shouldCloseStatementWhenExecutionFailsOnCallerOwnedConnection`, and
+  `shouldCloseStatementWhenExecutionFailsOnCallerOwnedConnection`,
+  `shouldCloseStatementWhenCardinalityFailsOnCallerOwnedConnection`, and
   `shouldWrapSqlExceptionForCallerOwnedConnection`.
 - `PostgresIntegrationTest.shouldCommitGeneratedOperationsOnCallerOwnedConnection`
   and

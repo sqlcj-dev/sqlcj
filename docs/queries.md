@@ -38,23 +38,37 @@ WHERE id = $1;
 
 ## Annotations and Cardinality
 
-sqlcj accepts three annotations. Any other annotation is rejected.
+sqlcj accepts four annotations. Any other annotation is rejected.
 
-| Annotation | Accepted statements | Generated return type | Result when no row matches |
-| --- | --- | --- | --- |
-| `:one` | `SELECT`, or a write with `RETURNING` | the generated result record | `null` |
-| `:many` | `SELECT`, or a write with `RETURNING` | `List<`result record`>` | an empty list |
-| `:exec` | `INSERT`, `UPDATE`, `DELETE` without `RETURNING` | `int` affected-row count | `0` |
+| Annotation | Accepted statements | Generated return type | Result when no row matches | Result when several rows match |
+| --- | --- | --- | --- | --- |
+| `:one` | `SELECT`, or a write with `RETURNING` | the generated result record | `QueryCardinalityException` | `QueryCardinalityException` |
+| `:optional` | `SELECT`, or a write with `RETURNING` | `Optional<`result record`>` | `Optional.empty()` | `QueryCardinalityException` |
+| `:many` | `SELECT`, or a write with `RETURNING` | `List<`result record`>` | an empty list | every row |
+| `:exec` | `INSERT`, `UPDATE`, `DELETE` without `RETURNING` | `int` affected-row count | `0` | the affected-row count |
 
 The annotation and the statement must agree:
 
-- a `SELECT` must be `:one` or `:many`,
+- a `SELECT` must be `:one`, `:optional`, or `:many`,
 - a write without `RETURNING` must be `:exec`,
-- a write with `RETURNING` must be `:one` or `:many`.
+- a write with `RETURNING` must be `:one`, `:optional`, or `:many`.
 
-`:one` reads the first row of the result set and does not read any further row,
-so a query that matches several rows returns the first one rather than failing.
-`:many` returns every row in the order the database produced it.
+The three result annotations differ only in how many rows they accept:
+
+- `:one` returns exactly one row. It raises
+  `dev.sqlcj.runtime.QueryCardinalityException` when the query returned no row
+  and when it returned more than one.
+- `:optional` returns at most one row, as `Optional.empty()` or
+  `Optional.of(row)`. It raises the same exception when the query returned more
+  than one row.
+- `:many` returns every row in the order the database produced it, and an empty
+  list when there was none.
+
+A cardinality check runs after the statement has executed, so a returning write
+that fails its check has already changed the database. The application controls
+whether that change is kept, by running the write on a caller-owned connection
+and rolling back. The exception messages are listed in
+[PostgreSQL Support](postgresql.md#connection-ownership-and-transactions).
 
 ## Reads
 
@@ -141,8 +155,8 @@ WHERE id = $1;
 
 ### `RETURNING`
 
-A supported `INSERT`, `UPDATE`, or `DELETE` declared `:one` or `:many` may end
-with a `RETURNING` clause that lists either:
+A supported `INSERT`, `UPDATE`, or `DELETE` declared `:one`, `:optional`, or
+`:many` may end with a `RETURNING` clause that lists either:
 
 - unaliased direct columns of the target table, in the order they are declared,
   or
@@ -189,6 +203,8 @@ in its `SET` clause, so the generated method takes `(id, bio)` and binds
 ```java
 public int updateAuthorBio(Long id, String bio) {
     return executor.execute(
+        "AuthorRepository",
+        "UpdateAuthorBio",
         """
             UPDATE authors
             SET bio = ?
@@ -215,13 +231,13 @@ that repository; sqlcj never generates a class per query.
   constructor taking that executor.
 - Methods appear in query-source order. A method name is the lower camel form
   of the query name, as in `get_author` and `GetAuthor` to `getAuthor`.
-- A `:one` or `:many` query that returns one complete table row — a
+- A `:one`, `:optional`, or `:many` query that returns one complete table row — a
   single-source `SELECT *` or `SELECT <source>.*`, or a write whose `RETURNING`
   clause is exactly `*` — returns the repository's nested
   `<TableName>Row` record. That record and its private `RowMapper` field are
   generated once per table, after the constructor, in the order the queries
   first use them, and every query returning that row shares them.
-- Every other `:one` or `:many` query generates a nested `public record` named
+- Every other `:one`, `:optional`, or `:many` query generates a nested `public record` named
   `<QueryName>Result` in upper camel case, whose components follow the
   selected-column order and are named after each column's projection alias or
   column name, plus a private `RowMapper` field that reads each column by its
@@ -229,13 +245,16 @@ that repository; sqlcj never generates a class per query.
   every column, a wildcard combined with another projection item, a wildcard in
   a join, and a `RETURNING` column list.
 - A `:exec` query generates no result record and returns `int`.
+- Every generated method passes the repository class name and the query name to
+  the executor, as the first two arguments of its call, so a runtime failure
+  names the query the application called.
 - Generated source imports only `dev.sqlcj.runtime.QueryExecutor`,
-  `dev.sqlcj.runtime.RowMapper`, `java.util.List`, and the JDK types of the
-  mapped columns, so the runtime artifact is the only sqlcj dependency a
-  consumer needs.
+  `dev.sqlcj.runtime.RowMapper`, `java.util.List`, `java.util.Optional` when the
+  entry declares an `:optional` query, and the JDK types of the mapped columns,
+  so the runtime artifact is the only sqlcj dependency a consumer needs.
 
 The `Author` entry of the [Quickstart](quickstart.md), which declares
-`CreateAuthor`, `GetAuthor`, `ListAuthors`, `UpdateAuthorBio`, and
+`CreateAuthor`, `GetAuthor`, `FindAuthor`, `ListAuthors`, `UpdateAuthorBio`, and
 `DeleteAuthor`, generates one `AuthorRepository`:
 
 ```java
@@ -244,6 +263,7 @@ package com.example.app.db;
 import dev.sqlcj.runtime.QueryExecutor;
 import dev.sqlcj.runtime.RowMapper;
 import java.util.List;
+import java.util.Optional;
 import java.time.LocalDateTime;
 
 /**
@@ -281,7 +301,9 @@ public final class AuthorRepository {
      * Type: ONE
      */
     public AuthorsRow createAuthor(String name, String bio) {
-        return executor.query(
+        return executor.queryOne(
+                "AuthorRepository",
+                "CreateAuthor",
                 """
     INSERT INTO authors (name, bio)
     VALUES (?, ?)
@@ -291,14 +313,34 @@ public final class AuthorRepository {
         );
     }
 
-    // getAuthor, listAuthors, updateAuthorBio, and deleteAuthor follow here.
+    // getAuthor follows here, in query-source order.
+
+    /**
+     * Query: FindAuthor
+     * Table: authors
+     * Type: OPTIONAL
+     */
+    public Optional<AuthorsRow> findAuthor(Long id) {
+        return executor.queryOptional(
+                "AuthorRepository",
+                "FindAuthor",
+                """
+    SELECT *
+    FROM authors
+    WHERE id = ?;""",
+                java.util.Arrays.asList(id),
+                authorsRowMapper
+        );
+    }
+
+    // listAuthors, updateAuthorBio, and deleteAuthor follow here.
 }
 ```
 
-`CreateAuthor`, `GetAuthor`, and `ListAuthors` each return one complete
-`authors` row, so all three use the one `AuthorsRow` record and the one
-`authorsRowMapper` field. `getAuthor` returns `AuthorsRow` and `listAuthors`
-returns `List<AuthorsRow>`.
+`CreateAuthor`, `GetAuthor`, `FindAuthor`, and `ListAuthors` each return one
+complete `authors` row, so all four use the one `AuthorsRow` record and the one
+`authorsRowMapper` field. `getAuthor` returns `AuthorsRow`, `findAuthor` returns
+`Optional<AuthorsRow>`, and `listAuthors` returns `List<AuthorsRow>`.
 
 The application constructs the repository once per execution context:
 
@@ -306,6 +348,8 @@ The application constructs the repository once per execution context:
 AuthorRepository authors = new AuthorRepository(new JdbcQueryExecutor(dataSource));
 
 AuthorRepository.AuthorsRow author = authors.getAuthor(1L);
+
+Optional<AuthorRepository.AuthorsRow> found = authors.findAuthor(2L);
 ```
 
 A query name, projection alias, column name, and parameter name becomes a
@@ -351,7 +395,7 @@ name, and its header line.
 - An aliased, computed, qualified-wildcard, or unknown `RETURNING` item;
   `RETURNING` on `:exec`; and `ON CONFLICT`, `UPDATE ... FROM`,
   `DELETE ... USING`, or a common table expression in a returning write.
-- Any annotation other than `:one`, `:many`, and `:exec`.
+- Any annotation other than `:one`, `:optional`, `:many`, and `:exec`.
 
 ### Not analyzed
 
@@ -382,20 +426,39 @@ Query sources and annotations:
   `DefaultQueryParserTest.parsesMultipleQueries`,
   `DefaultQueryParserTest.preservesQueryOrder`,
   `DefaultQueryParserTest.parsesHeaderLineOfEachQuery`,
+  `DefaultQueryParserTest.parsesOptionalQueryType`,
+  `DefaultQueryParserTest.parsesExecQueryType`,
   `DefaultQueryParserTest.rejectsInvalidHeader`,
   `DefaultQueryParserTest.rejectsInvalidQueryType`,
   `DefaultQueryParserTest.rejectsDuplicateQueryNames`, and
   `DefaultQueryParserTest.rejectsQueryWithoutSql` cover the file format.
 - `QueryAnalyzerTest.shouldRejectSelectWithoutResultQueryType`,
+  `QueryAnalyzerTest.shouldAnalyzeSelectDeclaredAsOptional`,
   `QueryAnalyzerTest.shouldRejectWriteWithoutExecQueryType`,
   `QueryAnalyzerTest.shouldRejectReturningWriteDeclaredAsExec`, and
-  `QueryAnalyzerTest.shouldAnalyzeReturningWriteForBothResultQueryTypes` cover
+  `QueryAnalyzerTest.shouldAnalyzeReturningWriteForEveryResultQueryType` cover
   annotation and statement agreement.
-- `JdbcQueryExecutorTest.shouldReturnNullWhenQueryFindsNoRows`,
+- `JdbcQueryExecutorTest.shouldReturnTheRowWhenQueryOneFindsExactlyOneRow`,
+  `JdbcQueryExecutorTest.shouldFailWhenQueryOneFindsNoRow`,
+  `JdbcQueryExecutorTest.shouldFailWhenQueryOneFindsMoreThanOneRow`,
+  `JdbcQueryExecutorTest.shouldReturnTheRowWhenQueryOptionalFindsOneRow`,
+  `JdbcQueryExecutorTest.shouldReturnEmptyOptionalWhenQueryOptionalFindsNoRow`,
+  `JdbcQueryExecutorTest.shouldFailWhenQueryOptionalFindsMoreThanOneRow`,
   `JdbcQueryExecutorTest.shouldReturnEmptyListWhenQueryManyFindsNoRows`,
   `JdbcQueryExecutorTest.shouldReturnAllRowsForQueryMany`, and
   `JdbcQueryExecutorTest.shouldReturnAffectedRowCountForExecute` cover the
-  cardinality results.
+  cardinality results and their exact messages.
+- `PostgresIntegrationTest.shouldEnforceResultCardinalitiesAgainstPostgres`
+  executes `:one`, `:optional`, and `:many` over zero, one, and two matching
+  rows of a non-unique column against PostgreSQL 16, through both executor
+  construction paths.
+- `JavaCodeGeneratorTest.shouldGenerateOptionalExecutionForOptionalQuery`,
+  `JavaCodeGeneratorTest.shouldShareOneRowRecordBetweenOptionalAndOtherFullRowQueries`,
+  `JavaCodeGeneratorTest.shouldNotImportOptionalWithoutAnOptionalQuery`,
+  `JavaCodeGeneratorTest.shouldPassRepositoryAndQueryIdentityToEveryExecutorCall`,
+  and
+  `JavaCodeGeneratorNamingTest.shouldPassExactRepositoryAndQueryNameToTheExecutor`
+  cover the generated calls, return types, imports, and identity literals.
 
 Reads:
 
@@ -443,6 +506,7 @@ Writes and `RETURNING`:
 - `PostgresIntegrationTest.shouldExecuteGeneratedWriteAgainstPostgres`,
   `PostgresIntegrationTest.shouldExecuteGeneratedInsertReturningAgainstPostgres`,
   `PostgresIntegrationTest.shouldExecuteGeneratedUpdateReturningAgainstPostgres`,
+  whose no-row returning update fails its `:one` cardinality check,
   and
   `PostgresIntegrationTest.shouldExecuteGeneratedDeleteReturningAgainstPostgres`
   execute them against PostgreSQL 16.

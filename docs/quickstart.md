@@ -187,6 +187,11 @@ SELECT *
 FROM authors
 WHERE id = $1;
 
+-- name: FindAuthor :optional
+SELECT *
+FROM authors
+WHERE id = $1;
+
 -- name: ListAuthors :many
 SELECT *
 FROM authors
@@ -203,14 +208,19 @@ FROM authors
 WHERE id = $1;
 ```
 
-All five queries become methods of the one generated `AuthorRepository`:
-`createAuthor`, `getAuthor`, `listAuthors`, `updateAuthorBio`, and
-`deleteAuthor`. `CreateAuthor`, `GetAuthor`, and `ListAuthors` each return one
-complete `authors` row, so all three share the nested record
+All six queries become methods of the one generated `AuthorRepository`:
+`createAuthor`, `getAuthor`, `findAuthor`, `listAuthors`, `updateAuthorBio`, and
+`deleteAuthor`. `CreateAuthor`, `GetAuthor`, `FindAuthor`, and `ListAuthors`
+each return one complete `authors` row, so all four share the nested record
 `AuthorRepository.AuthorsRow`, generated once from the schema's column order. A
 query with its own result shape, such as a partial projection or a `RETURNING`
 column list, generates a nested `AuthorRepository.<QueryName>Result` record
-instead. The full query contract is documented in [Queries](queries.md).
+instead.
+
+`GetAuthor` and `FindAuthor` read the same row by the same key and differ only
+in cardinality: `getAuthor` returns `AuthorsRow` and requires exactly one row,
+while `findAuthor` returns `Optional<AuthorsRow>` and accepts none. The full
+query contract is documented in [Queries](queries.md).
 
 ## 8. `src/main/java/com/example/app/App.java`
 
@@ -219,12 +229,14 @@ package com.example.app;
 
 import com.example.app.db.AuthorRepository;
 import dev.sqlcj.runtime.JdbcQueryExecutor;
+import dev.sqlcj.runtime.QueryCardinalityException;
 import dev.sqlcj.runtime.QueryExecutor;
 import org.postgresql.ds.PGSimpleDataSource;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.Optional;
 
 public final class App {
 
@@ -251,7 +263,15 @@ public final class App {
             System.out.println("listed: " + author.id() + " " + author.name());
         }
 
-        System.out.println("missing row: " + authors.getAuthor(-1L));
+        Optional<AuthorRepository.AuthorsRow> missing = authors.findAuthor(-1L);
+
+        System.out.println("missing row: " + missing.isPresent());
+
+        try {
+            authors.getAuthor(-1L);
+        } catch (QueryCardinalityException e) {
+            System.out.println("missing row rejected: " + e.getMessage());
+        }
 
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
@@ -278,7 +298,7 @@ public final class App {
 
             connection.rollback();
 
-            System.out.println("rolled back: " + authors.getAuthor(discarded.id()));
+            System.out.println("rolled back: " + authors.findAuthor(discarded.id()).isPresent());
         }
 
         System.out.println("deleted rows: " + authors.deleteAuthor(created.id()));
@@ -352,9 +372,10 @@ created: 1 Ada Lovelace
 read: Ada Lovelace / First programmer
 updated rows: 1
 listed: 1 Ada Lovelace
-missing row: null
+missing row: false
+missing row rejected: Query 'GetAuthor' in AuthorRepository returned no row; expected exactly one
 committed: Compiler pioneer
-rolled back: null
+rolled back: false
 deleted rows: 1
 ```
 
@@ -364,7 +385,12 @@ That output is the whole MVP contract in one run:
   keeps the types and order of its named query.
 - `CreateAuthor` is a `:one` write whose `RETURNING` clause reads back the
   database-generated `BIGSERIAL` identifier as a typed `Long`.
-- `GetAuthor` is a `:one` read, and returns `null` when no row matches.
+- `GetAuthor` is a `:one` read: it returns the row when exactly one matches, and
+  fails with `dev.sqlcj.runtime.QueryCardinalityException` naming the query and
+  the repository when none matches or several do.
+- `FindAuthor` is an `:optional` read of the same row, and returns
+  `Optional.empty()` when no row matches, which is how the sample checks for a
+  missing, rolled back, or deleted author.
 - `ListAuthors` is a `:many` read, and returns an empty list when no row
   matches.
 - `UpdateAuthorBio` and `DeleteAuthor` are `:exec` writes and return their
