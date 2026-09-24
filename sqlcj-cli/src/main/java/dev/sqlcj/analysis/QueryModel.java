@@ -13,6 +13,10 @@ import java.util.List;
  *                                 {@code ?} positions in {@link #executableSql()}
  * @param parameters               one query parameter per placeholder index, in
  *                                 logical placeholder-index order
+ * @param rowTable                 the schema's declared name of the table whose
+ *                                 complete row this query returns, or
+ *                                 {@code null} when the result is specific to
+ *                                 this query
  */
 public record QueryModel(
     String name,
@@ -21,6 +25,7 @@ public record QueryModel(
     String executableSql,
     List<Integer> bindingParameterIndexes,
     List<QueryColumn> columns,
-    List<QueryParameter> parameters
+    List<QueryParameter> parameters,
+    String rowTable
 ) {
 }

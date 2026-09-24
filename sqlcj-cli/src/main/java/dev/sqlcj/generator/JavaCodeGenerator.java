@@ -131,6 +131,14 @@ public final class JavaCodeGenerator implements CodeGenerator {
         return !isExec(query);
     }
 
+    /**
+     * A query that returns one complete table row uses the repository's shared
+     * row record and row mapper instead of generating its own.
+     */
+    private boolean returnsSharedRow(QueryModel query) {
+        return query.rowTable() != null;
+    }
+
     private String resolveImport(ColumnType type) {
         return switch (type) {
             case DATE -> "java.time.LocalDate";
@@ -174,16 +182,35 @@ public final class JavaCodeGenerator implements CodeGenerator {
         members.add(generateExecutorField());
         members.add(generateConstructor(names));
 
+        for (JavaNames.RowNames row : names.rows()) {
+            List<QueryColumn> columns = group.queries().get(row.queryIndex()).columns();
+
+            members.add(generateRecord(row.typeName(), columns, row.componentNames()));
+            members.add(generateRowMapper(row.typeName(), row.mapperName(), columns));
+        }
+
         for (int index = 0; index < group.queries().size(); index++) {
             QueryModel query = group.queries().get(index);
             JavaNames.QueryNames queryNames = names.queries().get(index);
 
-            if (hasResultType(query)) {
-                members.add(generateResultType(query, queryNames));
+            if (hasResultType(query) && !returnsSharedRow(query)) {
+                members.add(
+                    generateRecord(
+                        queryNames.resultTypeName(),
+                        query.columns(),
+                        queryNames.componentNames()
+                    )
+                );
             }
 
-            if (hasResult(query)) {
-                members.add(generateRowMapper(query, queryNames));
+            if (hasResult(query) && !returnsSharedRow(query)) {
+                members.add(
+                    generateRowMapper(
+                        queryNames.resultTypeName(),
+                        queryNames.rowMapperName(),
+                        query.columns()
+                    )
+                );
             }
 
             members.add(generateJavaDoc(query) + generateMethod(query, queryNames));
@@ -208,7 +235,12 @@ public final class JavaCodeGenerator implements CodeGenerator {
         return text.indent(4).stripTrailing();
     }
 
-    private String generateResultType(QueryModel query, JavaNames.QueryNames names) {
+    /** Generates one nested result or row record in selected-column order. */
+    private String generateRecord(
+        String typeName,
+        List<QueryColumn> columns,
+        List<String> componentNames
+    ) {
         return """
             public record %s(
             %s
@@ -216,17 +248,17 @@ public final class JavaCodeGenerator implements CodeGenerator {
             }
             """
             .formatted(
-                names.resultTypeName(),
-                generateResultComponents(query, names)
+                typeName,
+                generateResultComponents(columns, componentNames)
             );
     }
 
-    private String generateResultComponents(QueryModel query, JavaNames.QueryNames names) {
-        return IntStream.range(0, query.columns().size())
+    private String generateResultComponents(List<QueryColumn> columns, List<String> componentNames) {
+        return IntStream.range(0, columns.size())
             .mapToObj(
                 index -> generateResultComponent(
-                    query.columns().get(index),
-                    names.componentNames().get(index)
+                    columns.get(index),
+                    componentNames.get(index)
                 )
             )
             .collect(Collectors.joining(",\n"));
@@ -424,7 +456,7 @@ public final class JavaCodeGenerator implements CodeGenerator {
         };
     }
 
-    private String generateRowMapper(QueryModel query, JavaNames.QueryNames names) {
+    private String generateRowMapper(String typeName, String mapperName, List<QueryColumn> columns) {
         return """
             private static final RowMapper<%s> %s =
                     resultSet -> new %s(
@@ -432,10 +464,10 @@ public final class JavaCodeGenerator implements CodeGenerator {
             );
             """
             .formatted(
-                names.resultTypeName(),
-                names.rowMapperName(),
-                names.resultTypeName(),
-                generateResultMappings(query)
+                typeName,
+                mapperName,
+                typeName,
+                generateResultMappings(columns)
             );
     }
 
@@ -443,11 +475,11 @@ public final class JavaCodeGenerator implements CodeGenerator {
      * Reads each result column by its one-based projection position so that
      * identically named columns from different sources stay distinct.
      */
-    private String generateResultMappings(QueryModel query) {
-        return IntStream.range(0, query.columns().size())
+    private String generateResultMappings(List<QueryColumn> columns) {
+        return IntStream.range(0, columns.size())
             .mapToObj(
                 index -> generateResultMapping(
-                    query.columns().get(index),
+                    columns.get(index),
                     index + 1
                 )
             )

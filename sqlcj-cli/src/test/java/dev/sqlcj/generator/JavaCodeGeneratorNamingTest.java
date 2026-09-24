@@ -217,7 +217,8 @@ class JavaCodeGeneratorNamingTest {
             sql,
             List.of(1),
             List.of(new QueryColumn("a\\q", ColumnType.VARCHAR, true)),
-            List.of(new QueryParameter(1, "a\\q", ColumnType.VARCHAR))
+            List.of(new QueryParameter(1, "a\\q", ColumnType.VARCHAR)),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -241,7 +242,8 @@ class JavaCodeGeneratorNamingTest {
             sql,
             List.of(),
             List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
-            List.of()
+            List.of(),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -331,7 +333,8 @@ class JavaCodeGeneratorNamingTest {
                 .map(QueryParameter::index)
                 .toList(),
             columns,
-            parameters
+            parameters,
+            null
         );
     }
 

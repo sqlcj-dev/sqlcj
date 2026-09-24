@@ -21,6 +21,7 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JavaCodeGeneratorTest {
@@ -45,7 +46,8 @@ class JavaCodeGeneratorTest {
             List.of(
                 new QueryColumn("id", ColumnType.BIGINT, false)
             ),
-            List.of()
+            List.of(),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -65,7 +67,8 @@ class JavaCodeGeneratorTest {
             SQL,
             List.of(),
             List.of(),
-            List.of()
+            List.of(),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -82,7 +85,8 @@ class JavaCodeGeneratorTest {
             SQL,
             List.of(),
             List.of(),
-            List.of()
+            List.of(),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -195,7 +199,8 @@ class JavaCodeGeneratorTest {
             ),
             List.of(
                 new QueryParameter(1, "id", ColumnType.BIGINT)
-            )
+            ),
+            null
         );
 
         GeneratedFile file = generate(generator, query);
@@ -225,7 +230,8 @@ class JavaCodeGeneratorTest {
                 new QueryColumn("name", ColumnType.VARCHAR, true),
                 new QueryColumn("active", ColumnType.BOOLEAN, true)
             ),
-            List.of()
+            List.of(),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -250,7 +256,8 @@ class JavaCodeGeneratorTest {
             List.of(
                 new QueryColumn("id", ColumnType.BIGINT, false)
             ),
-            List.of()
+            List.of(),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -274,7 +281,8 @@ class JavaCodeGeneratorTest {
                 new QueryColumn("id", ColumnType.BIGINT, false),
                 new QueryColumn("name", ColumnType.VARCHAR, true)
             ),
-            List.of()
+            List.of(),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -303,7 +311,8 @@ class JavaCodeGeneratorTest {
             List.of(
                 new QueryParameter(1, "id", ColumnType.BIGINT),
                 new QueryParameter(2, "name", ColumnType.VARCHAR)
-            )
+            ),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -329,7 +338,8 @@ class JavaCodeGeneratorTest {
             ),
             List.of(
                 new QueryParameter(1, "id", ColumnType.BIGINT)
-            )
+            ),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -352,7 +362,8 @@ class JavaCodeGeneratorTest {
             List.of(
                 new QueryColumn("id", ColumnType.BIGINT, false)
             ),
-            List.of()
+            List.of(),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -400,7 +411,8 @@ class JavaCodeGeneratorTest {
                 new QueryColumn("id", ColumnType.BIGINT, false),
                 new QueryColumn("nickname", ColumnType.VARCHAR, true)
             ),
-            List.of()
+            List.of(),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -466,7 +478,8 @@ class JavaCodeGeneratorTest {
             List.of(
                 new QueryColumn("id", ColumnType.BIGINT, false)
             ),
-            List.of()
+            List.of(),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -493,7 +506,8 @@ class JavaCodeGeneratorTest {
                     true
                 )
             ),
-            List.of()
+            List.of(),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -520,7 +534,8 @@ class JavaCodeGeneratorTest {
                     false
                 )
             ),
-            List.of()
+            List.of(),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -563,7 +578,8 @@ class JavaCodeGeneratorTest {
                     "createdAt",
                     ColumnType.TIMESTAMP_WITH_TIME_ZONE
                 )
-            )
+            ),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -609,7 +625,8 @@ class JavaCodeGeneratorTest {
                     "createdAt",
                     ColumnType.TIMESTAMP
                 )
-            )
+            ),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -642,7 +659,8 @@ class JavaCodeGeneratorTest {
                     "updatedAt",
                     ColumnType.TIMESTAMP
                 )
-            )
+            ),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -677,7 +695,8 @@ class JavaCodeGeneratorTest {
                     false
                 )
             ),
-            List.of()
+            List.of(),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -710,7 +729,8 @@ class JavaCodeGeneratorTest {
                     "id",
                     ColumnType.BIGINT
                 )
-            )
+            ),
+            null
         );
 
         String source = generate(query).content();
@@ -757,7 +777,8 @@ class JavaCodeGeneratorTest {
                     "created_at",
                     ColumnType.TIMESTAMP
                 )
-            )
+            ),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -822,7 +843,8 @@ class JavaCodeGeneratorTest {
                     true
                 )
             ),
-            List.of()
+            List.of(),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -849,7 +871,8 @@ class JavaCodeGeneratorTest {
                     true
                 )
             ),
-            List.of()
+            List.of(),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -874,7 +897,8 @@ class JavaCodeGeneratorTest {
                     false
                 )
             ),
-            List.of()
+            List.of(),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -898,7 +922,8 @@ class JavaCodeGeneratorTest {
             List.of(
                 new QueryParameter(1, "id", ColumnType.BIGINT),
                 new QueryParameter(2, "id", ColumnType.BIGINT)
-            )
+            ),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -925,7 +950,8 @@ class JavaCodeGeneratorTest {
                 new QueryColumn("created_at", ColumnType.TIMESTAMP, true),
                 new QueryColumn("balance", ColumnType.DECIMAL, true)
             ),
-            List.of()
+            List.of(),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -987,7 +1013,8 @@ class JavaCodeGeneratorTest {
                 new QueryColumn("name", ColumnType.VARCHAR, true),
                 new QueryColumn("id", ColumnType.BIGINT, false)
             ),
-            List.of()
+            List.of(),
+            null
         );
 
         String source = generate(query).content();
@@ -1011,7 +1038,8 @@ class JavaCodeGeneratorTest {
                 new QueryColumn("id", ColumnType.BIGINT, false),
                 new QueryColumn("name", ColumnType.VARCHAR, true)
             ),
-            List.of()
+            List.of(),
+            null
         );
 
         String source = generate(query).content();
@@ -1050,7 +1078,8 @@ class JavaCodeGeneratorTest {
             SQL,
             List.of(),
             List.of(),
-            List.of()
+            List.of(),
+            null
         );
 
         String source = generate(query).content();
@@ -1071,7 +1100,8 @@ class JavaCodeGeneratorTest {
             SQL,
             List.of(),
             List.of(),
-            List.of()
+            List.of(),
+            null
         );
 
         String source = generate(query).content();
@@ -1092,7 +1122,8 @@ class JavaCodeGeneratorTest {
             SQL,
             List.of(),
             List.of(),
-            List.of()
+            List.of(),
+            null
         );
 
         String source = generate(query).content();
@@ -1140,7 +1171,8 @@ class JavaCodeGeneratorTest {
                     "id",
                     ColumnType.BIGINT
                 )
-            )
+            ),
+            null
         );
 
         String source = generate(query).content();
@@ -1212,7 +1244,8 @@ class JavaCodeGeneratorTest {
                     "active",
                     ColumnType.BOOLEAN
                 )
-            )
+            ),
+            null
         );
 
         String source = generate(query).content();
@@ -1264,7 +1297,8 @@ class JavaCodeGeneratorTest {
                 new QueryParameter(1, "active", ColumnType.BOOLEAN),
                 new QueryParameter(2, "id", ColumnType.BIGINT),
                 new QueryParameter(3, "name", ColumnType.VARCHAR)
-            )
+            ),
+            null
         );
 
         String source = generate(query).content();
@@ -1296,7 +1330,8 @@ class JavaCodeGeneratorTest {
             List.of(
                 new QueryParameter(1, "id", ColumnType.BIGINT),
                 new QueryParameter(2, "active", ColumnType.BOOLEAN)
-            )
+            ),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -1336,7 +1371,8 @@ class JavaCodeGeneratorTest {
             List.of(
                 new QueryParameter(1, "id", ColumnType.BIGINT),
                 new QueryParameter(2, "name", ColumnType.VARCHAR)
-            )
+            ),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -1369,7 +1405,8 @@ class JavaCodeGeneratorTest {
                 new QueryColumn("id", ColumnType.BIGINT, false),
                 new QueryColumn("name", ColumnType.VARCHAR, true)
             ),
-            List.of()
+            List.of(),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -1403,7 +1440,8 @@ class JavaCodeGeneratorTest {
             List.of(
                 new QueryParameter(1, "id", ColumnType.BIGINT),
                 new QueryParameter(2, "name", ColumnType.VARCHAR)
-            )
+            ),
+            null
         );
 
         GeneratedFile file = generate(query);
@@ -1474,7 +1512,8 @@ class JavaCodeGeneratorTest {
                 new QueryColumn("id", ColumnType.BIGINT, false),
                 new QueryColumn("name", ColumnType.VARCHAR, true)
             ),
-            List.of(new QueryParameter(1, "name", ColumnType.VARCHAR))
+            List.of(new QueryParameter(1, "name", ColumnType.VARCHAR)),
+            null
         );
 
         QueryModel getUser = new QueryModel(
@@ -1484,7 +1523,8 @@ class JavaCodeGeneratorTest {
             "SELECT id FROM users WHERE id = ?",
             List.of(1),
             List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
-            List.of(new QueryParameter(1, "id", ColumnType.BIGINT))
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            null
         );
 
         QueryModel listUsers = new QueryModel(
@@ -1497,7 +1537,8 @@ class JavaCodeGeneratorTest {
                 new QueryColumn("id", ColumnType.BIGINT, false),
                 new QueryColumn("birth_date", ColumnType.DATE, true)
             ),
-            List.of()
+            List.of(),
+            null
         );
 
         QueryModel deleteUser = new QueryModel(
@@ -1507,7 +1548,8 @@ class JavaCodeGeneratorTest {
             "DELETE FROM users WHERE id = ?",
             List.of(1),
             List.of(),
-            List.of(new QueryParameter(1, "id", ColumnType.BIGINT))
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            null
         );
 
         GeneratedFile file = codeGenerator.generate(
@@ -1583,6 +1625,243 @@ class JavaCodeGeneratorTest {
         assertCompiles(file);
     }
 
+    /**
+     * Every query that returns one complete row of a table returns the
+     * repository's single row record, generated once after the constructor with
+     * its own mapper.
+     */
+    @Test
+    void shouldShareOneRowRecordAcrossFullRowQueriesOfOneTable() throws IOException {
+        List<QueryColumn> columns = List.of(
+            new QueryColumn("id", ColumnType.BIGINT, false),
+            new QueryColumn("name", ColumnType.VARCHAR, true),
+            new QueryColumn("created_at", ColumnType.TIMESTAMP, true)
+        );
+
+        QueryModel createUser = new QueryModel(
+            "CreateUser",
+            QueryType.ONE,
+            "users",
+            "INSERT INTO users (name) VALUES (?) RETURNING *",
+            List.of(1),
+            columns,
+            List.of(new QueryParameter(1, "name", ColumnType.VARCHAR)),
+            "users"
+        );
+
+        QueryModel getUser = new QueryModel(
+            "GetUser",
+            QueryType.ONE,
+            "users",
+            "SELECT * FROM users WHERE id = ?",
+            List.of(1),
+            columns,
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            "users"
+        );
+
+        QueryModel listUsers = new QueryModel(
+            "ListUsers",
+            QueryType.MANY,
+            "users",
+            "SELECT u.* FROM users u",
+            List.of(),
+            columns,
+            List.of(),
+            "users"
+        );
+
+        GeneratedFile file = codeGenerator.generate(
+            new QueryGroupModel(
+                GROUP,
+                List.of(createUser, getUser, listUsers)
+            )
+        );
+
+        String source = file.content();
+
+        assertEquals(
+            1,
+            source.lines()
+                .filter(line -> line.equals("    public record UsersRow("))
+                .count()
+        );
+
+        assertEquals(
+            1,
+            source.lines()
+                .filter(line -> line.contains("private static final RowMapper<UsersRow> usersRowMapper"))
+                .count()
+        );
+
+        assertFalse(source.contains("Result"));
+
+        assertTrue(source.contains("public UsersRow createUser(String name)"));
+        assertTrue(source.contains("public UsersRow getUser(Long id)"));
+        assertTrue(source.contains("public List<UsersRow> listUsers()"));
+
+        assertEquals(
+            3,
+            source.lines()
+                .filter(line -> line.strip().equals("usersRowMapper"))
+                .count()
+        );
+
+        assertTrue(source.contains("LocalDateTime createdAt"));
+        assertTrue(source.contains("resultSet.getObject(3, LocalDateTime.class)"));
+
+        assertTrue(
+            source.indexOf("public UsersRepository(QueryExecutor executor)") < source.indexOf("public record UsersRow(")
+        );
+
+        assertTrue(
+            source.indexOf("public record UsersRow(") < source.indexOf("public UsersRow createUser(")
+        );
+
+        assertCompiles(file);
+    }
+
+    @Test
+    void shouldGenerateOneRowRecordPerRowTable() throws IOException {
+        QueryModel getUser = new QueryModel(
+            "GetUser",
+            QueryType.ONE,
+            "users",
+            "SELECT * FROM users WHERE id = ?",
+            List.of(1),
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            "users"
+        );
+
+        QueryModel getOrder = new QueryModel(
+            "GetOrder",
+            QueryType.ONE,
+            "orders",
+            "SELECT * FROM orders WHERE id = ?",
+            List.of(1),
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("user_id", ColumnType.BIGINT, false)
+            ),
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            "orders"
+        );
+
+        GeneratedFile file = codeGenerator.generate(
+            new QueryGroupModel(
+                GROUP,
+                List.of(getUser, getOrder)
+            )
+        );
+
+        String source = file.content();
+
+        assertTrue(source.contains("public record UsersRow("));
+        assertTrue(source.contains("public record OrdersRow("));
+        assertTrue(source.contains("private static final RowMapper<UsersRow> usersRowMapper"));
+        assertTrue(source.contains("private static final RowMapper<OrdersRow> ordersRowMapper"));
+        assertTrue(source.contains("public UsersRow getUser(Long id)"));
+        assertTrue(source.contains("public OrdersRow getOrder(Long id)"));
+
+        assertTrue(source.indexOf("public record UsersRow(") < source.indexOf("public record OrdersRow("));
+
+        assertCompiles(file);
+    }
+
+    /**
+     * A row mapper yields to the mapper of a query that still generates its
+     * own, so the two fields stay distinct.
+     */
+    @Test
+    void shouldDisambiguateRowMapperFromQueryRowMapper() throws IOException {
+        QueryModel authors = new QueryModel(
+            "Authors",
+            QueryType.MANY,
+            "authors",
+            "SELECT id, name FROM authors",
+            List.of(),
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true)
+            ),
+            List.of(),
+            null
+        );
+
+        QueryModel getAuthor = new QueryModel(
+            "GetAuthor",
+            QueryType.ONE,
+            "authors",
+            "SELECT * FROM authors WHERE id = ?",
+            List.of(1),
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true),
+                new QueryColumn("bio", ColumnType.TEXT, true)
+            ),
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            "authors"
+        );
+
+        GeneratedFile file = codeGenerator.generate(
+            new QueryGroupModel(
+                GROUP,
+                List.of(authors, getAuthor)
+            )
+        );
+
+        String source = file.content();
+
+        assertTrue(source.contains("private static final RowMapper<AuthorsResult> authorsRowMapper ="));
+        assertTrue(source.contains("private static final RowMapper<AuthorsRow> authorsRowMapper1 ="));
+        assertTrue(source.contains("public List<AuthorsResult> authors()"));
+        assertTrue(source.contains("public AuthorsRow getAuthor(Long id)"));
+
+        assertCompiles(file);
+    }
+
+    @Test
+    void shouldRejectRowTypesThatAreEqualIgnoringCase() {
+        QueryModel getUserData = new QueryModel(
+            "GetUserData",
+            QueryType.ONE,
+            "user_data",
+            SQL,
+            List.of(),
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            List.of(),
+            "user_data"
+        );
+
+        QueryModel fetchUserdata = new QueryModel(
+            "FetchUserdata",
+            QueryType.ONE,
+            "userdata",
+            SQL,
+            List.of(),
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            List.of(),
+            "userdata"
+        );
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> codeGenerator.generate(
+                new QueryGroupModel(
+                    GROUP,
+                    List.of(getUserData, fetchUserdata)
+                )
+            )
+        );
+
+        assertEquals(
+            "Tables 'user_data' and 'userdata' generate row types that are equal ignoring case: "
+                + "UserDataRow and UserdataRow",
+            exception.getMessage()
+        );
+    }
+
     private GeneratedFile generate(QueryModel query) {
         return generate(codeGenerator, query);
     }
@@ -1607,7 +1886,8 @@ class JavaCodeGeneratorTest {
                 .map(QueryParameter::index)
                 .toList(),
             List.of(),
-            parameters
+            parameters,
+            null
         );
     }
 }
