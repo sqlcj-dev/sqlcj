@@ -6,6 +6,7 @@ import dev.sqlcj.schema.Schema;
 import dev.sqlcj.sql.ParsedSql;
 import dev.sqlcj.type.DefaultTypeResolver;
 import dev.sqlcj.type.TypeResolver;
+import net.sf.jsqlparser.expression.Alias;
 import net.sf.jsqlparser.expression.Expression;
 import net.sf.jsqlparser.expression.JdbcNamedParameter;
 import net.sf.jsqlparser.expression.JdbcParameter;
@@ -946,7 +947,7 @@ public final class QueryAnalyzer {
 
                 columns.add(
                     new QueryColumn(
-                        schemaColumn.name(),
+                        selectedColumnName(selectItem.getAlias(), schemaColumn),
                         schemaColumn.type(),
                         schemaColumn.nullable()
                     )
@@ -962,6 +963,17 @@ public final class QueryAnalyzer {
         }
 
         return columns;
+    }
+
+    /**
+     * Names a selected direct column after its explicit alias when the
+     * projection declares one, so the alias reaches Java naming. The column's
+     * type and nullability still come from the schema column.
+     */
+    private String selectedColumnName(Alias alias, dev.sqlcj.schema.Column schemaColumn) {
+        return alias == null
+            ? schemaColumn.name()
+            : alias.getUnquotedName();
     }
 
     /**

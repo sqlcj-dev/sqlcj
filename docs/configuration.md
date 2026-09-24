@@ -68,8 +68,10 @@ collisions that end a run.
 
 ### `sql[].name`
 
-`sql[].name` is required and is used unchanged as the prefix of the generated
-repository type name, so the entry `name: Author` generates `AuthorRepository`.
+`sql[].name` is required and names the generated repository type: the entry is
+converted to upper camel case and followed by `Repository`, so `name: Author`
+generates `AuthorRepository` and `name: author_admin` generates
+`AuthorAdminRepository`.
 
 It must be a single valid, non-blank Java identifier. A Java keyword, the
 literals `true`, `false`, and `null`, the identifier `_`, and a restricted
@@ -143,47 +145,77 @@ resolved inside its own repository.
 
 ## Generated Java Names
 
-The configured `sql[].name` and the SQL names inside the entry become Java
-identifiers. SQL identifier delimiters are removed before a name is analyzed, so
-the quoted column `"user id"` has the JDBC label `user id`, while executable SQL
-keeps the query exactly as written.
+The configured `sql[].name` and the SQL names inside the entry — query names,
+column names, and projection aliases — become conventional Java identifiers.
+SQL identifier delimiters are removed before a name is converted, so the quoted
+column `"user id"` has the JDBC label `user id` and generates the component
+`userId`, while executable SQL keeps the query exactly as written.
 
-The repository name is the configured `sql[].name` followed by `Repository`,
-without normalization, because configuration already requires a valid Java
-identifier.
+Every name is derived from its SQL spelling by one deterministic rule set that
+uses no locale-dependent case mapping and no configuration:
 
-A query or column name that is already a valid, non-reserved Java identifier
-keeps its spelling:
+1. The SQL name is split into words at every character that is not a letter or
+   a digit, so `get_author`, `Get-User`, and `user id` have two words each.
+   There is no split inside a word, so `GetAuthor` and `HTTPStatus` are one
+   word.
+2. A word written without a lower-case letter is lower-cased, so the acronyms
+   `ID` and `URL` become the words `id` and `url`. Every other word keeps its
+   spelling.
+3. A type name is upper camel case: the first character of each word is
+   upper-cased and the words are joined. `authors` becomes `Authors`,
+   `get_author` and `GetAuthor` both become `GetAuthor`, and `user_ID` becomes
+   `UserId`.
+4. A method, record component, or parameter name is lower camel case: the upper
+   camel form's leading run of upper-case letters is lower-cased. A run of two
+   or more letters that is followed by a lower-case letter keeps its last letter
+   upper-case, because that letter starts the next word. So `created_at` becomes
+   `createdAt`, `GetAuthor` becomes `getAuthor`, `HTTPStatus` becomes
+   `httpStatus`, `HTTP2Status` becomes `http2Status`, and `GetHTTPStatus`
+   becomes `getHTTPStatus`.
+5. A name that would start with a digit is prefixed with `_`, so the query
+   `1st_query` generates the result record `_1stQueryResult`.
+6. A SQL name with no letter and no digit at all, such as `_`, `***`, or `$`,
+   has no Java name and ends the run:
 
-- a query named `GetUser` generates the result record `GetUserResult` and the
-  method `getUser`,
-- a column named `created_at` generates the record component `created_at`.
+   ```text
+   sqlcj: Invalid query group 'User' in /home/dev/project/sql/queries.sql: SQL name '***' of query 'ListUsers' has no letter or digit to generate a Java name from
+   ```
 
-Any other name is normalized deterministically:
+The rules are applied as follows:
 
-- each maximal run of characters that cannot appear in a Java identifier becomes
-  a single `_`, so `Get-User` and `Get*/User` both generate the result record
-  `Get_UserResult`,
-- a leading `_` is added when the first character cannot start an identifier, so
-  `1stQuery` generates `_1stQueryResult`,
-- a trailing `_` is added to a Java keyword, to `true`, `false`, `null`, and to
-  `_`, so a column named `class` generates the component `class_`.
+- the repository type is the upper camel form of `sql[].name` followed by
+  `Repository`, so `author_admin` generates `AuthorAdminRepository`,
+- a result record is the upper camel form of the query name followed by
+  `Result`, so `get_author` generates `GetAuthorResult`,
+- a method is the lower camel form of the query name, so `get_author` generates
+  `getAuthor`,
+- a row-mapper field is the method name followed by `RowMapper`,
+- record components and method parameters are the lower camel form of the column
+  name or projection alias, so `created_at` generates `createdAt`.
 
-Generated names also avoid names that the generated source already uses:
+Generated names also avoid names that Java or the generated source already uses:
 
-- the generated method name keeps the lower-initial rule and avoids Java
-  keywords and inherited `Object` method names, so a query named `Class`
-  generates the record `ClassResult` and the method `class_`,
+- a method, record component, or parameter that would be a Java keyword or one
+  of the literals `true`, `false`, and `null` is suffixed with `_`, so a query
+  named `Class` generates the record `ClassResult` and the method `class_`, and
+  a column named `class` generates the component `class_`,
+- a method name also avoids the inherited `Object` method names, so a query
+  named `ToString` generates the method `toString_`,
 - record components avoid inherited `Object` method names,
 - method parameters avoid the generator-owned name `executor` and the row-mapper
-  field names of the repository, which are the method name followed by
-  `RowMapper`.
+  field names of the repository.
 
 Method parameters and record components are disambiguated inside their own
 generated method or record, in logical parameter order and selected-column
 order, using the suffixes `1`, `2`, and so on. Two parameters resolved from the
-column `id` become `id1` and `id2`, and the columns `user id` and `user-id`
-become the components `user_id1` and `user_id2`.
+column `id` become `id1` and `id2`; the columns `user id` and `user-id` both
+convert to `userId` and become the components `userId1` and `userId2`; and a
+component that would be an inherited `Object` method name, such as `hashCode`,
+becomes `hashCode1`.
+
+A projection alias is the name of its result component, so
+`SELECT u.id AS user_id, p.id AS profile_id` generates the components `userId`
+and `profileId` instead of two disambiguated `id` components.
 
 The generated row mapper reads each result column by its one-based position in
 the selected-column list, so renaming a component never changes which column it
@@ -197,7 +229,7 @@ of being renamed, because a repository method is a name the application calls.
 The diagnostic names both queries:
 
 ```text
-sqlcj: Invalid query group 'User' in /home/dev/project/sql/queries.sql: Queries 'Get.User' and 'Get-User' generate the same repository method 'get_User'
+sqlcj: Invalid query group 'User' in /home/dev/project/sql/queries.sql: Queries 'get_author' and 'GetAuthor' generate the same repository method 'getAuthor'
 ```
 
 Two queries of one entry whose nested result types differ only by case are
@@ -205,18 +237,20 @@ rejected for the same reason, because those class files are one path on a
 case-insensitive filesystem:
 
 ```text
-sqlcj: Invalid query group 'User' in /home/dev/project/sql/queries.sql: Queries 'GetUser' and 'getuser' generate result types that differ only by case: GetUserResult and getuserResult
+sqlcj: Invalid query group 'User' in /home/dev/project/sql/queries.sql: Queries 'GetUser' and 'getuser' generate result types that differ only by case: GetUserResult and GetuserResult
 ```
 
 ### Generated path collisions
 
 Two entries whose repository files resolve to the same path, or to paths that
 differ only by case and are therefore not portable, are rejected before any file
-of the run is written, so existing output is not overwritten:
+of the run is written, so existing output is not overwritten. Two entry names
+that differ only by the case of their first character, such as `User` and
+`user`, generate one repository name and collide as the same path:
 
 ```text
-sqlcj: Duplicate generated file for repositories 'User' and 'User': generated/UserRepository.java
-sqlcj: Generated file paths for repositories 'User' and 'user' differ only by case: generated/UserRepository.java and generated/userRepository.java
+sqlcj: Duplicate generated file for repositories 'User' and 'user': generated/UserRepository.java
+sqlcj: Generated file paths for repositories 'UserData' and 'Userdata' differ only by case: generated/UserDataRepository.java and generated/UserdataRepository.java
 ```
 
 ## Diagnostics
