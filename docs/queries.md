@@ -87,8 +87,10 @@ configuration entry.
   unknown column is rejected.
 - A result expression that is not a direct column or a wildcard, such as a
   function call, an arithmetic expression, or a literal, is rejected.
-- Result aliases are not supported. `SELECT id AS author_id` is accepted, but
-  the alias is ignored: the result component is still named after the column.
+- An explicit alias names the result column, so `SELECT id AS author_id`
+  generates the record component `authorId` while the component's type and
+  nullability still come from the column. sqlcj itself resolves an alias only in
+  the projection; every other clause reaches the database as written.
 
 ### Predicates
 
@@ -209,11 +211,13 @@ that repository; sqlcj never generates a class per query.
 
 - The repository has one `dev.sqlcj.runtime.QueryExecutor` field and one
   constructor taking that executor.
-- Methods appear in query-source order. A method name is the query name with a
-  lower-case first character.
+- Methods appear in query-source order. A method name is the lower camel form
+  of the query name, as in `get_author` and `GetAuthor` to `getAuthor`.
 - A `:one` or `:many` query also generates a nested `public record` named
-  `<QueryName>Result` whose components follow the selected-column order, plus a
-  private `RowMapper` field that reads each column by its one-based position.
+  `<QueryName>Result` in upper camel case, whose components follow the
+  selected-column order and are named after each column's projection alias or
+  column name, plus a private `RowMapper` field that reads each column by its
+  one-based position.
 - A `:exec` query generates no result record and returns `int`.
 - Generated source imports only `dev.sqlcj.runtime.QueryExecutor`,
   `dev.sqlcj.runtime.RowMapper`, `java.util.List`, and the JDK types of the
@@ -286,11 +290,12 @@ AuthorRepository authors = new AuthorRepository(new JdbcQueryExecutor(dataSource
 AuthorRepository.GetAuthorResult author = authors.getAuthor(1L);
 ```
 
-A query name, column name, or parameter name that is not already a valid Java
-identifier is normalized deterministically, and names that would collide inside
-one generated repository are disambiguated in their SQL order. Those rules, the
-rejection of two queries of one entry that generate the same method, and the
-rejection of two entries whose repository files would collide, are documented in
+A query name, projection alias, column name, and parameter name becomes a
+conventional Java name by one deterministic camel-case rule set, and names that
+would collide inside one generated repository are disambiguated in their SQL
+order. Those rules, the rejection of two queries of one entry that generate the
+same method, and the rejection of two entries whose repository files would
+collide, are documented in
 [Generated Java Names](configuration.md#generated-java-names).
 
 The generated repositories are executed through
@@ -337,7 +342,6 @@ models nor rejects them, so a statement that uses one may still compile while
 the generated Java describes only the part sqlcj did analyze. Do not rely on
 them:
 
-- result aliases, which are ignored,
 - `DISTINCT`, `GROUP BY`, and `HAVING`,
 - predicate forms other than the listed comparisons, `AND`/`OR`, and fixed `IN`
   lists, such as `IS NULL`, `LIKE` with a literal, or `IN` with a subquery,
@@ -380,6 +384,8 @@ Reads:
 - `QueryAnalyzerTest.shouldAnalyzeSelectWithExplicitColumns`,
   `QueryAnalyzerTest.shouldResolveAllColumns`,
   `QueryAnalyzerTest.shouldAnalyzeAliasedSingleTableSelect`,
+  `QueryAnalyzerTest.shouldNameSelectedColumnAfterItsAlias`,
+  `QueryAnalyzerTest.shouldNameJoinedSelectedColumnsAfterTheirAliases`,
   `QueryAnalyzerTest.shouldAnalyzeSingleInnerJoin`,
   `QueryAnalyzerTest.shouldExpandAllColumnsAcrossJoinedSourcesInOrder`,
   `QueryAnalyzerTest.shouldExpandQualifiedAllColumnsForOneSource`,
@@ -391,6 +397,7 @@ Reads:
   the accepted read shapes.
 - `SqlcjCompilerIntegrationTest.shouldExecuteGeneratedAliasedQualifiedQuery`,
   `SqlcjCompilerIntegrationTest.shouldExecuteGeneratedJoinQueryWithDuplicateColumnNames`,
+  `SqlcjCompilerIntegrationTest.shouldExecuteGeneratedJoinQueryWithProjectionAliases`,
   and `SqlcjCompilerIntegrationTest.shouldExecuteGeneratedMultipleJoinQuery`
   compile and execute them.
 - `PostgresIntegrationTest.shouldExecuteGeneratedOneQueryAgainstPostgres` and
@@ -436,6 +443,9 @@ Parameters:
 
 Generated Java:
 
+- `JavaNamesTest` covers the camel-case naming rules, the acronym, quoted-name,
+  keyword, and digit-initial cases, the disambiguation suffixes, and the
+  rejection of a SQL name without a letter or digit.
 - `JavaCodeGeneratorTest` covers the generated repository, its single executor
   field and constructor, the nested result records and row mappers, method
   signatures, and compilation of the generated source.
