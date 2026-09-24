@@ -67,6 +67,9 @@ class PostgresIntegrationTest {
      */
     private static final String REQUIRE_DOCKER_PROPERTY = "sqlcj.test.requireDocker";
 
+    /** The configured query-group name, which generates {@code UsersRepository}. */
+    private static final String GROUP = "Users";
+
     private static final String SCHEMA = """
         CREATE TABLE users
         (
@@ -222,15 +225,15 @@ class PostgresIntegrationTest {
             """);
 
         try (URLClassLoader classLoader = classLoader(classesDirectory)) {
-            Object query = newQuery(classLoader, "GetUser");
+            Object repository = newRepository(classLoader);
 
-            Method method = query.getClass().getMethod(
+            Method method = repository.getClass().getMethod(
                 "getUser",
                 Long.class,
                 Boolean.class
             );
 
-            Object result = method.invoke(query, 1L, Boolean.TRUE);
+            Object result = method.invoke(repository, 1L, Boolean.TRUE);
 
             assertNotNull(result);
 
@@ -287,14 +290,14 @@ class PostgresIntegrationTest {
             """);
 
         try (URLClassLoader classLoader = classLoader(classesDirectory)) {
-            Object query = newQuery(classLoader, "ListUsers");
+            Object repository = newRepository(classLoader);
 
-            Method method = query.getClass().getMethod(
+            Method method = repository.getClass().getMethod(
                 "listUsers",
                 Boolean.class
             );
 
-            Object result = method.invoke(query, Boolean.TRUE);
+            Object result = method.invoke(repository, Boolean.TRUE);
 
             assertInstanceOf(List.class, result);
 
@@ -327,9 +330,9 @@ class PostgresIntegrationTest {
             """);
 
         try (URLClassLoader classLoader = classLoader(classesDirectory)) {
-            Object insert = newQuery(classLoader, "InsertUser");
+            Object repository = newRepository(classLoader);
 
-            Method insertMethod = insert.getClass().getMethod(
+            Method insertMethod = repository.getClass().getMethod(
                 "insertUser",
                 Long.class,
                 Integer.class,
@@ -340,7 +343,7 @@ class PostgresIntegrationTest {
             );
 
             Object affectedRows = insertMethod.invoke(
-                insert,
+                repository,
                 5L,
                 42,
                 "Alice",
@@ -351,11 +354,9 @@ class PostgresIntegrationTest {
 
             assertEquals(1, affectedRows);
 
-            Object query = newQuery(classLoader, "GetUser");
+            Method queryMethod = repository.getClass().getMethod("getUser", Long.class);
 
-            Method queryMethod = query.getClass().getMethod("getUser", Long.class);
-
-            Object result = queryMethod.invoke(query, 5L);
+            Object result = queryMethod.invoke(repository, 5L);
 
             assertNotNull(result);
 
@@ -394,9 +395,9 @@ class PostgresIntegrationTest {
             """);
 
         try (URLClassLoader classLoader = classLoader(classesDirectory)) {
-            Object insert = newQuery(classLoader, "InsertUser");
+            Object repository = newRepository(classLoader);
 
-            Method insertMethod = insert.getClass().getMethod(
+            Method insertMethod = repository.getClass().getMethod(
                 "insertUser",
                 Long.class,
                 Integer.class,
@@ -412,7 +413,7 @@ class PostgresIntegrationTest {
             );
 
             Object affectedRows = insertMethod.invoke(
-                insert,
+                repository,
                 6L,
                 42,
                 null,
@@ -428,11 +429,9 @@ class PostgresIntegrationTest {
 
             assertEquals(1, affectedRows);
 
-            Object query = newQuery(classLoader, "GetUser");
+            Method queryMethod = repository.getClass().getMethod("getUser", Long.class);
 
-            Method queryMethod = query.getClass().getMethod("getUser", Long.class);
-
-            Object result = queryMethod.invoke(query, 6L);
+            Object result = queryMethod.invoke(repository, 6L);
 
             assertNotNull(result);
 
@@ -472,9 +471,9 @@ class PostgresIntegrationTest {
             """);
 
         try (URLClassLoader classLoader = classLoader(classesDirectory)) {
-            Object insert = newQuery(classLoader, "InsertUser");
+            Object repository = newRepository(classLoader);
 
-            Method insertMethod = insert.getClass().getMethod(
+            Method insertMethod = repository.getClass().getMethod(
                 "insertUser",
                 Long.class,
                 Integer.class,
@@ -485,7 +484,7 @@ class PostgresIntegrationTest {
             );
 
             Object affectedRows = insertMethod.invoke(
-                insert,
+                repository,
                 7L,
                 42,
                 101,
@@ -496,11 +495,9 @@ class PostgresIntegrationTest {
 
             assertEquals(1, affectedRows);
 
-            Object query = newQuery(classLoader, "GetUser");
+            Method queryMethod = repository.getClass().getMethod("getUser", Long.class);
 
-            Method queryMethod = query.getClass().getMethod("getUser", Long.class);
-
-            Object result = queryMethod.invoke(query, 7L);
+            Object result = queryMethod.invoke(repository, 7L);
 
             assertNotNull(result);
 
@@ -547,11 +544,11 @@ class PostgresIntegrationTest {
         execute("INSERT INTO customer_orders (id, customer_id) VALUES (10, 1)");
 
         try (URLClassLoader classLoader = classLoader(classesDirectory)) {
-            Object query = newQuery(classLoader, "GetCustomerOrder");
+            Object repository = newRepository(classLoader);
 
-            Method method = query.getClass().getMethod("getCustomerOrder", Long.class);
+            Method method = repository.getClass().getMethod("getCustomerOrder", Long.class);
 
-            Object result = method.invoke(query, 10L);
+            Object result = method.invoke(repository, 10L);
 
             assertNotNull(result);
 
@@ -587,32 +584,30 @@ class PostgresIntegrationTest {
             """);
 
         try (URLClassLoader classLoader = classLoader(classesDirectory)) {
-            Object insertSerialId = newQuery(classLoader, "InsertUserReturningSerialId");
+            Object repository = newRepository(classLoader);
 
-            Method serialIdMethod = insertSerialId.getClass().getMethod(
+            Method serialIdMethod = repository.getClass().getMethod(
                 "insertUserReturningSerialId",
                 Long.class,
                 Integer.class,
                 String.class
             );
 
-            Object serialIdResult = serialIdMethod.invoke(insertSerialId, 1L, 42, "Alice");
+            Object serialIdResult = serialIdMethod.invoke(repository, 1L, 42, "Alice");
 
             assertNotNull(serialIdResult);
 
             assertEquals(List.of("serial_id"), recordComponentNames(serialIdResult));
             assertEquals(1, component(serialIdResult, "serial_id"));
 
-            Object insertRow = newQuery(classLoader, "InsertUserReturningRow");
-
-            Method rowMethod = insertRow.getClass().getMethod(
+            Method rowMethod = repository.getClass().getMethod(
                 "insertUserReturningRow",
                 Long.class,
                 Integer.class,
                 String.class
             );
 
-            Object row = rowMethod.invoke(insertRow, 2L, 43, "Bob");
+            Object row = rowMethod.invoke(repository, 2L, 43, "Bob");
 
             assertNotNull(row);
 
@@ -669,16 +664,16 @@ class PostgresIntegrationTest {
             """);
 
         try (URLClassLoader classLoader = classLoader(classesDirectory)) {
-            Object update = newQuery(classLoader, "RenameUser");
+            Object repository = newRepository(classLoader);
 
-            Method method = update.getClass().getMethod(
+            Method method = repository.getClass().getMethod(
                 "renameUser",
                 Long.class,
                 String.class,
                 Integer.class
             );
 
-            Object result = method.invoke(update, 1L, "Renamed", 42);
+            Object result = method.invoke(repository, 1L, "Renamed", 42);
 
             assertNotNull(result);
 
@@ -692,7 +687,7 @@ class PostgresIntegrationTest {
             assertEquals("Renamed", component(result, "name"));
             assertNull(component(result, "score"));
 
-            assertNull(method.invoke(update, 404L, "Missing", 42));
+            assertNull(method.invoke(repository, 404L, "Missing", 42));
         }
     }
 
@@ -720,16 +715,16 @@ class PostgresIntegrationTest {
             """);
 
         try (URLClassLoader classLoader = classLoader(classesDirectory)) {
-            Object delete = newQuery(classLoader, "DeleteUsersByActive");
+            Object repository = newRepository(classLoader);
 
-            Method method = delete.getClass().getMethod(
+            Method method = repository.getClass().getMethod(
                 "deleteUsersByActive",
                 Boolean.class
             );
 
             List<?> deleted = assertInstanceOf(
                 List.class,
-                method.invoke(delete, Boolean.TRUE)
+                method.invoke(repository, Boolean.TRUE)
             );
 
             assertEquals(2, deleted.size());
@@ -760,7 +755,7 @@ class PostgresIntegrationTest {
 
             assertEquals(
                 List.of(),
-                method.invoke(delete, Boolean.TRUE)
+                method.invoke(repository, Boolean.TRUE)
             );
         }
     }
@@ -871,12 +866,12 @@ class PostgresIntegrationTest {
         Integer code,
         String name
     ) throws Exception {
-        Object insert = newQuery(classLoader, "InsertUser", executor);
+        Object repository = newRepository(classLoader, executor);
 
-        return insert
+        return repository
             .getClass()
             .getMethod("insertUser", Long.class, Integer.class, String.class)
-            .invoke(insert, id, code, name);
+            .invoke(repository, id, code, name);
     }
 
     private Object insertUserReturningRow(
@@ -886,12 +881,12 @@ class PostgresIntegrationTest {
         Integer code,
         String name
     ) throws Exception {
-        Object insert = newQuery(classLoader, "InsertUserReturningRow", executor);
+        Object repository = newRepository(classLoader, executor);
 
-        return insert
+        return repository
             .getClass()
             .getMethod("insertUserReturningRow", Long.class, Integer.class, String.class)
-            .invoke(insert, id, code, name);
+            .invoke(repository, id, code, name);
     }
 
     private List<Object> listUserNames(URLClassLoader classLoader) throws Exception {
@@ -902,12 +897,12 @@ class PostgresIntegrationTest {
         URLClassLoader classLoader,
         QueryExecutor executor
     ) throws Exception {
-        Object query = newQuery(classLoader, "ListUserNames", executor);
+        Object repository = newRepository(classLoader, executor);
 
-        List<?> rows = (List<?>) query
+        List<?> rows = (List<?>) repository
             .getClass()
             .getMethod("listUserNames")
-            .invoke(query);
+            .invoke(repository);
 
         List<Object> names = new ArrayList<>();
 
@@ -938,6 +933,7 @@ class PostgresIntegrationTest {
         Config config = new Config(
             List.of(
                 new SqlConfig(
+                    GROUP,
                     schemaFile.toString(),
                     queriesFile.toString()
                 )
@@ -991,17 +987,16 @@ class PostgresIntegrationTest {
         );
     }
 
-    private Object newQuery(URLClassLoader classLoader, String queryName) throws Exception {
-        return newQuery(classLoader, queryName, new JdbcQueryExecutor(dataSource));
+    private Object newRepository(URLClassLoader classLoader) throws Exception {
+        return newRepository(classLoader, new JdbcQueryExecutor(dataSource));
     }
 
-    private Object newQuery(
+    private Object newRepository(
         URLClassLoader classLoader,
-        String queryName,
         QueryExecutor executor
     ) throws Exception {
         Class<?> generatedClass = Class.forName(
-            "generated." + queryName,
+            "generated." + GROUP + "Repository",
             true,
             classLoader
         );

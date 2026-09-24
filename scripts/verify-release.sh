@@ -115,15 +115,18 @@ log "Generating sources with the packaged CLI"
 generated_root="${sample_dir}/target/generated-sources/sqlcj"
 generated_package="${generated_root}/com/example/app/db"
 
-for generated in CreateAuthor DeleteAuthor GetAuthor ListAuthors UpdateAuthorBio; do
-    [ -f "${generated_package}/${generated}.java" ] \
-        || fail "the expected generated source is missing: ${generated_package}/${generated}.java"
-done
+[ -f "${generated_package}/AuthorRepository.java" ] \
+    || fail "the expected generated source is missing: ${generated_package}/AuthorRepository.java"
 
 generated_count=$(find "${generated_root}" -type f -name '*.java' | wc -l)
 
-[ "${generated_count}" -eq 5 ] \
-    || fail "expected 5 generated sources but found ${generated_count}"
+[ "${generated_count}" -eq 1 ] \
+    || fail "expected 1 generated source but found ${generated_count}"
+
+for method in createAuthor getAuthor listAuthors updateAuthorBio deleteAuthor; do
+    grep -q " ${method}(" "${generated_package}/AuthorRepository.java" \
+        || fail "the generated repository is missing the ${method} method"
+done
 
 find "${generated_root}" -type f -name '*.java' | sort
 

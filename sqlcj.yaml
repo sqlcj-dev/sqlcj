@@ -1,7 +1,8 @@
 version: "1"
 
 sql:
-  - schema: schema.sql
+  - name: User
+    schema: schema.sql
     queries: queries.sql
 
 java:

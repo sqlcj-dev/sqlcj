@@ -1,6 +1,7 @@
 package dev.sqlcj.generator;
 
 import dev.sqlcj.analysis.QueryColumn;
+import dev.sqlcj.analysis.QueryGroupModel;
 import dev.sqlcj.analysis.QueryModel;
 import dev.sqlcj.analysis.QueryParameter;
 import dev.sqlcj.parser.QueryType;
@@ -33,14 +34,16 @@ class JavaCodeGeneratorNamingTest {
         FROM users
         """;
 
+    private static final String GROUP = "Users";
+
     private final CodeGenerator codeGenerator = new JavaCodeGenerator();
 
     @TempDir
     Path tempDir;
 
     @Test
-    void shouldGenerateKeywordSafeMethodForKeywordClassName() throws IOException {
-        GeneratedFile file = codeGenerator.generate(
+    void shouldGenerateKeywordSafeMethodForKeywordQueryName() throws IOException {
+        GeneratedFile file = generate(
             query(
                 "Class",
                 List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
@@ -50,9 +53,10 @@ class JavaCodeGeneratorNamingTest {
 
         String source = file.content();
 
-        assertEquals(Path.of("generated", "Class.java"), file.path());
-        assertTrue(source.contains("public final class Class {"));
-        assertTrue(source.contains("public Class(QueryExecutor executor)"));
+        assertEquals(Path.of("generated", "UsersRepository.java"), file.path());
+        assertTrue(source.contains("public final class UsersRepository {"));
+        assertTrue(source.contains("public UsersRepository(QueryExecutor executor)"));
+        assertTrue(source.contains("public record ClassResult("));
         assertTrue(source.contains("public List<ClassResult> class_()"));
 
         assertCompiles(file);
@@ -60,7 +64,7 @@ class JavaCodeGeneratorNamingTest {
 
     @Test
     void shouldNormalizeUnsafeQueryNameAndEscapeJavadoc() throws IOException {
-        GeneratedFile file = codeGenerator.generate(
+        GeneratedFile file = generate(
             query(
                 "Get*/User",
                 List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
@@ -70,9 +74,9 @@ class JavaCodeGeneratorNamingTest {
 
         String source = file.content();
 
-        assertEquals(Path.of("generated", "Get_User.java"), file.path());
-        assertTrue(source.contains("public final class Get_User {"));
-        assertTrue(source.contains("public Get_User(QueryExecutor executor)"));
+        assertEquals(Path.of("generated", "UsersRepository.java"), file.path());
+        assertTrue(source.contains("public final class UsersRepository {"));
+        assertTrue(source.contains("public record Get_UserResult("));
         assertTrue(source.contains("public List<Get_UserResult> get_User()"));
         assertTrue(source.contains("Query: Get*&#47;User"));
         assertFalse(source.contains("Query: Get*/User"));
@@ -81,8 +85,8 @@ class JavaCodeGeneratorNamingTest {
     }
 
     @Test
-    void shouldRenameClassConflictingWithImportedType() throws IOException {
-        GeneratedFile file = codeGenerator.generate(
+    void shouldGenerateResultTypeForQueryNamedLikeAnImportedType() throws IOException {
+        GeneratedFile file = generate(
             query(
                 "List",
                 List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
@@ -92,19 +96,19 @@ class JavaCodeGeneratorNamingTest {
 
         String source = file.content();
 
-        assertEquals(Path.of("generated", "List_.java"), file.path());
+        assertEquals(Path.of("generated", "UsersRepository.java"), file.path());
         assertTrue(source.contains("import java.util.List;"));
-        assertTrue(source.contains("public final class List_ {"));
-        assertTrue(source.contains("public record List_Result("));
-        assertTrue(source.contains("private static final RowMapper<List_Result> ROW_MAPPER ="));
-        assertTrue(source.contains("public List<List_Result> list_()"));
+        assertTrue(source.contains("public final class UsersRepository {"));
+        assertTrue(source.contains("public record ListResult("));
+        assertTrue(source.contains("private static final RowMapper<ListResult> listRowMapper ="));
+        assertTrue(source.contains("public List<ListResult> list()"));
 
         assertCompiles(file);
     }
 
     @Test
-    void shouldRenameClassConflictingWithImportedUuidType() throws IOException {
-        GeneratedFile file = codeGenerator.generate(
+    void shouldGenerateResultTypeForQueryNamedLikeAnImportedUuidType() throws IOException {
+        GeneratedFile file = generate(
             query(
                 "UUID",
                 List.of(new QueryColumn("external_id", ColumnType.UUID, true)),
@@ -114,10 +118,10 @@ class JavaCodeGeneratorNamingTest {
 
         String source = file.content();
 
-        assertEquals(Path.of("generated", "UUID_.java"), file.path());
+        assertEquals(Path.of("generated", "UsersRepository.java"), file.path());
         assertTrue(source.contains("import java.util.UUID;"));
-        assertTrue(source.contains("public final class UUID_ {"));
-        assertTrue(source.contains("public record UUID_Result("));
+        assertTrue(source.contains("public final class UsersRepository {"));
+        assertTrue(source.contains("public record UUIDResult("));
         assertTrue(source.contains("UUID external_id"));
         assertTrue(source.contains("resultSet.getObject(1, UUID.class)"));
 
@@ -126,7 +130,7 @@ class JavaCodeGeneratorNamingTest {
 
     @Test
     void shouldReadRenamedResultComponentsByProjectionPosition() throws IOException {
-        GeneratedFile file = codeGenerator.generate(
+        GeneratedFile file = generate(
             query(
                 "ListUsers",
                 List.of(
@@ -156,7 +160,7 @@ class JavaCodeGeneratorNamingTest {
 
     @Test
     void shouldReadQuotedSqlColumnByProjectionPosition() throws IOException {
-        GeneratedFile file = codeGenerator.generate(
+        GeneratedFile file = generate(
             query(
                 "ListUsers",
                 List.of(new QueryColumn("user\"id", ColumnType.VARCHAR, true)),
@@ -174,7 +178,7 @@ class JavaCodeGeneratorNamingTest {
 
     @Test
     void shouldUseResolvedParameterNamesInSignatureAndArguments() throws IOException {
-        GeneratedFile file = codeGenerator.generate(
+        GeneratedFile file = generate(
             query(
                 "FindUsers",
                 List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
@@ -216,7 +220,7 @@ class JavaCodeGeneratorNamingTest {
             List.of(new QueryParameter(1, "a\\q", ColumnType.VARCHAR))
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         assertTrue(file.content().contains("SELECT \"a\\\\q\""));
         assertTrue(file.content().contains("String a_q"));
@@ -240,7 +244,7 @@ class JavaCodeGeneratorNamingTest {
             List.of()
         );
 
-        GeneratedFile file = codeGenerator.generate(query);
+        GeneratedFile file = generate(query);
 
         assertCompiles(file);
 
@@ -305,6 +309,16 @@ class JavaCodeGeneratorNamingTest {
 
             return 0;
         }
+    }
+
+    /** Generates the repository of a single-query group. */
+    private GeneratedFile generate(QueryModel query) {
+        return codeGenerator.generate(
+            new QueryGroupModel(
+                GROUP,
+                List.of(query)
+            )
+        );
     }
 
     private QueryModel query(String name, List<QueryColumn> columns, List<QueryParameter> parameters) {

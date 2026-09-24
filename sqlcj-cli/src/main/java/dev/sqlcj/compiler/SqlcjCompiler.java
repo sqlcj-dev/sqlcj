@@ -1,6 +1,7 @@
 package dev.sqlcj.compiler;
 
 import dev.sqlcj.analysis.QueryAnalyzer;
+import dev.sqlcj.analysis.QueryGroupModel;
 import dev.sqlcj.analysis.QueryModel;
 import dev.sqlcj.config.Config;
 import dev.sqlcj.generator.CodeGenerator;
@@ -50,20 +51,23 @@ public final class SqlcjCompiler {
         }
     }
 
+    /** Generates one repository per configured query group. */
     private List<GeneratedFile> generate(List<Source> sources, CodeGenerator codeGenerator) {
         List<GeneratedFile> files = new ArrayList<>();
-        Map<String, GeneratedQuery> generatedQueries = new HashMap<>();
+        Map<String, GeneratedRepository> generatedRepositories = new HashMap<>();
 
         for (Source source : sources) {
             Schema schema = parseSchema(source);
 
-            for (Query query : source.queries()) {
-                GeneratedFile file = compileQuery(source, query, schema, codeGenerator);
+            GeneratedFile file = generateRepository(
+                source,
+                analyze(source, schema),
+                codeGenerator
+            );
 
-                checkGeneratedPath(query, file, generatedQueries);
+            checkGeneratedPath(source, file, generatedRepositories);
 
-                files.add(file);
-            }
+            files.add(file);
         }
 
         return files;
@@ -80,21 +84,26 @@ public final class SqlcjCompiler {
         }
     }
 
+    /** Analyzes every query of one group against that group's schema. */
+    private QueryGroupModel analyze(Source source, Schema schema) {
+        List<QueryModel> queries = new ArrayList<>(source.queries().size());
+
+        for (Query query : source.queries()) {
+            queries.add(analyzeQuery(source, query, schema));
+        }
+
+        return new QueryGroupModel(source.name(), List.copyOf(queries));
+    }
+
     /**
-     * Compiles one query, reporting a parse, analysis, or generation failure
-     * with the source, query, and header line it belongs to.
+     * Analyzes one query, reporting a parse or analysis failure with the
+     * source, query, and header line it belongs to.
      */
-    private GeneratedFile compileQuery(
-        Source source,
-        Query query,
-        Schema schema,
-        CodeGenerator codeGenerator
-    ) {
+    private QueryModel analyzeQuery(Source source, Query query, Schema schema) {
         try {
             ParsedSql parsedSql = sqlParser.parse(query.sql());
-            QueryModel model = queryAnalyzer.analyze(query, parsedSql, schema);
 
-            return codeGenerator.generate(model);
+            return queryAnalyzer.analyze(query, parsedSql, schema);
         } catch (RuntimeException e) {
             throw new CompilationException(
                 "Invalid query '%s' in %s at line %d: %s"
@@ -104,6 +113,26 @@ public final class SqlcjCompiler {
                         query.line(),
                         reason(e)
                     ),
+                e
+            );
+        }
+    }
+
+    /**
+     * Generates one group, reporting a generation failure such as a repeated
+     * repository method with the group and its query source.
+     */
+    private GeneratedFile generateRepository(
+        Source source,
+        QueryGroupModel group,
+        CodeGenerator codeGenerator
+    ) {
+        try {
+            return codeGenerator.generate(group);
+        } catch (RuntimeException e) {
+            throw new CompilationException(
+                "Invalid query group '%s' in %s: %s"
+                    .formatted(group.name(), source.queriesPath(), reason(e)),
                 e
             );
         }
@@ -128,20 +157,20 @@ public final class SqlcjCompiler {
      * already generated path before any file is written.
      */
     private void checkGeneratedPath(
-        Query query,
+        Source source,
         GeneratedFile file,
-        Map<String, GeneratedQuery> generatedQueries
+        Map<String, GeneratedRepository> generatedRepositories
     ) {
         String portabilityKey = file.path()
             .toString()
             .toLowerCase(Locale.ROOT);
 
-        GeneratedQuery generated = generatedQueries.get(portabilityKey);
+        GeneratedRepository generated = generatedRepositories.get(portabilityKey);
 
         if (generated == null) {
-            generatedQueries.put(
+            generatedRepositories.put(
                 portabilityKey,
-                new GeneratedQuery(query.name(), file.path())
+                new GeneratedRepository(source.name(), file.path())
             );
 
             return;
@@ -149,16 +178,16 @@ public final class SqlcjCompiler {
 
         if (generated.path().equals(file.path())) {
             throw new CompilationException(
-                "Duplicate generated file for queries '%s' and '%s': %s"
-                    .formatted(generated.queryName(), query.name(), file.path())
+                "Duplicate generated file for repositories '%s' and '%s': %s"
+                    .formatted(generated.groupName(), source.name(), file.path())
             );
         }
 
         throw new CompilationException(
-            "Generated file paths for queries '%s' and '%s' differ only by case: %s and %s"
+            "Generated file paths for repositories '%s' and '%s' differ only by case: %s and %s"
                 .formatted(
-                    generated.queryName(),
-                    query.name(),
+                    generated.groupName(),
+                    source.name(),
                     generated.path(),
                     file.path()
                 )
@@ -173,6 +202,6 @@ public final class SqlcjCompiler {
         }
     }
 
-    private record GeneratedQuery(String queryName, Path path) {
+    private record GeneratedRepository(String groupName, Path path) {
     }
 }

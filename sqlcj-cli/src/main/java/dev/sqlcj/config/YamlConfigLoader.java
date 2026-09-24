@@ -185,6 +185,7 @@ public class YamlConfigLoader implements ConfigLoader {
         List<SqlConfig> sql = config.sql().stream()
             .map(
                 entry -> new SqlConfig(
+                    entry.name(),
                     resolvePath(entry.schema(), baseDirectory),
                     resolvePath(entry.queries(), baseDirectory)
                 )

@@ -106,6 +106,7 @@ class SqlcjCompilerIntegrationTest {
         Config config = new Config(
             List.of(
                 new SqlConfig(
+                    "Users",
                     schemaFile.toString(),
                     queriesFile.toString()
                 )
@@ -120,52 +121,69 @@ class SqlcjCompilerIntegrationTest {
 
         compiler.compile(config);
 
-        Path getUserFile = generatedDirectory.resolve("generated/GetUser.java");
+        Path repositoryFile = generatedDirectory.resolve("generated/UsersRepository.java");
 
-        Path listUsersFile = generatedDirectory.resolve("generated/ListUsers.java");
+        assertTrue(Files.exists(repositoryFile));
 
-        Path findUsersFile = generatedDirectory.resolve("generated/FindUsers.java");
+        assertFalse(Files.exists(generatedDirectory.resolve("generated/GetUser.java")));
+        assertFalse(Files.exists(generatedDirectory.resolve("generated/ListUsers.java")));
+        assertFalse(Files.exists(generatedDirectory.resolve("generated/FindUsers.java")));
 
-        assertTrue(Files.exists(getUserFile));
-        assertTrue(Files.exists(listUsersFile));
+        String repository = Files.readString(repositoryFile);
 
-        String getUser = Files.readString(getUserFile);
-        assertTrue(getUser.contains("public final class GetUser"));
-        assertTrue(getUser.contains("import java.time.LocalDate;"));
-        assertTrue(getUser.contains("import java.time.LocalDateTime;"));
-        assertTrue(getUser.contains("import java.math.BigDecimal;"));
-        assertTrue(getUser.contains("public GetUserResult getUser(LocalDateTime created_at)"));
-        assertTrue(getUser.contains("Long id"));
-        assertTrue(getUser.contains("String name"));
-        assertTrue(getUser.contains("LocalDate birth_date"));
-        assertTrue(getUser.contains("LocalDateTime created_at"));
-        assertTrue(getUser.contains("BigDecimal balance"));
-        assertTrue(getUser.contains("private static final RowMapper<GetUserResult> ROW_MAPPER"));
-        assertTrue(getUser.contains("resultSet.getObject(1, Long.class)"));
-        assertTrue(getUser.contains("resultSet.getObject(2, String.class)"));
-        assertTrue(getUser.contains("resultSet.getObject(3, Boolean.class)"));
-        assertTrue(getUser.contains("resultSet.getObject(4, LocalDate.class)"));
-        assertTrue(getUser.contains("resultSet.getObject(5, LocalDateTime.class)"));
-        assertTrue(getUser.contains("resultSet.getObject(6, BigDecimal.class)"));
+        assertTrue(repository.contains("public final class UsersRepository"));
+        assertTrue(repository.contains("import java.time.LocalDate;"));
+        assertTrue(repository.contains("import java.time.LocalDateTime;"));
+        assertTrue(repository.contains("import java.math.BigDecimal;"));
+        assertTrue(repository.contains("import java.util.List;"));
 
-        String listUsers = Files.readString(listUsersFile);
-        assertTrue(listUsers.contains("public final class ListUsers"));
-        assertTrue(listUsers.contains("import java.util.List;"));
-        assertTrue(listUsers.contains("import java.time.LocalDate;"));
-        assertTrue(listUsers.contains("import java.time.LocalDateTime;"));
-        assertTrue(listUsers.contains("import java.math.BigDecimal;"));
-        assertTrue(listUsers.contains("public List<ListUsersResult> listUsers(LocalDateTime created_at)"));
+        assertEquals(
+            1,
+            repository.lines()
+                .filter(line -> line.equals("    private final QueryExecutor executor;"))
+                .count()
+        );
 
-        String findUsers = Files.readString(findUsersFile);
-        assertTrue(findUsers.contains("public final class FindUsers"));
-        assertTrue(findUsers.contains("import java.util.List;"));
+        assertEquals(
+            1,
+            repository.lines()
+                .filter(line -> line.contains("public UsersRepository(QueryExecutor executor)"))
+                .count()
+        );
+
+        assertTrue(repository.contains("public GetUserResult getUser(LocalDateTime created_at)"));
+        assertTrue(repository.contains("Long id"));
+        assertTrue(repository.contains("String name"));
+        assertTrue(repository.contains("LocalDate birth_date"));
+        assertTrue(repository.contains("LocalDateTime created_at"));
+        assertTrue(repository.contains("BigDecimal balance"));
+        assertTrue(repository.contains("private static final RowMapper<GetUserResult> getUserRowMapper"));
+        assertTrue(repository.contains("resultSet.getObject(1, Long.class)"));
+        assertTrue(repository.contains("resultSet.getObject(2, String.class)"));
+        assertTrue(repository.contains("resultSet.getObject(3, Boolean.class)"));
+        assertTrue(repository.contains("resultSet.getObject(4, LocalDate.class)"));
+        assertTrue(repository.contains("resultSet.getObject(5, LocalDateTime.class)"));
+        assertTrue(repository.contains("resultSet.getObject(6, BigDecimal.class)"));
+
+        assertTrue(repository.contains("public List<ListUsersResult> listUsers(LocalDateTime created_at)"));
+        assertTrue(repository.contains("private static final RowMapper<ListUsersResult> listUsersRowMapper"));
+
         assertTrue(
-            findUsers
+            repository
                 .contains("public List<FindUsersResult> findUsers(Long id1, Long id2, Boolean active, String name)")
         );
-        assertTrue(findUsers.contains("public record FindUsersResult("));
-        assertTrue(findUsers.contains("Long id"));
-        assertTrue(findUsers.contains("String name"));
+        assertTrue(repository.contains("public record FindUsersResult("));
+        assertTrue(repository.contains("private static final RowMapper<FindUsersResult> findUsersRowMapper"));
+
+        assertTrue(
+            repository.indexOf("public GetUserResult getUser(") < repository
+                .indexOf("public List<ListUsersResult> listUsers(")
+        );
+
+        assertTrue(
+            repository.indexOf("public List<ListUsersResult> listUsers(") < repository
+                .indexOf("public List<FindUsersResult> findUsers(")
+        );
 
         Files.createDirectories(classesDirectory);
 
@@ -183,28 +201,14 @@ class SqlcjCompilerIntegrationTest {
             classpath,
             "-d",
             classesDirectory.toString(),
-            getUserFile.toString(),
-            listUsersFile.toString(),
-            findUsersFile.toString()
+            repositoryFile.toString()
         );
 
         assertEquals(0, result);
 
         assertTrue(
             Files.exists(
-                classesDirectory.resolve("generated/GetUser.class")
-            )
-        );
-
-        assertTrue(
-            Files.exists(
-                classesDirectory.resolve("generated/ListUsers.class")
-            )
-        );
-
-        assertTrue(
-            Files.exists(
-                classesDirectory.resolve("generated/FindUsers.class")
+                classesDirectory.resolve("generated/UsersRepository.class")
             )
         );
     }
@@ -244,6 +248,7 @@ class SqlcjCompilerIntegrationTest {
         Config config = new Config(
             List.of(
                 new SqlConfig(
+                    "Users",
                     schemaFile.toString(),
                     queriesFile.toString()
                 )
@@ -258,9 +263,9 @@ class SqlcjCompilerIntegrationTest {
 
         compiler.compile(config);
 
-        Path getUserFile = generatedDirectory.resolve("generated/GetUser.java");
+        Path repositoryFile = generatedDirectory.resolve("generated/UsersRepository.java");
 
-        assertTrue(Files.exists(getUserFile));
+        assertTrue(Files.exists(repositoryFile));
 
         Files.createDirectories(classesDirectory);
 
@@ -278,7 +283,7 @@ class SqlcjCompilerIntegrationTest {
             classpath,
             "-d",
             classesDirectory.toString(),
-            getUserFile.toString()
+            repositoryFile.toString()
         );
 
         assertEquals(0, compilationResult);
@@ -322,7 +327,7 @@ class SqlcjCompilerIntegrationTest {
 
         try (URLClassLoader classLoader = new URLClassLoader(classpathUrls, getClass().getClassLoader())) {
             Class<?> generatedClass = Class.forName(
-                "generated.GetUser",
+                "generated.UsersRepository",
                 true,
                 classLoader
             );
@@ -404,6 +409,7 @@ class SqlcjCompilerIntegrationTest {
         Config config = new Config(
             List.of(
                 new SqlConfig(
+                    "Users",
                     schemaFile.toString(),
                     queriesFile.toString()
                 )
@@ -418,9 +424,9 @@ class SqlcjCompilerIntegrationTest {
 
         compiler.compile(config);
 
-        Path listActiveUsersFile = generatedDirectory.resolve("generated/ListActiveUsers.java");
+        Path repositoryFile = generatedDirectory.resolve("generated/UsersRepository.java");
 
-        assertTrue(Files.exists(listActiveUsersFile));
+        assertTrue(Files.exists(repositoryFile));
 
         Files.createDirectories(classesDirectory);
 
@@ -438,7 +444,7 @@ class SqlcjCompilerIntegrationTest {
             classpath,
             "-d",
             classesDirectory.toString(),
-            listActiveUsersFile.toString()
+            repositoryFile.toString()
         );
 
         assertEquals(0, compilationResult);
@@ -491,7 +497,7 @@ class SqlcjCompilerIntegrationTest {
             )
         ) {
             Class<?> generatedClass = Class.forName(
-                "generated.ListActiveUsers",
+                "generated.UsersRepository",
                 true,
                 classLoader
             );
@@ -563,11 +569,10 @@ class SqlcjCompilerIntegrationTest {
                 FROM users
                 WHERE active = $2
                   AND id = $1;
-                """,
-            "FindUser"
+                """
         );
 
-        String source = Files.readString(tempDir.resolve("generated/generated/FindUser.java"));
+        String source = Files.readString(tempDir.resolve("generated/generated/UsersRepository.java"));
 
         assertTrue(
             source.contains(
@@ -581,7 +586,7 @@ class SqlcjCompilerIntegrationTest {
 
         try (URLClassLoader classLoader = classLoader(classesDirectory)) {
             Class<?> generatedClass = Class.forName(
-                "generated.FindUser",
+                "generated.UsersRepository",
                 true,
                 classLoader
             );
@@ -615,11 +620,10 @@ class SqlcjCompilerIntegrationTest {
                 FROM users
                 WHERE name = $2
                   AND (id = $1 OR id = $1);
-                """,
-            "FindUser"
+                """
         );
 
-        String source = Files.readString(tempDir.resolve("generated/generated/FindUser.java"));
+        String source = Files.readString(tempDir.resolve("generated/generated/UsersRepository.java"));
 
         assertTrue(
             source.contains(
@@ -634,7 +638,7 @@ class SqlcjCompilerIntegrationTest {
 
         try (URLClassLoader classLoader = classLoader(classesDirectory)) {
             Class<?> generatedClass = Class.forName(
-                "generated.FindUser",
+                "generated.UsersRepository",
                 true,
                 classLoader
             );
@@ -670,11 +674,10 @@ class SqlcjCompilerIntegrationTest {
                 FROM users
                 WHERE name <> '$1 literal' /* keeps $8 */
                   AND id = $1;
-                """,
-            "FindUser"
+                """
         );
 
-        String source = Files.readString(tempDir.resolve("generated/generated/FindUser.java"));
+        String source = Files.readString(tempDir.resolve("generated/generated/UsersRepository.java"));
 
         assertTrue(source.contains("-- Keeps $9 in a comment."));
         assertTrue(source.contains("WHERE name <> '$1 literal' /* keeps $8 */"));
@@ -690,7 +693,7 @@ class SqlcjCompilerIntegrationTest {
 
         try (URLClassLoader classLoader = classLoader(classesDirectory)) {
             Class<?> generatedClass = Class.forName(
-                "generated.FindUser",
+                "generated.UsersRepository",
                 true,
                 classLoader
             );
@@ -717,11 +720,10 @@ class SqlcjCompilerIntegrationTest {
                 SELECT id, name
                 FROM users
                 ORDER BY id;
-                """,
-            "GetFirstUser"
+                """
         );
 
-        String source = Files.readString(tempDir.resolve("generated/generated/GetFirstUser.java"));
+        String source = Files.readString(tempDir.resolve("generated/generated/UsersRepository.java"));
 
         assertTrue(
             source.contains(
@@ -735,7 +737,7 @@ class SqlcjCompilerIntegrationTest {
 
         try (URLClassLoader classLoader = classLoader(classesDirectory)) {
             Class<?> generatedClass = Class.forName(
-                "generated.GetFirstUser",
+                "generated.UsersRepository",
                 true,
                 classLoader
             );
@@ -762,11 +764,10 @@ class SqlcjCompilerIntegrationTest {
                 -- name: InsertUser :exec
                 INSERT INTO users (id, name, active)
                 VALUES ($1, $2, $3);
-                """,
-            "InsertUser"
+                """
         );
 
-        String source = Files.readString(tempDir.resolve("generated/generated/InsertUser.java"));
+        String source = Files.readString(tempDir.resolve("generated/generated/UsersRepository.java"));
 
         assertTrue(
             source.contains(
@@ -783,7 +784,7 @@ class SqlcjCompilerIntegrationTest {
 
         try (URLClassLoader classLoader = classLoader(classesDirectory)) {
             Class<?> generatedClass = Class.forName(
-                "generated.InsertUser",
+                "generated.UsersRepository",
                 true,
                 classLoader
             );
@@ -817,11 +818,10 @@ class SqlcjCompilerIntegrationTest {
                 UPDATE users
                 SET name = $2
                 WHERE id = $1;
-                """,
-            "UpdateUserName"
+                """
         );
 
-        String source = Files.readString(tempDir.resolve("generated/generated/UpdateUserName.java"));
+        String source = Files.readString(tempDir.resolve("generated/generated/UsersRepository.java"));
 
         assertTrue(
             source.contains(
@@ -835,7 +835,7 @@ class SqlcjCompilerIntegrationTest {
 
         try (URLClassLoader classLoader = classLoader(classesDirectory)) {
             Class<?> generatedClass = Class.forName(
-                "generated.UpdateUserName",
+                "generated.UsersRepository",
                 true,
                 classLoader
             );
@@ -868,11 +868,10 @@ class SqlcjCompilerIntegrationTest {
                 -- name: DeleteUser :exec
                 DELETE FROM users
                 WHERE id = $1;
-                """,
-            "DeleteUser"
+                """
         );
 
-        String source = Files.readString(tempDir.resolve("generated/generated/DeleteUser.java"));
+        String source = Files.readString(tempDir.resolve("generated/generated/UsersRepository.java"));
 
         assertTrue(source.contains("public int deleteUser(Long id)"));
         assertTrue(source.contains("java.util.Arrays.asList(id)"));
@@ -881,7 +880,7 @@ class SqlcjCompilerIntegrationTest {
 
         try (URLClassLoader classLoader = classLoader(classesDirectory)) {
             Class<?> generatedClass = Class.forName(
-                "generated.DeleteUser",
+                "generated.UsersRepository",
                 true,
                 classLoader
             );
@@ -915,11 +914,10 @@ class SqlcjCompilerIntegrationTest {
                 SELECT u.id, u.name
                 FROM users u
                 WHERE u.id = $1;
-                """,
-            "GetUser"
+                """
         );
 
-        String source = Files.readString(tempDir.resolve("generated/generated/GetUser.java"));
+        String source = Files.readString(tempDir.resolve("generated/generated/UsersRepository.java"));
 
         assertTrue(source.contains("public GetUserResult getUser(Long id)"));
         assertTrue(source.contains("resultSet.getObject(1, Long.class)"));
@@ -928,7 +926,7 @@ class SqlcjCompilerIntegrationTest {
         QueryExecutor executor = new JdbcQueryExecutor(joinDataSource());
 
         try (URLClassLoader classLoader = classLoader(classesDirectory)) {
-            Class<?> generatedClass = Class.forName("generated.GetUser", true, classLoader);
+            Class<?> generatedClass = Class.forName("generated.UsersRepository", true, classLoader);
 
             Object result = generatedClass
                 .getMethod("getUser", Long.class)
@@ -956,13 +954,10 @@ class SqlcjCompilerIntegrationTest {
                 JOIN profiles p ON p.user_id = u.id
                 WHERE p.nickname = $2
                   AND u.id = $1;
-                """,
-            "ListUserProfiles"
+                """
         );
 
-        String source = Files.readString(
-            tempDir.resolve("generated/generated/ListUserProfiles.java")
-        );
+        String source = Files.readString(tempDir.resolve("generated/generated/UsersRepository.java"));
 
         assertTrue(
             source.contains(
@@ -978,7 +973,7 @@ class SqlcjCompilerIntegrationTest {
 
         try (URLClassLoader classLoader = classLoader(classesDirectory)) {
             Class<?> generatedClass = Class.forName(
-                "generated.ListUserProfiles",
+                "generated.UsersRepository",
                 true,
                 classLoader
             );
@@ -1016,15 +1011,14 @@ class SqlcjCompilerIntegrationTest {
                 JOIN profiles p ON p.user_id = u.id
                 JOIN orders o ON o.user_id = u.id
                 WHERE u.id = $1;
-                """,
-            "GetUserOrder"
+                """
         );
 
         QueryExecutor executor = new JdbcQueryExecutor(joinDataSource());
 
         try (URLClassLoader classLoader = classLoader(classesDirectory)) {
             Class<?> generatedClass = Class.forName(
-                "generated.GetUserOrder",
+                "generated.UsersRepository",
                 true,
                 classLoader
             );
@@ -1101,10 +1095,12 @@ class SqlcjCompilerIntegrationTest {
         Config config = new Config(
             List.of(
                 new SqlConfig(
+                    "Users",
                     usersSchema.toString(),
                     usersQueries.toString()
                 ),
                 new SqlConfig(
+                    "Orders",
                     ordersSchema.toString(),
                     ordersQueries.toString()
                 )
@@ -1117,23 +1113,25 @@ class SqlcjCompilerIntegrationTest {
 
         new SqlcjCompiler().compile(config);
 
-        Path getUserFile = generatedDirectory.resolve("dev/example/generated/GetUser.java");
+        Path usersFile = generatedDirectory.resolve("dev/example/generated/UsersRepository.java");
 
-        Path listOrdersFile = generatedDirectory.resolve("dev/example/generated/ListOrders.java");
+        Path ordersFile = generatedDirectory.resolve("dev/example/generated/OrdersRepository.java");
 
-        assertTrue(Files.exists(getUserFile));
-        assertTrue(Files.exists(listOrdersFile));
+        assertTrue(Files.exists(usersFile));
+        assertTrue(Files.exists(ordersFile));
 
-        String getUser = Files.readString(getUserFile);
+        String users = Files.readString(usersFile);
 
-        assertTrue(getUser.startsWith("package dev.example.generated;"));
-        assertTrue(getUser.contains("public GetUserResult getUser(Long id)"));
+        assertTrue(users.startsWith("package dev.example.generated;"));
+        assertTrue(users.contains("public final class UsersRepository {"));
+        assertTrue(users.contains("public GetUserResult getUser(Long id)"));
 
-        String listOrders = Files.readString(listOrdersFile);
+        String orders = Files.readString(ordersFile);
 
-        assertTrue(listOrders.startsWith("package dev.example.generated;"));
-        assertTrue(listOrders.contains("public List<ListOrdersResult> listOrders(LocalDateTime created_at)"));
-        assertTrue(listOrders.contains("BigDecimal total"));
+        assertTrue(orders.startsWith("package dev.example.generated;"));
+        assertTrue(orders.contains("public final class OrdersRepository {"));
+        assertTrue(orders.contains("public List<ListOrdersResult> listOrders(LocalDateTime created_at)"));
+        assertTrue(orders.contains("BigDecimal total"));
 
         Files.createDirectories(classesDirectory);
 
@@ -1149,8 +1147,8 @@ class SqlcjCompilerIntegrationTest {
             System.getProperty("java.class.path"),
             "-d",
             classesDirectory.toString(),
-            getUserFile.toString(),
-            listOrdersFile.toString()
+            usersFile.toString(),
+            ordersFile.toString()
         );
 
         assertEquals(0, compilationResult);
@@ -1158,7 +1156,7 @@ class SqlcjCompilerIntegrationTest {
         assertTrue(
             Files.exists(
                 classesDirectory.resolve(
-                    "dev/example/generated/GetUser.class"
+                    "dev/example/generated/UsersRepository.class"
                 )
             )
         );
@@ -1166,14 +1164,14 @@ class SqlcjCompilerIntegrationTest {
         assertTrue(
             Files.exists(
                 classesDirectory.resolve(
-                    "dev/example/generated/ListOrders.class"
+                    "dev/example/generated/OrdersRepository.class"
                 )
             )
         );
     }
 
     @Test
-    void shouldRejectDuplicateQueryNameAcrossEntriesBeforeWriting() throws IOException {
+    void shouldGenerateTheSameQueryNameInTwoRepositories() throws IOException {
         Path usersSchema = tempDir.resolve("users-schema.sql");
         Path usersQueries = tempDir.resolve("users-queries.sql");
         Path ordersSchema = tempDir.resolve("orders-schema.sql");
@@ -1223,10 +1221,12 @@ class SqlcjCompilerIntegrationTest {
         Config config = new Config(
             List.of(
                 new SqlConfig(
+                    "Users",
                     usersSchema.toString(),
                     usersQueries.toString()
                 ),
                 new SqlConfig(
+                    "Orders",
                     ordersSchema.toString(),
                     ordersQueries.toString()
                 )
@@ -1237,20 +1237,21 @@ class SqlcjCompilerIntegrationTest {
             )
         );
 
-        SqlcjCompiler compiler = new SqlcjCompiler();
+        new SqlcjCompiler().compile(config);
 
-        CompilationException exception = assertThrows(
-            CompilationException.class,
-            () -> compiler.compile(config)
-        );
+        Path usersRepository = generatedDirectory
+            .resolve("dev/example/generated")
+            .resolve("UsersRepository.java");
 
-        assertEquals(
-            "Duplicate query name 'GetRecord' in query source: "
-                + ordersQueries,
-            exception.getMessage()
-        );
+        Path ordersRepository = generatedDirectory
+            .resolve("dev/example/generated")
+            .resolve("OrdersRepository.java");
 
-        assertFalse(Files.exists(generatedDirectory));
+        assertTrue(Files.exists(usersRepository));
+        assertTrue(Files.exists(ordersRepository));
+
+        assertTrue(Files.readString(usersRepository).contains("public GetRecordResult getRecord(Long id)"));
+        assertTrue(Files.readString(ordersRepository).contains("public GetRecordResult getRecord(Long id)"));
     }
 
     @Test
@@ -1284,14 +1285,14 @@ class SqlcjCompilerIntegrationTest {
 
         new SqlcjCompiler().compile(
             new Config(
-                List.of(new SqlConfig(usersSchema.toString(), usersQueries.toString())),
+                List.of(new SqlConfig("Users", usersSchema.toString(), usersQueries.toString())),
                 new JavaConfig(generatedDirectory.toString(), "dev.example.generated")
             )
         );
 
         Path generatedFile = generatedDirectory
             .resolve("dev/example/generated")
-            .resolve("GetUser.java");
+            .resolve("UsersRepository.java");
 
         String previous = Files.readString(generatedFile);
 
@@ -1333,8 +1334,8 @@ class SqlcjCompilerIntegrationTest {
 
         Config config = new Config(
             List.of(
-                new SqlConfig(usersSchema.toString(), usersQueries.toString()),
-                new SqlConfig(ordersSchema.toString(), ordersQueries.toString())
+                new SqlConfig("Users", usersSchema.toString(), usersQueries.toString()),
+                new SqlConfig("Orders", ordersSchema.toString(), ordersQueries.toString())
             ),
             new JavaConfig(generatedDirectory.toString(), "dev.example.generated")
         );
@@ -1359,7 +1360,7 @@ class SqlcjCompilerIntegrationTest {
             Files.exists(
                 generatedDirectory
                     .resolve("dev/example/generated")
-                    .resolve("ListOrders.java")
+                    .resolve("OrdersRepository.java")
             )
         );
     }
@@ -1394,7 +1395,7 @@ class SqlcjCompilerIntegrationTest {
     }
 
     @Test
-    void shouldRejectNormalizedGeneratedPathCollisionBeforeWriting() throws IOException {
+    void shouldRejectRepeatedRepositoryMethodBeforeWriting() throws IOException {
         Path generatedDirectory = tempDir.resolve("generated");
 
         CompilationException exception = assertThrows(
@@ -1416,16 +1417,20 @@ class SqlcjCompilerIntegrationTest {
         );
 
         assertEquals(
-            "Duplicate generated file for queries 'Get.User' and 'Get-User': "
-                + Path.of("generated", "Get_User.java"),
+            "Invalid query group 'Users' in %s: ".formatted(tempDir.resolve("queries.sql"))
+                + "Queries 'Get.User' and 'Get-User' generate the same repository method 'get_User'",
             exception.getMessage()
         );
 
         assertFalse(Files.exists(generatedDirectory));
     }
 
+    /**
+     * Nested result types that differ only by case compile to class files that
+     * share one path on a case-insensitive filesystem.
+     */
     @Test
-    void shouldRejectGeneratedPathsThatDifferOnlyByCaseBeforeWriting() {
+    void shouldRejectRepositoryResultTypesThatDifferOnlyByCaseBeforeWriting() throws IOException {
         Path generatedDirectory = tempDir.resolve("generated");
 
         CompilationException exception = assertThrows(
@@ -1447,10 +1452,47 @@ class SqlcjCompilerIntegrationTest {
         );
 
         assertEquals(
-            "Generated file paths for queries 'GetUser' and 'getuser' differ only by case: "
-                + Path.of("generated", "GetUser.java")
+            "Invalid query group 'Users' in %s: ".formatted(tempDir.resolve("queries.sql"))
+                + "Queries 'GetUser' and 'getuser' generate result types that differ only by case: "
+                + "GetUserResult and getuserResult",
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    @Test
+    void shouldRejectDuplicateRepositoryBeforeWriting() throws IOException {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileUsersGroups("Users", "Users", generatedDirectory)
+        );
+
+        assertEquals(
+            "Duplicate generated file for repositories 'Users' and 'Users': "
+                + Path.of("generated", "UsersRepository.java"),
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    @Test
+    void shouldRejectRepositoryPathsThatDifferOnlyByCaseBeforeWriting() throws IOException {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileUsersGroups("Users", "users", generatedDirectory)
+        );
+
+        assertEquals(
+            "Generated file paths for repositories 'Users' and 'users' differ only by case: "
+                + Path.of("generated", "UsersRepository.java")
                 + " and "
-                + Path.of("generated", "getuser.java"),
+                + Path.of("generated", "usersRepository.java"),
             exception.getMessage()
         );
 
@@ -1488,6 +1530,7 @@ class SqlcjCompilerIntegrationTest {
         Config config = new Config(
             List.of(
                 new SqlConfig(
+                    "Users",
                     schemaFile.toString(),
                     queriesFile.toString()
                 )
@@ -1502,7 +1545,7 @@ class SqlcjCompilerIntegrationTest {
 
         Path generatedFile = generatedDirectory
             .resolve("generated")
-            .resolve("ListUserData.java");
+            .resolve("UsersRepository.java");
 
         String source = Files.readString(generatedFile);
 
@@ -1582,6 +1625,7 @@ class SqlcjCompilerIntegrationTest {
         Config config = new Config(
             List.of(
                 new SqlConfig(
+                    "Users",
                     schemaFile.toString(),
                     queriesFile.toString()
                 )
@@ -1594,31 +1638,28 @@ class SqlcjCompilerIntegrationTest {
 
         new SqlcjCompiler().compile(config);
 
-        Path insertUserFile = generatedDirectory.resolve("generated/InsertUser.java");
-        Path updateUserFile = generatedDirectory.resolve("generated/UpdateUser.java");
-        Path deleteUsersFile = generatedDirectory.resolve("generated/DeleteUsers.java");
+        Path repositoryFile = generatedDirectory.resolve("generated/UsersRepository.java");
 
-        String insertUser = Files.readString(insertUserFile);
-        assertTrue(insertUser.contains("public record InsertUserResult("));
-        assertTrue(insertUser.contains("Long id"));
-        assertTrue(insertUser.contains("String name"));
-        assertTrue(insertUser.contains("Boolean active"));
-        assertTrue(insertUser.contains("public InsertUserResult insertUser(Long id, String name)"));
-        assertTrue(insertUser.contains("return executor.query("));
-        assertTrue(insertUser.contains("VALUES (?, ?)"));
-        assertTrue(insertUser.contains("RETURNING *"));
+        String repository = Files.readString(repositoryFile);
 
-        String updateUser = Files.readString(updateUserFile);
-        assertTrue(updateUser.contains("public UpdateUserResult updateUser(Long id, String name)"));
-        assertTrue(updateUser.contains("resultSet.getObject(1, String.class)"));
-        assertTrue(updateUser.contains("resultSet.getObject(2, Long.class)"));
-        assertTrue(updateUser.contains("java.util.Arrays.asList(name, id)"));
-        assertTrue(updateUser.contains("RETURNING name, id"));
+        assertTrue(repository.contains("public record InsertUserResult("));
+        assertTrue(repository.contains("Long id"));
+        assertTrue(repository.contains("String name"));
+        assertTrue(repository.contains("Boolean active"));
+        assertTrue(repository.contains("public InsertUserResult insertUser(Long id, String name)"));
+        assertTrue(repository.contains("return executor.query("));
+        assertTrue(repository.contains("VALUES (?, ?)"));
+        assertTrue(repository.contains("RETURNING *"));
 
-        String deleteUsers = Files.readString(deleteUsersFile);
-        assertTrue(deleteUsers.contains("public List<DeleteUsersResult> deleteUsers(Boolean active)"));
-        assertTrue(deleteUsers.contains("return executor.queryMany("));
-        assertTrue(deleteUsers.contains("RETURNING id, name"));
+        assertTrue(repository.contains("public UpdateUserResult updateUser(Long id, String name)"));
+        assertTrue(repository.contains("resultSet.getObject(1, String.class)"));
+        assertTrue(repository.contains("resultSet.getObject(2, Long.class)"));
+        assertTrue(repository.contains("java.util.Arrays.asList(name, id)"));
+        assertTrue(repository.contains("RETURNING name, id"));
+
+        assertTrue(repository.contains("public List<DeleteUsersResult> deleteUsers(Boolean active)"));
+        assertTrue(repository.contains("return executor.queryMany("));
+        assertTrue(repository.contains("RETURNING id, name"));
 
         Files.createDirectories(classesDirectory);
 
@@ -1636,15 +1677,11 @@ class SqlcjCompilerIntegrationTest {
                 System.getProperty("java.class.path"),
                 "-d",
                 classesDirectory.toString(),
-                insertUserFile.toString(),
-                updateUserFile.toString(),
-                deleteUsersFile.toString()
+                repositoryFile.toString()
             )
         );
 
-        assertTrue(Files.exists(classesDirectory.resolve("generated/InsertUser.class")));
-        assertTrue(Files.exists(classesDirectory.resolve("generated/UpdateUser.class")));
-        assertTrue(Files.exists(classesDirectory.resolve("generated/DeleteUsers.class")));
+        assertTrue(Files.exists(classesDirectory.resolve("generated/UsersRepository.class")));
     }
 
     private void compileUsersQueries(String queries, Path generatedDirectory) throws IOException {
@@ -1667,6 +1704,7 @@ class SqlcjCompilerIntegrationTest {
         Config config = new Config(
             List.of(
                 new SqlConfig(
+                    "Users",
                     schemaFile.toString(),
                     queriesFile.toString()
                 )
@@ -1680,7 +1718,51 @@ class SqlcjCompilerIntegrationTest {
         new SqlcjCompiler().compile(config);
     }
 
-    private Path generateAndCompile(String queries, String queryName) throws IOException {
+    /** Compiles two configured groups that share one schema and query source. */
+    private void compileUsersGroups(
+        String firstGroup,
+        String secondGroup,
+        Path generatedDirectory
+    ) throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE users
+                (
+                    id   BIGINT NOT NULL,
+                    name VARCHAR(255)
+                );
+                """
+        );
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: GetUser :one
+                SELECT id, name
+                FROM users
+                WHERE id = $1;
+                """
+        );
+
+        Config config = new Config(
+            List.of(
+                new SqlConfig(firstGroup, schemaFile.toString(), queriesFile.toString()),
+                new SqlConfig(secondGroup, schemaFile.toString(), queriesFile.toString())
+            ),
+            new JavaConfig(
+                generatedDirectory.toString(),
+                "generated"
+            )
+        );
+
+        new SqlcjCompiler().compile(config);
+    }
+
+    private Path generateAndCompile(String queries) throws IOException {
         return generateAndCompile(
             """
                 CREATE TABLE users
@@ -1690,12 +1772,12 @@ class SqlcjCompilerIntegrationTest {
                     active BOOLEAN
                 );
                 """,
-            queries,
-            queryName
+            queries
         );
     }
 
-    private Path generateAndCompile(String schema, String queries, String queryName) throws IOException {
+    /** Generates and compiles the one repository of the {@code Users} group. */
+    private Path generateAndCompile(String schema, String queries) throws IOException {
         Path schemaFile = tempDir.resolve("schema.sql");
         Path queriesFile = tempDir.resolve("queries.sql");
         Path generatedDirectory = tempDir.resolve("generated");
@@ -1708,6 +1790,7 @@ class SqlcjCompilerIntegrationTest {
         Config config = new Config(
             List.of(
                 new SqlConfig(
+                    "Users",
                     schemaFile.toString(),
                     queriesFile.toString()
                 )
@@ -1720,7 +1803,7 @@ class SqlcjCompilerIntegrationTest {
 
         new SqlcjCompiler().compile(config);
 
-        Path generatedFile = generatedDirectory.resolve("generated").resolve(queryName + ".java");
+        Path generatedFile = generatedDirectory.resolve("generated").resolve("UsersRepository.java");
 
         assertTrue(Files.exists(generatedFile));
 
