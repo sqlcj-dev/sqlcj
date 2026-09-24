@@ -2,6 +2,7 @@ package dev.sqlcj.analysis;
 
 import dev.sqlcj.parser.Query;
 import dev.sqlcj.parser.QueryType;
+import dev.sqlcj.schema.ColumnType;
 import dev.sqlcj.schema.Schema;
 import dev.sqlcj.sql.ParsedSql;
 import dev.sqlcj.type.DefaultTypeResolver;
@@ -16,6 +17,8 @@ import net.sf.jsqlparser.expression.operators.relational.ComparisonOperator;
 import net.sf.jsqlparser.expression.operators.relational.EqualsTo;
 import net.sf.jsqlparser.expression.operators.relational.ExpressionList;
 import net.sf.jsqlparser.expression.operators.relational.InExpression;
+import net.sf.jsqlparser.expression.operators.relational.IsNullExpression;
+import net.sf.jsqlparser.expression.operators.relational.LikeExpression;
 import net.sf.jsqlparser.expression.operators.relational.ParenthesedExpressionList;
 import net.sf.jsqlparser.schema.Table;
 import net.sf.jsqlparser.statement.ReturningClause;
@@ -758,6 +761,16 @@ public final class QueryAnalyzer {
             return;
         }
 
+        if (expression instanceof LikeExpression like) {
+            resolveLikeExpression(like, sources, parameters);
+            return;
+        }
+
+        if (expression instanceof IsNullExpression isNull) {
+            resolveIsNullExpression(isNull, sources);
+            return;
+        }
+
         if (expression instanceof ComparisonOperator comparison) {
             resolveParameterComparison(
                 comparison.getLeftExpression(),
@@ -860,6 +873,105 @@ public final class QueryAnalyzer {
                     );
                 }
             }
+        }
+    }
+
+    /**
+     * Resolves the pattern parameter of {@code <column> LIKE $N} or
+     * {@code <column> ILIKE $N}, typed from the tested text column. A pattern
+     * that binds no placeholder reaches the database as written, so a literal
+     * pattern stays unanalyzed.
+     */
+    private void resolveLikeExpression(
+        LikeExpression like,
+        List<Source> sources,
+        List<QueryParameter> parameters
+    ) {
+        Expression left = like.getLeftExpression();
+        Expression right = like.getRightExpression();
+
+        requireIndexedParameter(left);
+        requireIndexedParameter(right);
+
+        if (left instanceof JdbcParameter) {
+            throw new UnsupportedOperationException(
+                "A LIKE placeholder must be the pattern, not the tested value."
+            );
+        }
+
+        if (!(right instanceof JdbcParameter parameter)) {
+            return;
+        }
+
+        requireSupportedLikePattern(like);
+
+        if (!(left instanceof net.sf.jsqlparser.schema.Column column)) {
+            return;
+        }
+
+        addParameter(
+            parameter,
+            requireTextColumn(resolveColumn(column, sources).column()),
+            parameters
+        );
+    }
+
+    /**
+     * Requires the exact {@code LIKE}/{@code ILIKE} pattern shape this subset
+     * types, so a related keyword or modifier is never analyzed as a plain
+     * pattern match.
+     */
+    private void requireSupportedLikePattern(LikeExpression like) {
+        if (like.isNot()) {
+            throw new UnsupportedOperationException(
+                "A negated LIKE pattern placeholder is not supported."
+            );
+        }
+
+        LikeExpression.KeyWord keyword = like.getLikeKeyWord();
+
+        if (keyword != LikeExpression.KeyWord.LIKE && keyword != LikeExpression.KeyWord.ILIKE) {
+            throw new UnsupportedOperationException(
+                "Only LIKE and ILIKE pattern placeholders are supported, but was: " + keyword
+            );
+        }
+
+        if (like.getEscape() != null) {
+            throw new UnsupportedOperationException(
+                "A LIKE pattern placeholder must not have an ESCAPE clause."
+            );
+        }
+
+        if (like.isUseBinary()) {
+            throw new UnsupportedOperationException(
+                "A binary LIKE pattern placeholder is not supported."
+            );
+        }
+    }
+
+    /**
+     * Requires a text column, because the pattern parameter takes the tested
+     * column's type and only a character type makes that type a pattern.
+     */
+    private dev.sqlcj.schema.Column requireTextColumn(dev.sqlcj.schema.Column column) {
+        if (column.type() != ColumnType.VARCHAR && column.type() != ColumnType.TEXT) {
+            throw new UnsupportedOperationException(
+                "A LIKE pattern placeholder requires a VARCHAR or TEXT column, but %s is %s."
+                    .formatted(column.name(), column.type())
+            );
+        }
+
+        return column;
+    }
+
+    /**
+     * Resolves the tested column of {@code IS NULL} and {@code IS NOT NULL}
+     * against the query sources. The predicate binds no placeholder, so it
+     * contributes no parameter and reaches the database as written.
+     */
+    private void resolveIsNullExpression(IsNullExpression isNull, List<Source> sources) {
+        if (isNull.getLeftExpression() instanceof net.sf.jsqlparser.schema.Column column) {
+            resolveColumn(column, sources);
         }
     }
 

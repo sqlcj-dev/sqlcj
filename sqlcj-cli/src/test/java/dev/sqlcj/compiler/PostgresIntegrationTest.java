@@ -343,6 +343,109 @@ class PostgresIntegrationTest {
         }
     }
 
+    /**
+     * Covers the text and null predicates end to end: a {@code LIKE} pattern on
+     * a {@code VARCHAR} column, a case-insensitive {@code ILIKE} pattern on a
+     * {@code TEXT} column, and both null tests are generated, compiled, and
+     * executed against PostgreSQL.
+     */
+    @Test
+    void shouldExecuteGeneratedTextAndNullPredicatesAgainstPostgres() throws Exception {
+        Path classesDirectory = generateAndCompile("""
+            -- name: SearchUsersByName :many
+            SELECT id, name
+            FROM users
+            WHERE name LIKE $1
+            ORDER BY id;
+
+            -- name: SearchUsersByBio :many
+            SELECT id, name
+            FROM users
+            WHERE bio LIKE $1
+            ORDER BY id;
+
+            -- name: SearchUsersByBioIgnoringCase :many
+            SELECT u.id, u.name
+            FROM users u
+            WHERE u.bio ILIKE $1
+            ORDER BY u.id;
+
+            -- name: ListUsersWithoutBio :many
+            SELECT id, name
+            FROM users
+            WHERE bio IS NULL
+            ORDER BY id;
+
+            -- name: ListUsersWithBio :many
+            SELECT id, name
+            FROM users u
+            WHERE u.bio IS NOT NULL
+            ORDER BY id;
+            """);
+
+        execute("""
+            INSERT INTO users (id, code, name, bio)
+            VALUES
+                (1, 1, 'Alice', 'Writes POETRY'),
+                (2, 2, 'Albert', NULL),
+                (3, 3, 'Bob', 'writes poetry too')
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method searchByName = repository.getClass().getMethod(
+                "searchUsersByName",
+                String.class
+            );
+
+            Method searchByBio = repository.getClass().getMethod(
+                "searchUsersByBio",
+                String.class
+            );
+
+            Method searchByBioIgnoringCase = repository.getClass().getMethod(
+                "searchUsersByBioIgnoringCase",
+                String.class
+            );
+
+            assertEquals(
+                List.of("Alice", "Albert"),
+                names(searchByName.invoke(repository, "Al%"))
+            );
+
+            assertEquals(
+                List.of("Alice"),
+                names(searchByBio.invoke(repository, "%POETRY%"))
+            );
+
+            assertEquals(
+                List.of("Alice", "Bob"),
+                names(searchByBioIgnoringCase.invoke(repository, "%POETRY%"))
+            );
+
+            assertEquals(
+                List.of("Albert"),
+                names(
+                    repository
+                        .getClass()
+                        .getMethod("listUsersWithoutBio")
+                        .invoke(repository)
+                )
+            );
+
+            assertEquals(
+                List.of("Alice", "Bob"),
+                names(
+                    repository
+                        .getClass()
+                        .getMethod("listUsersWithBio")
+                        .invoke(repository)
+                )
+            );
+        }
+    }
+
     @Test
     void shouldExecuteGeneratedWriteAgainstPostgres() throws Exception {
         Path classesDirectory = generateAndCompile("""
@@ -1098,6 +1201,17 @@ class PostgresIntegrationTest {
         List<Object> names = new ArrayList<>();
 
         for (Object row : rows) {
+            names.add(component(row, "name"));
+        }
+
+        return names;
+    }
+
+    /** Reads the {@code name} component of every row of a generated list result. */
+    private List<Object> names(Object rows) throws Exception {
+        List<Object> names = new ArrayList<>();
+
+        for (Object row : (List<?>) rows) {
             names.add(component(row, "name"));
         }
 
