@@ -1067,6 +1067,56 @@ class QueryAnalyzerTest {
         );
     }
 
+    /**
+     * An explicit projection alias names the result column, while its type and
+     * nullability still come from the schema column.
+     */
+    @Test
+    void shouldNameSelectedColumnAfterItsAlias() {
+        String sql = """
+            SELECT id AS user_id, name AS "user name"
+            FROM users
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("user_id", ColumnType.BIGINT, false),
+                new QueryColumn("user name", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+    }
+
+    @Test
+    void shouldNameJoinedSelectedColumnsAfterTheirAliases() {
+        String sql = """
+            SELECT u.id AS user_id, p.id AS profile_id, p.nickname
+            FROM users u
+            JOIN profiles p ON p.user_id = u.id
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUserProfiles", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("user_id", ColumnType.BIGINT, false),
+                new QueryColumn("profile_id", ColumnType.BIGINT, false),
+                new QueryColumn("nickname", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+    }
+
     @Test
     void shouldRejectTableNameHiddenByAlias() {
         String sql = """
