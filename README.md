@@ -21,7 +21,7 @@ sql:
 
 ```sql
 -- name: GetAuthor :one
-SELECT id, name, bio
+SELECT *
 FROM authors
 WHERE id = $1;
 ```
@@ -29,7 +29,7 @@ WHERE id = $1;
 ```java
 AuthorRepository authors = new AuthorRepository(executor);
 
-AuthorRepository.GetAuthorResult author = authors.getAuthor(1L);
+AuthorRepository.AuthorsRow author = authors.getAuthor(1L);
 ```
 
 Every query of `sql/queries.sql` becomes a method of that one

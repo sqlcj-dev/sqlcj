@@ -180,15 +180,15 @@ The accepted column types and `CREATE TABLE` constructs are listed in
 -- name: CreateAuthor :one
 INSERT INTO authors (name, bio)
 VALUES ($1, $2)
-RETURNING id, name, bio;
+RETURNING *;
 
 -- name: GetAuthor :one
-SELECT id, name, bio
+SELECT *
 FROM authors
 WHERE id = $1;
 
 -- name: ListAuthors :many
-SELECT id, name
+SELECT *
 FROM authors
 ORDER BY id;
 
@@ -205,9 +205,12 @@ WHERE id = $1;
 
 All five queries become methods of the one generated `AuthorRepository`:
 `createAuthor`, `getAuthor`, `listAuthors`, `updateAuthorBio`, and
-`deleteAuthor`. A `:one` or `:many` query also generates a nested result record
-such as `AuthorRepository.GetAuthorResult`. The full query contract is
-documented in [Queries](queries.md).
+`deleteAuthor`. `CreateAuthor`, `GetAuthor`, and `ListAuthors` each return one
+complete `authors` row, so all three share the nested record
+`AuthorRepository.AuthorsRow`, generated once from the schema's column order. A
+query with its own result shape, such as a partial projection or a `RETURNING`
+column list, generates a nested `AuthorRepository.<QueryName>Result` record
+instead. The full query contract is documented in [Queries](queries.md).
 
 ## 8. `src/main/java/com/example/app/App.java`
 
@@ -232,12 +235,11 @@ public final class App {
 
         AuthorRepository authors = new AuthorRepository(executor);
 
-        AuthorRepository.CreateAuthorResult created =
-                authors.createAuthor("Ada Lovelace", "First programmer");
+        AuthorRepository.AuthorsRow created = authors.createAuthor("Ada Lovelace", "First programmer");
 
         System.out.println("created: " + created.id() + " " + created.name());
 
-        AuthorRepository.GetAuthorResult read = authors.getAuthor(created.id());
+        AuthorRepository.AuthorsRow read = authors.getAuthor(created.id());
 
         System.out.println("read: " + read.name() + " / " + read.bio());
 
@@ -245,7 +247,7 @@ public final class App {
 
         System.out.println("updated rows: " + updatedRows);
 
-        for (AuthorRepository.ListAuthorsResult author : authors.listAuthors()) {
+        for (AuthorRepository.AuthorsRow author : authors.listAuthors()) {
             System.out.println("listed: " + author.id() + " " + author.name());
         }
 
@@ -254,11 +256,9 @@ public final class App {
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
 
-            AuthorRepository transactionalAuthors =
-                    new AuthorRepository(new JdbcQueryExecutor(connection));
+            AuthorRepository transactionalAuthors = new AuthorRepository(new JdbcQueryExecutor(connection));
 
-            AuthorRepository.CreateAuthorResult committed =
-                    transactionalAuthors.createAuthor("Grace Hopper", null);
+            AuthorRepository.AuthorsRow committed = transactionalAuthors.createAuthor("Grace Hopper", null);
 
             transactionalAuthors.updateAuthorBio(committed.id(), "Compiler pioneer");
 
@@ -270,11 +270,9 @@ public final class App {
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
 
-            AuthorRepository transactionalAuthors =
-                    new AuthorRepository(new JdbcQueryExecutor(connection));
+            AuthorRepository transactionalAuthors = new AuthorRepository(new JdbcQueryExecutor(connection));
 
-            AuthorRepository.CreateAuthorResult discarded =
-                    transactionalAuthors.createAuthor("Temporary Author", null);
+            AuthorRepository.AuthorsRow discarded = transactionalAuthors.createAuthor("Temporary Author", null);
 
             transactionalAuthors.updateAuthorBio(discarded.id(), "never stored");
 

@@ -146,7 +146,8 @@ resolved inside its own repository.
 ## Generated Java Names
 
 The configured `sql[].name` and the SQL names inside the entry — query names,
-column names, and projection aliases — become conventional Java identifiers.
+table names, column names, and projection aliases — become conventional Java
+identifiers.
 SQL identifier delimiters are removed before a name is converted, so the quoted
 column `"user id"` has the JDBC label `user id` and generates the component
 `userId`, while executable SQL keeps the query exactly as written.
@@ -187,9 +188,14 @@ The rules are applied as follows:
   `Repository`, so `author_admin` generates `AuthorAdminRepository`,
 - a result record is the upper camel form of the query name followed by
   `Result`, so `get_author` generates `GetAuthorResult`,
+- a row record is the upper camel form of the table name followed by `Row`, so
+  the table `authors` generates `AuthorsRow`. Row names are normalized, never
+  singularized,
 - a method is the lower camel form of the query name, so `get_author` generates
   `getAuthor`,
-- a row-mapper field is the method name followed by `RowMapper`,
+- a row-mapper field is the method name followed by `RowMapper`, and the mapper
+  of a row record is the lower camel form of the row type followed by `Mapper`,
+  so `AuthorsRow` generates `authorsRowMapper`,
 - record components and method parameters are the lower camel form of the column
   name or projection alias, so `created_at` generates `createdAt`.
 
@@ -202,8 +208,13 @@ Generated names also avoid names that Java or the generated source already uses:
 - a method name also avoids the inherited `Object` method names, so a query
   named `ToString` generates the method `toString_`,
 - record components avoid inherited `Object` method names,
-- method parameters avoid the generator-owned name `executor` and the row-mapper
-  field names of the repository.
+- method parameters avoid the generator-owned name `executor` and every
+  row-mapper field name of the repository, including the mappers of its row
+  records,
+- a row record's mapper field yields to the mapper of a query that generates its
+  own, using the same numeric suffixes, so a query named `Authors` keeps
+  `authorsRowMapper` while the row record of the table `authors` uses
+  `authorsRowMapper1`.
 
 Method parameters and record components are disambiguated inside their own
 generated method or record, in logical parameter order and selected-column
@@ -238,6 +249,13 @@ case-insensitive filesystem:
 
 ```text
 sqlcj: Invalid query group 'User' in /home/dev/project/sql/queries.sql: Queries 'GetUser' and 'getuser' generate result types that differ only by case: GetUserResult and GetuserResult
+```
+
+Two tables of one entry whose row records are equal ignoring case are rejected
+on the same grounds, naming both tables and both row types:
+
+```text
+sqlcj: Invalid query group 'User' in /home/dev/project/sql/queries.sql: Tables 'user_data' and 'userdata' generate row types that are equal ignoring case: UserDataRow and UserdataRow
 ```
 
 ### Generated path collisions
