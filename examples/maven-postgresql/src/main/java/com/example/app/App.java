@@ -2,6 +2,7 @@ package com.example.app;
 
 import com.example.app.db.AuthorRepository;
 import dev.sqlcj.runtime.JdbcQueryExecutor;
+import dev.sqlcj.runtime.QueryCardinalityException;
 import dev.sqlcj.runtime.QueryExecutor;
 import org.postgresql.ds.PGSimpleDataSource;
 
@@ -10,20 +11,26 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Runs the documented sqlcj workflow against PostgreSQL through generated
- * code: create, read, list, update, a missing-row read, a committed
- * transaction, a rolled back transaction, and delete.
+ * code: create, read, optional read, list, update, a missing-row read, a
+ * committed transaction, a rolled back transaction, and delete.
  *
- * <p>All five named queries are methods of one generated
+ * <p>All six named queries are methods of one generated
  * {@link AuthorRepository}. The repository is constructed once per execution
  * context: once from the {@code DataSource}-backed executor, and once more per
  * transaction from a caller-owned connection.
  *
- * <p>Create, read, and list each return one complete {@code authors} row, so
- * all three share the repository's single
+ * <p>Create, read, optional read, and list each return one complete
+ * {@code authors} row, so all four share the repository's single
  * {@link AuthorRepository.AuthorsRow} record.
+ *
+ * <p>Row absence is expressed by the {@code :optional} {@code FindAuthor}
+ * query, which returns an empty {@link Optional}, while the {@code :one}
+ * {@code GetAuthor} query requires exactly one row and raises a
+ * {@link QueryCardinalityException} when none matches.
  *
  * <p>Every step is checked, so the process exits non-zero as soon as one
  * generated operation returns an unexpected result.
@@ -61,6 +68,13 @@ public final class App {
 
         System.out.println("read: " + read.name() + " / " + read.bio());
 
+        Optional<AuthorRepository.AuthorsRow> found = authors.findAuthor(created.id());
+
+        check(found.isPresent(), "FindAuthor returned no row for the created author");
+        checkEquals("Ada Lovelace", found.get().name(), "FindAuthor name");
+
+        System.out.println("found: " + found.get().name());
+
         List<AuthorRepository.AuthorsRow> listed = authors.listAuthors();
 
         checkEquals(1, listed.size(), "ListAuthors row count after create");
@@ -76,9 +90,20 @@ public final class App {
 
         System.out.println("updated rows: " + updatedRows);
 
-        check(authors.getAuthor(-1L) == null, "GetAuthor must return null for a missing row");
+        check(
+            authors.findAuthor(-1L).isEmpty(),
+            "FindAuthor must return an empty result for a missing row"
+        );
 
-        System.out.println("missing row: null");
+        System.out.println("missing row: empty");
+
+        try {
+            authors.getAuthor(-1L);
+
+            throw new IllegalStateException("GetAuthor must fail for a missing row");
+        } catch (QueryCardinalityException e) {
+            System.out.println("missing row rejected: " + e.getMessage());
+        }
 
         Long committedId = writeAndCommit(dataSource);
 
@@ -92,14 +117,20 @@ public final class App {
 
         Long discardedId = writeAndRollback(dataSource);
 
-        check(authors.getAuthor(discardedId) == null, "the rolled back author must not be readable");
+        check(
+            authors.findAuthor(discardedId).isEmpty(),
+            "the rolled back author must not be readable"
+        );
 
-        System.out.println("rolled back: null");
+        System.out.println("rolled back: empty");
 
         int deletedRows = authors.deleteAuthor(created.id());
 
         checkEquals(1, deletedRows, "DeleteAuthor affected rows");
-        check(authors.getAuthor(created.id()) == null, "the deleted author must not be readable");
+        check(
+            authors.findAuthor(created.id()).isEmpty(),
+            "the deleted author must not be readable"
+        );
 
         System.out.println("deleted rows: " + deletedRows);
 

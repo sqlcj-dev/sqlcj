@@ -8,6 +8,11 @@ SELECT *
 FROM authors
 WHERE id = $1;
 
+-- name: FindAuthor :optional
+SELECT *
+FROM authors
+WHERE id = $1;
+
 -- name: ListAuthors :many
 SELECT *
 FROM authors

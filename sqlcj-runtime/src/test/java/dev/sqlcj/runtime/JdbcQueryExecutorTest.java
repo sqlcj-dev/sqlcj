@@ -18,6 +18,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -28,6 +29,9 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JdbcQueryExecutorTest {
+
+    /** The generated repository every operation of these tests reports. */
+    private static final String REPOSITORY = "UsersRepository";
 
     private JdbcDataSource dataSource;
     private JdbcQueryExecutor executor;
@@ -73,7 +77,9 @@ class JdbcQueryExecutorTest {
 
     @Test
     void shouldBindSingleParameter() {
-        Long result = executor.query(
+        Long result = executor.queryOne(
+            REPOSITORY,
+            "GetUser",
             "SELECT id FROM users WHERE id = ?",
             List.of(1L),
             resultSet -> resultSet.getLong("id")
@@ -84,7 +90,9 @@ class JdbcQueryExecutorTest {
 
     @Test
     void shouldBindParametersInOrder() {
-        String result = executor.query(
+        String result = executor.queryOne(
+            REPOSITORY,
+            "GetUser",
             """
                 SELECT name
                 FROM users
@@ -100,7 +108,9 @@ class JdbcQueryExecutorTest {
 
     @Test
     void shouldBindSupportedJavaTypes() {
-        String result = executor.query(
+        String result = executor.queryOne(
+            REPOSITORY,
+            "GetUser",
             """
                 SELECT name
                 FROM users
@@ -122,6 +132,8 @@ class JdbcQueryExecutorTest {
     @Test
     void shouldReturnAllRowsForQueryMany() {
         List<User> results = executor.queryMany(
+            REPOSITORY,
+            "ListUsers",
             """
                 SELECT id, name
                 FROM users
@@ -147,6 +159,8 @@ class JdbcQueryExecutorTest {
     @Test
     void shouldReturnEmptyListWhenQueryManyFindsNoRows() {
         List<User> results = executor.queryMany(
+            REPOSITORY,
+            "ListUsers",
             """
                 SELECT id, name
                 FROM users
@@ -163,26 +177,113 @@ class JdbcQueryExecutorTest {
     }
 
     @Test
-    void shouldReturnNullWhenQueryFindsNoRows() {
-        User result = executor.query(
-            """
-                SELECT id, name
-                FROM users
-                WHERE id = ?
-                """,
-            List.of(999L),
-            resultSet -> new User(
-                resultSet.getLong("id"),
-                resultSet.getString("name")
+    void shouldReturnTheRowWhenQueryOneFindsExactlyOneRow() {
+        User result = executor.queryOne(
+            REPOSITORY,
+            "GetUser",
+            "SELECT id, name FROM users WHERE id = ?",
+            List.of(1L),
+            userMapper()
+        );
+
+        assertEquals(new User(1L, "Alice"), result);
+    }
+
+    @Test
+    void shouldFailWhenQueryOneFindsNoRow() {
+        QueryCardinalityException exception = assertThrows(
+            QueryCardinalityException.class,
+            () -> executor.queryOne(
+                REPOSITORY,
+                "GetUser",
+                "SELECT id, name FROM users WHERE id = ?",
+                List.of(999L),
+                userMapper()
             )
         );
 
-        assertNull(result);
+        assertEquals(
+            "Query 'GetUser' in UsersRepository returned no row; expected exactly one",
+            exception.getMessage()
+        );
+
+        assertNull(exception.getCause());
+        assertInstanceOf(QueryExecutionException.class, exception);
+    }
+
+    @Test
+    void shouldFailWhenQueryOneFindsMoreThanOneRow() {
+        QueryCardinalityException exception = assertThrows(
+            QueryCardinalityException.class,
+            () -> executor.queryOne(
+                REPOSITORY,
+                "GetUser",
+                "SELECT id, name FROM users WHERE active = ? ORDER BY id",
+                List.of(true),
+                userMapper()
+            )
+        );
+
+        assertEquals(
+            "Query 'GetUser' in UsersRepository returned more than one row; expected exactly one",
+            exception.getMessage()
+        );
+
+        assertNull(exception.getCause());
+    }
+
+    @Test
+    void shouldReturnTheRowWhenQueryOptionalFindsOneRow() {
+        Optional<User> result = executor.queryOptional(
+            REPOSITORY,
+            "FindUser",
+            "SELECT id, name FROM users WHERE id = ?",
+            List.of(2L),
+            userMapper()
+        );
+
+        assertEquals(Optional.of(new User(2L, "Bob")), result);
+    }
+
+    @Test
+    void shouldReturnEmptyOptionalWhenQueryOptionalFindsNoRow() {
+        Optional<User> result = executor.queryOptional(
+            REPOSITORY,
+            "FindUser",
+            "SELECT id, name FROM users WHERE id = ?",
+            List.of(999L),
+            userMapper()
+        );
+
+        assertTrue(result.isEmpty());
+    }
+
+    @Test
+    void shouldFailWhenQueryOptionalFindsMoreThanOneRow() {
+        QueryCardinalityException exception = assertThrows(
+            QueryCardinalityException.class,
+            () -> executor.queryOptional(
+                REPOSITORY,
+                "FindUser",
+                "SELECT id, name FROM users WHERE active = ? ORDER BY id",
+                List.of(true),
+                userMapper()
+            )
+        );
+
+        assertEquals(
+            "Query 'FindUser' in UsersRepository returned more than one row; expected at most one",
+            exception.getMessage()
+        );
+
+        assertNull(exception.getCause());
     }
 
     @Test
     void shouldReturnAffectedRowCountForExecute() {
         int affected = executor.execute(
+            REPOSITORY,
+            "UpdateUserName",
             """
                 UPDATE users
                 SET name = ?
@@ -193,7 +294,9 @@ class JdbcQueryExecutorTest {
 
         assertEquals(1, affected);
 
-        String name = executor.query(
+        String name = executor.queryOne(
+            REPOSITORY,
+            "GetUserName",
             "SELECT name FROM users WHERE id = ?",
             List.of(1L),
             resultSet -> resultSet.getString("name")
@@ -207,12 +310,18 @@ class JdbcQueryExecutorTest {
         QueryExecutionException exception = assertThrows(
             QueryExecutionException.class,
             () -> executor.execute(
+                REPOSITORY,
+                "DeleteUsers",
                 "DELETE FROM missing_table",
                 List.of()
             )
         );
 
-        assertEquals("Failed to execute query", exception.getMessage());
+        assertEquals(
+            "Failed to execute query 'DeleteUsers' in UsersRepository",
+            exception.getMessage()
+        );
+
         assertInstanceOf(SQLException.class, exception.getCause());
     }
 
@@ -220,14 +329,20 @@ class JdbcQueryExecutorTest {
     void shouldWrapSqlException() {
         QueryExecutionException exception = assertThrows(
             QueryExecutionException.class,
-            () -> executor.query(
+            () -> executor.queryOne(
+                REPOSITORY,
+                "GetUser",
                 "SELECT * FROM missing_table",
                 List.of(),
                 resultSet -> resultSet.getLong("id")
             )
         );
 
-        assertEquals("Failed to execute query", exception.getMessage());
+        assertEquals(
+            "Failed to execute query 'GetUser' in UsersRepository",
+            exception.getMessage()
+        );
+
         assertInstanceOf(SQLException.class, exception.getCause());
     }
 
@@ -236,7 +351,9 @@ class JdbcQueryExecutorTest {
         try (Connection connection = dataSource.getConnection()) {
             JdbcQueryExecutor connectionExecutor = new JdbcQueryExecutor(connection);
 
-            User result = connectionExecutor.query(
+            User result = connectionExecutor.queryOne(
+                REPOSITORY,
+                "GetUser",
                 """
                     SELECT id, name
                     FROM users
@@ -244,24 +361,38 @@ class JdbcQueryExecutorTest {
                       AND active = ?
                     """,
                 List.of(1L, true),
-                resultSet -> new User(
-                    resultSet.getLong("id"),
-                    resultSet.getString("name")
-                )
+                userMapper()
             );
 
             assertEquals(new User(1L, "Alice"), result);
 
-            assertNull(
-                connectionExecutor.query(
+            assertTrue(
+                connectionExecutor.queryOptional(
+                    REPOSITORY,
+                    "FindUser",
                     "SELECT id, name FROM users WHERE id = ?",
                     List.of(999L),
-                    resultSet -> new User(
-                        resultSet.getLong("id"),
-                        resultSet.getString("name")
-                    )
+                    userMapper()
+                ).isEmpty()
+            );
+
+            QueryCardinalityException exception = assertThrows(
+                QueryCardinalityException.class,
+                () -> connectionExecutor.queryOne(
+                    REPOSITORY,
+                    "GetUser",
+                    "SELECT id, name FROM users WHERE id = ?",
+                    List.of(999L),
+                    userMapper()
                 )
             );
+
+            assertEquals(
+                "Query 'GetUser' in UsersRepository returned no row; expected exactly one",
+                exception.getMessage()
+            );
+
+            assertFalse(connection.isClosed());
         }
     }
 
@@ -271,6 +402,8 @@ class JdbcQueryExecutorTest {
             JdbcQueryExecutor connectionExecutor = new JdbcQueryExecutor(connection);
 
             List<User> results = connectionExecutor.queryMany(
+                REPOSITORY,
+                "ListUsers",
                 """
                     SELECT id, name
                     FROM users
@@ -278,10 +411,7 @@ class JdbcQueryExecutorTest {
                     ORDER BY id
                     """,
                 List.of(true),
-                resultSet -> new User(
-                    resultSet.getLong("id"),
-                    resultSet.getString("name")
-                )
+                userMapper()
             );
 
             assertEquals(
@@ -294,12 +424,11 @@ class JdbcQueryExecutorTest {
 
             assertTrue(
                 connectionExecutor.queryMany(
+                    REPOSITORY,
+                    "ListUsers",
                     "SELECT id, name FROM users WHERE id = ?",
                     List.of(999L),
-                    resultSet -> new User(
-                        resultSet.getLong("id"),
-                        resultSet.getString("name")
-                    )
+                    userMapper()
                 ).isEmpty()
             );
         }
@@ -311,6 +440,8 @@ class JdbcQueryExecutorTest {
             JdbcQueryExecutor connectionExecutor = new JdbcQueryExecutor(connection);
 
             int affected = connectionExecutor.execute(
+                REPOSITORY,
+                "RenameActiveUsers",
                 """
                     UPDATE users
                     SET name = ?
@@ -323,7 +454,9 @@ class JdbcQueryExecutorTest {
 
             assertEquals(
                 "Renamed",
-                connectionExecutor.query(
+                connectionExecutor.queryOne(
+                    REPOSITORY,
+                    "GetUserName",
                     "SELECT name FROM users WHERE id = ?",
                     List.of(1L),
                     resultSet -> resultSet.getString("name")
@@ -348,11 +481,15 @@ class JdbcQueryExecutorTest {
             JdbcQueryExecutor connectionExecutor = new JdbcQueryExecutor(connection);
 
             connectionExecutor.execute(
+                REPOSITORY,
+                "InsertUser",
                 "INSERT INTO users (id, name, active) VALUES (?, ?, ?)",
                 List.of(4L, "Dora", true)
             );
 
             connectionExecutor.execute(
+                REPOSITORY,
+                "UpdateUserName",
                 "UPDATE users SET name = ? WHERE id = ?",
                 List.of("Alicia", 1L)
             );
@@ -363,6 +500,8 @@ class JdbcQueryExecutorTest {
                     new User(4L, "Dora")
                 ),
                 connectionExecutor.queryMany(
+                    REPOSITORY,
+                    "ListUsers",
                     """
                         SELECT id, name
                         FROM users
@@ -370,10 +509,7 @@ class JdbcQueryExecutorTest {
                         ORDER BY id
                         """,
                     List.of(1L, 4L),
-                    resultSet -> new User(
-                        resultSet.getLong("id"),
-                        resultSet.getString("name")
-                    )
+                    userMapper()
                 )
             );
 
@@ -386,6 +522,8 @@ class JdbcQueryExecutorTest {
             assertEquals(
                 List.of(new User(1L, "Alice")),
                 connectionExecutor.queryMany(
+                    REPOSITORY,
+                    "ListUsers",
                     """
                         SELECT id, name
                         FROM users
@@ -393,10 +531,7 @@ class JdbcQueryExecutorTest {
                         ORDER BY id
                         """,
                     List.of(1L, 4L),
-                    resultSet -> new User(
-                        resultSet.getLong("id"),
-                        resultSet.getString("name")
-                    )
+                    userMapper()
                 )
             );
         }
@@ -411,25 +546,39 @@ class JdbcQueryExecutorTest {
                 tracker.track(Connection.class, connection)
             );
 
-            connectionExecutor.query(
+            connectionExecutor.queryOne(
+                REPOSITORY,
+                "GetUser",
+                "SELECT id FROM users WHERE id = ?",
+                List.of(1L),
+                resultSet -> resultSet.getLong("id")
+            );
+
+            connectionExecutor.queryOptional(
+                REPOSITORY,
+                "FindUser",
                 "SELECT id FROM users WHERE id = ?",
                 List.of(1L),
                 resultSet -> resultSet.getLong("id")
             );
 
             connectionExecutor.queryMany(
+                REPOSITORY,
+                "ListUsers",
                 "SELECT id FROM users",
                 List.of(),
                 resultSet -> resultSet.getLong("id")
             );
 
             connectionExecutor.execute(
+                REPOSITORY,
+                "UpdateUserName",
                 "UPDATE users SET name = ? WHERE id = ?",
                 List.of("Alicia", 1L)
             );
 
-            assertEquals(3, tracker.statements.size());
-            assertEquals(2, tracker.resultSets.size());
+            assertEquals(4, tracker.statements.size());
+            assertEquals(3, tracker.resultSets.size());
             tracker.assertAllStatementsAndResultSetsClosed();
 
             assertFalse(connection.isClosed());
@@ -447,17 +596,61 @@ class JdbcQueryExecutorTest {
 
             QueryExecutionException exception = assertThrows(
                 QueryExecutionException.class,
-                () -> connectionExecutor.query(
+                () -> connectionExecutor.queryOne(
+                    REPOSITORY,
+                    "GetUser",
                     "SELECT id FROM users WHERE id = ?",
                     List.of(),
                     resultSet -> resultSet.getLong("id")
                 )
             );
 
-            assertEquals("Failed to execute query", exception.getMessage());
+            assertEquals(
+                "Failed to execute query 'GetUser' in UsersRepository",
+                exception.getMessage()
+            );
+
             assertInstanceOf(SQLException.class, exception.getCause());
 
             assertEquals(1, tracker.statements.size());
+            tracker.assertAllStatementsAndResultSetsClosed();
+
+            assertFalse(connection.isClosed());
+        }
+    }
+
+    /**
+     * A cardinality failure is raised after the statement has executed, so the
+     * statement and its result set are still closed and the caller-owned
+     * connection is left open.
+     */
+    @Test
+    void shouldCloseStatementWhenCardinalityFailsOnCallerOwnedConnection() throws SQLException {
+        JdbcResourceTracker tracker = new JdbcResourceTracker();
+
+        try (Connection connection = dataSource.getConnection()) {
+            JdbcQueryExecutor connectionExecutor = new JdbcQueryExecutor(
+                tracker.track(Connection.class, connection)
+            );
+
+            QueryCardinalityException exception = assertThrows(
+                QueryCardinalityException.class,
+                () -> connectionExecutor.queryOne(
+                    REPOSITORY,
+                    "GetUser",
+                    "SELECT id FROM users WHERE active = ?",
+                    List.of(true),
+                    resultSet -> resultSet.getLong("id")
+                )
+            );
+
+            assertEquals(
+                "Query 'GetUser' in UsersRepository returned more than one row; expected exactly one",
+                exception.getMessage()
+            );
+
+            assertEquals(1, tracker.statements.size());
+            assertEquals(1, tracker.resultSets.size());
             tracker.assertAllStatementsAndResultSetsClosed();
 
             assertFalse(connection.isClosed());
@@ -471,25 +664,37 @@ class JdbcQueryExecutorTest {
 
             QueryExecutionException queryException = assertThrows(
                 QueryExecutionException.class,
-                () -> connectionExecutor.query(
+                () -> connectionExecutor.queryOne(
+                    REPOSITORY,
+                    "GetUser",
                     "SELECT * FROM missing_table",
                     List.of(),
                     resultSet -> resultSet.getLong("id")
                 )
             );
 
-            assertEquals("Failed to execute query", queryException.getMessage());
+            assertEquals(
+                "Failed to execute query 'GetUser' in UsersRepository",
+                queryException.getMessage()
+            );
+
             assertInstanceOf(SQLException.class, queryException.getCause());
 
             QueryExecutionException executeException = assertThrows(
                 QueryExecutionException.class,
                 () -> connectionExecutor.execute(
+                    REPOSITORY,
+                    "DeleteUsers",
                     "DELETE FROM missing_table",
                     List.of()
                 )
             );
 
-            assertEquals("Failed to execute query", executeException.getMessage());
+            assertEquals(
+                "Failed to execute query 'DeleteUsers' in UsersRepository",
+                executeException.getMessage()
+            );
+
             assertInstanceOf(SQLException.class, executeException.getCause());
 
             assertFalse(connection.isClosed());
@@ -504,26 +709,40 @@ class JdbcQueryExecutorTest {
             tracker.track(DataSource.class, dataSource)
         );
 
-        dataSourceExecutor.query(
+        dataSourceExecutor.queryOne(
+            REPOSITORY,
+            "GetUser",
+            "SELECT id FROM users WHERE id = ?",
+            List.of(1L),
+            resultSet -> resultSet.getLong("id")
+        );
+
+        dataSourceExecutor.queryOptional(
+            REPOSITORY,
+            "FindUser",
             "SELECT id FROM users WHERE id = ?",
             List.of(1L),
             resultSet -> resultSet.getLong("id")
         );
 
         dataSourceExecutor.queryMany(
+            REPOSITORY,
+            "ListUsers",
             "SELECT id FROM users",
             List.of(),
             resultSet -> resultSet.getLong("id")
         );
 
         dataSourceExecutor.execute(
+            REPOSITORY,
+            "UpdateUserName",
             "UPDATE users SET name = ? WHERE id = ?",
             List.of("Alicia", 1L)
         );
 
-        assertEquals(3, tracker.connections.size());
-        assertEquals(3, tracker.statements.size());
-        assertEquals(2, tracker.resultSets.size());
+        assertEquals(4, tracker.connections.size());
+        assertEquals(4, tracker.statements.size());
+        assertEquals(3, tracker.resultSets.size());
 
         tracker.assertAllConnectionsClosed();
         tracker.assertAllStatementsAndResultSetsClosed();
@@ -539,14 +758,20 @@ class JdbcQueryExecutorTest {
 
         QueryExecutionException exception = assertThrows(
             QueryExecutionException.class,
-            () -> dataSourceExecutor.query(
+            () -> dataSourceExecutor.queryOne(
+                REPOSITORY,
+                "GetUser",
                 "SELECT id FROM users WHERE id = ?",
                 List.of(),
                 resultSet -> resultSet.getLong("id")
             )
         );
 
-        assertEquals("Failed to execute query", exception.getMessage());
+        assertEquals(
+            "Failed to execute query 'GetUser' in UsersRepository",
+            exception.getMessage()
+        );
+
         assertInstanceOf(SQLException.class, exception.getCause());
 
         assertEquals(1, tracker.connections.size());
@@ -554,6 +779,49 @@ class JdbcQueryExecutorTest {
 
         tracker.assertAllConnectionsClosed();
         tracker.assertAllStatementsAndResultSetsClosed();
+    }
+
+    /**
+     * A cardinality failure on the DataSource path closes the acquired
+     * connection together with the statement and its result set.
+     */
+    @Test
+    void shouldCloseAcquiredConnectionWhenCardinalityFails() throws SQLException {
+        JdbcResourceTracker tracker = new JdbcResourceTracker();
+
+        JdbcQueryExecutor dataSourceExecutor = new JdbcQueryExecutor(
+            tracker.track(DataSource.class, dataSource)
+        );
+
+        QueryCardinalityException exception = assertThrows(
+            QueryCardinalityException.class,
+            () -> dataSourceExecutor.queryOptional(
+                REPOSITORY,
+                "FindUser",
+                "SELECT id FROM users WHERE active = ?",
+                List.of(true),
+                resultSet -> resultSet.getLong("id")
+            )
+        );
+
+        assertEquals(
+            "Query 'FindUser' in UsersRepository returned more than one row; expected at most one",
+            exception.getMessage()
+        );
+
+        assertEquals(1, tracker.connections.size());
+        assertEquals(1, tracker.statements.size());
+        assertEquals(1, tracker.resultSets.size());
+
+        tracker.assertAllConnectionsClosed();
+        tracker.assertAllStatementsAndResultSetsClosed();
+    }
+
+    private RowMapper<User> userMapper() {
+        return resultSet -> new User(
+            resultSet.getLong("id"),
+            resultSet.getString("name")
+        );
     }
 
     private record User(

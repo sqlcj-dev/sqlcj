@@ -20,6 +20,7 @@ import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -254,10 +255,48 @@ class JavaCodeGeneratorNamingTest {
     }
 
     /**
+     * A query name containing a quote and a backslash is passed to the runtime
+     * as its exact SQL spelling, so the generated identity literal escapes both
+     * characters.
+     */
+    @Test
+    void shouldPassExactRepositoryAndQueryNameToTheExecutor() throws Exception {
+        GeneratedFile file = generate(
+            query(
+                "List\"Users\\",
+                List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+                List.of()
+            )
+        );
+
+        assertTrue(file.content().contains("\"UsersRepository\""));
+        assertTrue(file.content().contains("\"List\\\"Users\\\\\""));
+
+        assertCompiles(file);
+
+        RecordingQueryExecutor executor = execute(file, "listUsers");
+
+        assertEquals("UsersRepository", executor.repository);
+        assertEquals("List\"Users\\", executor.query);
+    }
+
+    /**
      * Compiles the generated class, runs its query method against a recording
      * executor, and returns the SQL the generated code passed to the runtime.
      */
     private String executedSql(GeneratedFile file, String methodName, Object... arguments) throws Exception {
+        return execute(file, methodName, arguments).sql;
+    }
+
+    /**
+     * Compiles the generated class, runs its query method against a recording
+     * executor, and returns that executor.
+     */
+    private RecordingQueryExecutor execute(
+        GeneratedFile file,
+        String methodName,
+        Object... arguments
+    ) throws Exception {
         Path classesDirectory = tempDir.resolve("classes");
 
         try (
@@ -283,33 +322,68 @@ class JavaCodeGeneratorNamingTest {
 
             method.invoke(instance, arguments);
 
-            return executor.sql;
+            return executor;
         }
     }
 
     private static final class RecordingQueryExecutor implements QueryExecutor {
 
+        private String repository;
+
+        private String query;
+
         private String sql;
 
         @Override
-        public <T> T query(String sql, List<?> parameters, RowMapper<T> mapper) {
-            this.sql = sql;
+        public <T> T queryOne(
+            String repository,
+            String query,
+            String sql,
+            List<?> parameters,
+            RowMapper<T> mapper
+        ) {
+            record(repository, query, sql);
 
             return null;
         }
 
         @Override
-        public <T> List<T> queryMany(String sql, List<?> parameters, RowMapper<T> mapper) {
-            this.sql = sql;
+        public <T> Optional<T> queryOptional(
+            String repository,
+            String query,
+            String sql,
+            List<?> parameters,
+            RowMapper<T> mapper
+        ) {
+            record(repository, query, sql);
+
+            return Optional.empty();
+        }
+
+        @Override
+        public <T> List<T> queryMany(
+            String repository,
+            String query,
+            String sql,
+            List<?> parameters,
+            RowMapper<T> mapper
+        ) {
+            record(repository, query, sql);
 
             return List.of();
         }
 
         @Override
-        public int execute(String sql, List<?> parameters) {
-            this.sql = sql;
+        public int execute(String repository, String query, String sql, List<?> parameters) {
+            record(repository, query, sql);
 
             return 0;
+        }
+
+        private void record(String repository, String query, String sql) {
+            this.repository = repository;
+            this.query = query;
+            this.sql = sql;
         }
     }
 

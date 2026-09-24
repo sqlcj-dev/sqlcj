@@ -4,6 +4,7 @@ import dev.sqlcj.config.Config;
 import dev.sqlcj.config.JavaConfig;
 import dev.sqlcj.config.SqlConfig;
 import dev.sqlcj.runtime.JdbcQueryExecutor;
+import dev.sqlcj.runtime.QueryCardinalityException;
 import dev.sqlcj.runtime.QueryExecutor;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
@@ -13,6 +14,7 @@ import javax.tools.JavaCompiler;
 import javax.tools.ToolProvider;
 import java.io.IOException;
 import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.net.URL;
@@ -29,7 +31,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -684,7 +685,20 @@ class SqlcjCompilerIntegrationTest {
             assertEquals(1L, getRecordComponent(result, "id"));
             assertEquals("Alice", getRecordComponent(result, "name"));
 
-            assertNull(method.invoke(generatedQuery, 2L, "Alice"));
+            InvocationTargetException failure = assertThrows(
+                InvocationTargetException.class,
+                () -> method.invoke(generatedQuery, 2L, "Alice")
+            );
+
+            QueryCardinalityException cardinality = assertInstanceOf(
+                QueryCardinalityException.class,
+                failure.getCause()
+            );
+
+            assertEquals(
+                "Query 'FindUser' in UsersRepository returned no row; expected exactly one",
+                cardinality.getMessage()
+            );
         }
     }
 
@@ -740,7 +754,7 @@ class SqlcjCompilerIntegrationTest {
     void shouldExecuteGeneratedQueryWithoutParameters() throws Exception {
         Path classesDirectory = generateAndCompile(
             """
-                -- name: GetFirstUser :one
+                -- name: ListAllUsers :many
                 SELECT id, name
                 FROM users
                 ORDER BY id;
@@ -751,7 +765,7 @@ class SqlcjCompilerIntegrationTest {
 
         assertTrue(
             source.contains(
-                "public GetFirstUserResult getFirstUser()"
+                "public List<ListAllUsersResult> listAllUsers()"
             )
         );
 
@@ -770,14 +784,19 @@ class SqlcjCompilerIntegrationTest {
                 .getConstructor(QueryExecutor.class)
                 .newInstance(executor);
 
-            Object result = generatedClass
-                .getMethod("getFirstUser")
-                .invoke(generatedQuery);
+            List<?> results = assertInstanceOf(
+                List.class,
+                generatedClass
+                    .getMethod("listAllUsers")
+                    .invoke(generatedQuery)
+            );
 
-            assertNotNull(result);
+            assertEquals(2, results.size());
 
-            assertEquals(1L, getRecordComponent(result, "id"));
-            assertEquals("Alice", getRecordComponent(result, "name"));
+            assertEquals(1L, getRecordComponent(results.get(0), "id"));
+            assertEquals("Alice", getRecordComponent(results.get(0), "name"));
+            assertEquals(2L, getRecordComponent(results.get(1), "id"));
+            assertEquals("Bob", getRecordComponent(results.get(1), "name"));
         }
     }
 
@@ -825,7 +844,9 @@ class SqlcjCompilerIntegrationTest {
 
             assertEquals(
                 "Carol",
-                executor.query(
+                executor.queryOne(
+                    "UsersRepository",
+                    "GetUserName",
                     "SELECT name FROM users WHERE id = ?",
                     List.of(3L),
                     resultSet -> resultSet.getString("name")
@@ -876,7 +897,9 @@ class SqlcjCompilerIntegrationTest {
 
             assertEquals(
                 "Alicia",
-                executor.query(
+                executor.queryOne(
+                    "UsersRepository",
+                    "GetUserName",
                     "SELECT name FROM users WHERE id = ?",
                     List.of(1L),
                     resultSet -> resultSet.getString("name")
@@ -919,12 +942,14 @@ class SqlcjCompilerIntegrationTest {
 
             assertEquals(1, affected);
 
-            assertNull(
-                executor.query(
+            assertTrue(
+                executor.queryOptional(
+                    "UsersRepository",
+                    "FindUserName",
                     "SELECT name FROM users WHERE id = ?",
                     List.of(2L),
                     resultSet -> resultSet.getString("name")
-                )
+                ).isEmpty()
             );
         }
     }
@@ -1759,7 +1784,7 @@ class SqlcjCompilerIntegrationTest {
         assertTrue(repository.contains("Boolean active"));
         assertTrue(repository.contains("public UsersRow insertUser(Long id, String name)"));
         assertTrue(repository.contains("private static final RowMapper<UsersRow> usersRowMapper"));
-        assertTrue(repository.contains("return executor.query("));
+        assertTrue(repository.contains("return executor.queryOne("));
         assertTrue(repository.contains("VALUES (?, ?)"));
         assertTrue(repository.contains("RETURNING *"));
 

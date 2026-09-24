@@ -4,6 +4,7 @@ import dev.sqlcj.config.Config;
 import dev.sqlcj.config.JavaConfig;
 import dev.sqlcj.config.SqlConfig;
 import dev.sqlcj.runtime.JdbcQueryExecutor;
+import dev.sqlcj.runtime.QueryCardinalityException;
 import dev.sqlcj.runtime.QueryExecutor;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -20,6 +21,7 @@ import javax.sql.DataSource;
 import javax.tools.JavaCompiler;
 import javax.tools.ToolProvider;
 import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.RecordComponent;
 import java.math.BigDecimal;
@@ -36,6 +38,7 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Stream;
@@ -45,6 +48,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -136,6 +140,28 @@ class PostgresIntegrationTest {
         -- name: ListUserNames :many
         SELECT name
         FROM users
+        ORDER BY id;
+        """;
+
+    /**
+     * Queries used by the cardinality test: the same predicate on the
+     * non-unique {@code code} column declared with each result annotation.
+     */
+    private static final String CARDINALITY_QUERIES = """
+        -- name: GetUserByCode :one
+        SELECT id, name
+        FROM users
+        WHERE code = $1;
+
+        -- name: FindUserByCode :optional
+        SELECT id, name
+        FROM users
+        WHERE code = $1;
+
+        -- name: ListUsersByCode :many
+        SELECT id, name
+        FROM users
+        WHERE code = $1
         ORDER BY id;
         """;
 
@@ -645,7 +671,8 @@ class PostgresIntegrationTest {
     /**
      * Covers a returning update: the repeated and out-of-order placeholders are
      * bound in textual order, the returned columns keep their declared order,
-     * and a no-row update produces the {@code :one} null result.
+     * and a no-row update fails the {@code :one} cardinality check after the
+     * statement itself executed.
      */
     @Test
     void shouldExecuteGeneratedUpdateReturningAgainstPostgres() throws Exception {
@@ -688,7 +715,10 @@ class PostgresIntegrationTest {
             assertEquals("Renamed", component(result, "name"));
             assertNull(component(result, "score"));
 
-            assertNull(method.invoke(repository, 404L, "Missing", 42));
+            assertEquals(
+                "Query 'RenameUser' in UsersRepository returned no row; expected exactly one",
+                cardinalityFailure(method, repository, 404L, "Missing", 42).getMessage()
+            );
         }
     }
 
@@ -816,6 +846,109 @@ class PostgresIntegrationTest {
                 method.invoke(repository, Boolean.TRUE)
             );
         }
+    }
+
+    /**
+     * Covers the three result annotations over zero, one, and two matching rows
+     * of a non-unique column, through both executor construction paths: a
+     * {@code :one} query requires exactly one row, {@code :optional} accepts
+     * none or one, and {@code :many} accepts any number. A failed cardinality
+     * check leaves the caller-owned connection open.
+     */
+    @Test
+    void shouldEnforceResultCardinalitiesAgainstPostgres() throws Exception {
+        Path classesDirectory = generateAndCompile(CARDINALITY_QUERIES);
+
+        execute("""
+            INSERT INTO users (id, code, name)
+            VALUES
+                (1, 42, 'Alice'),
+                (2, 7, 'Bob'),
+                (3, 7, 'Carol')
+            """);
+
+        try (
+            URLClassLoader classLoader = classLoader(classesDirectory);
+            Connection connection = dataSource.getConnection()
+        ) {
+            assertCardinalityContract(newRepository(classLoader));
+
+            assertCardinalityContract(
+                newRepository(classLoader, new JdbcQueryExecutor(connection))
+            );
+
+            assertFalse(connection.isClosed());
+        }
+    }
+
+    /**
+     * Asserts the documented contract of the three cardinality annotations on
+     * one generated repository instance.
+     */
+    private void assertCardinalityContract(Object repository) throws Exception {
+        Method one = repository.getClass().getMethod("getUserByCode", Integer.class);
+        Method optional = repository.getClass().getMethod("findUserByCode", Integer.class);
+        Method many = repository.getClass().getMethod("listUsersByCode", Integer.class);
+
+        Object single = one.invoke(repository, 42);
+
+        assertEquals(1L, component(single, "id"));
+        assertEquals("Alice", component(single, "name"));
+
+        assertEquals(
+            "Query 'GetUserByCode' in UsersRepository returned no row; expected exactly one",
+            cardinalityFailure(one, repository, 1).getMessage()
+        );
+
+        assertEquals(
+            "Query 'GetUserByCode' in UsersRepository returned more than one row; expected exactly one",
+            cardinalityFailure(one, repository, 7).getMessage()
+        );
+
+        Optional<?> found = assertInstanceOf(
+            Optional.class,
+            optional.invoke(repository, 42)
+        );
+
+        assertEquals(1L, component(found.orElseThrow(), "id"));
+
+        assertTrue(
+            assertInstanceOf(Optional.class, optional.invoke(repository, 1)).isEmpty()
+        );
+
+        assertEquals(
+            "Query 'FindUserByCode' in UsersRepository returned more than one row; expected at most one",
+            cardinalityFailure(optional, repository, 7).getMessage()
+        );
+
+        assertTrue(
+            assertInstanceOf(List.class, many.invoke(repository, 1)).isEmpty()
+        );
+
+        List<?> listed = assertInstanceOf(List.class, many.invoke(repository, 7));
+
+        assertEquals(2, listed.size());
+        assertEquals(2L, component(listed.get(0), "id"));
+        assertEquals("Bob", component(listed.get(0), "name"));
+        assertEquals(3L, component(listed.get(1), "id"));
+        assertEquals("Carol", component(listed.get(1), "name"));
+    }
+
+    /**
+     * Invokes a generated method that must fail its cardinality check and
+     * returns the runtime exception it raised.
+     */
+    private QueryCardinalityException cardinalityFailure(
+        Method method,
+        Object repository,
+        Object... arguments
+    ) {
+        InvocationTargetException failure = assertThrows(
+            InvocationTargetException.class,
+            () -> method.invoke(repository, arguments)
+        );
+
+        return assertInstanceOf(QueryCardinalityException.class, failure.getCause());
     }
 
     /**

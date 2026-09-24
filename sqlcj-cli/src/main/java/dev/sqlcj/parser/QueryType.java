@@ -2,6 +2,7 @@ package dev.sqlcj.parser;
 
 public enum QueryType {
     ONE,
+    OPTIONAL,
     MANY,
     EXEC,
     EXEC_RESULT,
@@ -12,6 +13,7 @@ public enum QueryType {
     public static QueryType from(String value) {
         return switch (value) {
             case ":one" -> ONE;
+            case ":optional" -> OPTIONAL;
             case ":many" -> MANY;
             case ":exec" -> EXEC;
             case ":execresult" -> EXEC_RESULT;

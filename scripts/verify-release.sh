@@ -123,7 +123,7 @@ generated_count=$(find "${generated_root}" -type f -name '*.java' | wc -l)
 [ "${generated_count}" -eq 1 ] \
     || fail "expected 1 generated source but found ${generated_count}"
 
-for method in createAuthor getAuthor listAuthors updateAuthorBio deleteAuthor; do
+for method in createAuthor getAuthor findAuthor listAuthors updateAuthorBio deleteAuthor; do
     grep -q " ${method}(" "${generated_package}/AuthorRepository.java" \
         || fail "the generated repository is missing the ${method} method"
 done

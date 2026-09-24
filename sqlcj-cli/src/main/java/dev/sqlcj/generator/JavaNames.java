@@ -283,7 +283,9 @@ final class JavaNames {
     }
 
     private static boolean generatesRowMapper(QueryModel query) {
-        return query.type() == QueryType.ONE || query.type() == QueryType.MANY;
+        return query.type() == QueryType.ONE
+            || query.type() == QueryType.OPTIONAL
+            || query.type() == QueryType.MANY;
     }
 
     /**

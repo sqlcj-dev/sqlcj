@@ -98,6 +98,10 @@ public final class JavaCodeGenerator implements CodeGenerator {
             imports.add("java.util.List");
         }
 
+        if (group.queries().stream().anyMatch(this::isOptional)) {
+            imports.add("java.util.Optional");
+        }
+
         for (QueryModel query : group.queries()) {
             query.columns().stream()
                 .map(QueryColumn::type)
@@ -119,7 +123,12 @@ public final class JavaCodeGenerator implements CodeGenerator {
 
     private boolean hasResult(QueryModel query) {
         return query.type() == QueryType.ONE
+            || query.type() == QueryType.OPTIONAL
             || query.type() == QueryType.MANY;
+    }
+
+    private boolean isOptional(QueryModel query) {
+        return query.type() == QueryType.OPTIONAL;
     }
 
     private boolean isExec(QueryModel query) {
@@ -213,7 +222,10 @@ public final class JavaCodeGenerator implements CodeGenerator {
                 );
             }
 
-            members.add(generateJavaDoc(query) + generateMethod(query, queryNames));
+            members.add(
+                generateJavaDoc(query)
+                    + generateMethod(query, names.repositoryClassName(), queryNames)
+            );
         }
 
         return """
@@ -286,18 +298,28 @@ public final class JavaCodeGenerator implements CodeGenerator {
             .collect(Collectors.joining(", "));
     }
 
-    private String generateMethod(QueryModel query, JavaNames.QueryNames names) {
+    private String generateMethod(
+        QueryModel query,
+        String repositoryClassName,
+        JavaNames.QueryNames names
+    ) {
         return switch (query.type()) {
-            case ONE, MANY -> generateQueryMethod(query, names);
-            case EXEC -> generateExecMethod(query, names);
+            case ONE, OPTIONAL, MANY -> generateQueryMethod(query, repositoryClassName, names);
+            case EXEC -> generateExecMethod(query, repositoryClassName, names);
             case EXEC_RESULT, BATCH_EXEC, BATCH_MANY, BATCH_ONE -> generateUnsupportedMethod(query, names);
         };
     }
 
-    private String generateQueryMethod(QueryModel query, JavaNames.QueryNames names) {
+    private String generateQueryMethod(
+        QueryModel query,
+        String repositoryClassName,
+        JavaNames.QueryNames names
+    ) {
         return """
             public %s %s(%s) {
                 return executor.%s(
+                        %s,
+                        %s,
                         %s,
                         %s,
                         %s
@@ -309,16 +331,24 @@ public final class JavaCodeGenerator implements CodeGenerator {
                 names.methodName(),
                 generateMethodParameters(query, names),
                 generateExecutorMethod(query),
+                generateStringLiteral(repositoryClassName),
+                generateStringLiteral(query.name()),
                 generateSql(query),
                 generateParameterList(query, names),
                 names.rowMapperName()
             );
     }
 
-    private String generateExecMethod(QueryModel query, JavaNames.QueryNames names) {
+    private String generateExecMethod(
+        QueryModel query,
+        String repositoryClassName,
+        JavaNames.QueryNames names
+    ) {
         return """
             public %s %s(%s) {
                 return executor.execute(
+                        %s,
+                        %s,
                         %s,
                         %s
                 );
@@ -328,6 +358,8 @@ public final class JavaCodeGenerator implements CodeGenerator {
                 generateReturnType(query, names),
                 names.methodName(),
                 generateMethodParameters(query, names),
+                generateStringLiteral(repositoryClassName),
+                generateStringLiteral(query.name()),
                 generateSql(query),
                 generateParameterList(query, names)
             );
@@ -348,12 +380,25 @@ public final class JavaCodeGenerator implements CodeGenerator {
 
     private String generateExecutorMethod(QueryModel query) {
         return switch (query.type()) {
-            case ONE -> "query";
+            case ONE -> "queryOne";
+            case OPTIONAL -> "queryOptional";
             case MANY -> "queryMany";
             default -> throw new IllegalStateException(
                 "Query type does not produce a result: " + query.type()
             );
         };
+    }
+
+    /**
+     * Renders the repository and query identity an executor call reports in its
+     * failures as a Java string literal.
+     */
+    private String generateStringLiteral(String value) {
+        return "\""
+            + value
+                .replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+            + "\"";
     }
 
     private String generateSql(QueryModel query) {
@@ -447,6 +492,7 @@ public final class JavaCodeGenerator implements CodeGenerator {
     private String generateReturnType(QueryModel query, JavaNames.QueryNames names) {
         return switch (query.type()) {
             case ONE -> names.resultTypeName();
+            case OPTIONAL -> "Optional<" + names.resultTypeName() + ">";
             case MANY -> "List<" + names.resultTypeName() + ">";
             case EXEC -> "int";
             case EXEC_RESULT -> "void";
