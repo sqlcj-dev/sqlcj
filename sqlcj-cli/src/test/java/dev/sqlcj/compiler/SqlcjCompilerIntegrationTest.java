@@ -151,11 +151,11 @@ class SqlcjCompilerIntegrationTest {
                 .count()
         );
 
-        assertTrue(repository.contains("public GetUserResult getUser(LocalDateTime created_at)"));
+        assertTrue(repository.contains("public GetUserResult getUser(LocalDateTime createdAt)"));
         assertTrue(repository.contains("Long id"));
         assertTrue(repository.contains("String name"));
-        assertTrue(repository.contains("LocalDate birth_date"));
-        assertTrue(repository.contains("LocalDateTime created_at"));
+        assertTrue(repository.contains("LocalDate birthDate"));
+        assertTrue(repository.contains("LocalDateTime createdAt"));
         assertTrue(repository.contains("BigDecimal balance"));
         assertTrue(repository.contains("private static final RowMapper<GetUserResult> getUserRowMapper"));
         assertTrue(repository.contains("resultSet.getObject(1, Long.class)"));
@@ -165,8 +165,18 @@ class SqlcjCompilerIntegrationTest {
         assertTrue(repository.contains("resultSet.getObject(5, LocalDateTime.class)"));
         assertTrue(repository.contains("resultSet.getObject(6, BigDecimal.class)"));
 
-        assertTrue(repository.contains("public List<ListUsersResult> listUsers(LocalDateTime created_at)"));
+        assertTrue(repository.contains("public List<ListUsersResult> listUsers(LocalDateTime createdAt)"));
         assertTrue(repository.contains("private static final RowMapper<ListUsersResult> listUsersRowMapper"));
+
+        assertEquals(
+            List.of(
+                "Long id",
+                "LocalDate birthDate",
+                "LocalDateTime createdAt",
+                "BigDecimal balance"
+            ),
+            recordComponents(repository, "ListUsersResult")
+        );
 
         assertTrue(
             repository
@@ -1000,6 +1010,70 @@ class SqlcjCompilerIntegrationTest {
         }
     }
 
+    /**
+     * An explicit projection alias names the generated record component, while
+     * the row mapper keeps reading each column by its projection position.
+     */
+    @Test
+    void shouldExecuteGeneratedJoinQueryWithProjectionAliases() throws Exception {
+        Path classesDirectory = generateAndCompile(
+            JOIN_SCHEMA,
+            """
+                -- name: ListUserProfiles :many
+                SELECT u.id AS user_id, p.id AS profile_id, p.nickname
+                FROM users u
+                JOIN profiles p ON p.user_id = u.id
+                WHERE u.id = $1;
+                """
+        );
+
+        String source = Files.readString(tempDir.resolve("generated/generated/UsersRepository.java"));
+
+        assertTrue(
+            source.contains(
+                "public List<ListUserProfilesResult> listUserProfiles(Long id)"
+            )
+        );
+
+        assertEquals(
+            List.of("Long userId", "Long profileId", "String nickname"),
+            recordComponents(source, "ListUserProfilesResult")
+        );
+
+        assertTrue(source.contains("resultSet.getObject(1, Long.class)"));
+        assertTrue(source.contains("resultSet.getObject(2, Long.class)"));
+        assertTrue(source.contains("resultSet.getObject(3, String.class)"));
+
+        QueryExecutor executor = new JdbcQueryExecutor(joinDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName(
+                "generated.UsersRepository",
+                true,
+                classLoader
+            );
+
+            Object results = generatedClass
+                .getMethod("listUserProfiles", Long.class)
+                .invoke(
+                    generatedClass
+                        .getConstructor(QueryExecutor.class)
+                        .newInstance(executor),
+                    1L
+                );
+
+            List<?> rows = assertInstanceOf(List.class, results);
+
+            assertEquals(1, rows.size());
+
+            Object row = rows.getFirst();
+
+            assertEquals(1L, getRecordComponent(row, "userId"));
+            assertEquals(10L, getRecordComponent(row, "profileId"));
+            assertEquals("ali", getRecordComponent(row, "nickname"));
+        }
+    }
+
     @Test
     void shouldExecuteGeneratedMultipleJoinQuery() throws Exception {
         Path classesDirectory = generateAndCompile(
@@ -1130,7 +1204,7 @@ class SqlcjCompilerIntegrationTest {
 
         assertTrue(orders.startsWith("package dev.example.generated;"));
         assertTrue(orders.contains("public final class OrdersRepository {"));
-        assertTrue(orders.contains("public List<ListOrdersResult> listOrders(LocalDateTime created_at)"));
+        assertTrue(orders.contains("public List<ListOrdersResult> listOrders(LocalDateTime createdAt)"));
         assertTrue(orders.contains("BigDecimal total"));
 
         Files.createDirectories(classesDirectory);
@@ -1418,7 +1492,7 @@ class SqlcjCompilerIntegrationTest {
 
         assertEquals(
             "Invalid query group 'Users' in %s: ".formatted(tempDir.resolve("queries.sql"))
-                + "Queries 'Get.User' and 'Get-User' generate the same repository method 'get_User'",
+                + "Queries 'Get.User' and 'Get-User' generate the same repository method 'getUser'",
             exception.getMessage()
         );
 
@@ -1454,7 +1528,7 @@ class SqlcjCompilerIntegrationTest {
         assertEquals(
             "Invalid query group 'Users' in %s: ".formatted(tempDir.resolve("queries.sql"))
                 + "Queries 'GetUser' and 'getuser' generate result types that differ only by case: "
-                + "GetUserResult and getuserResult",
+                + "GetUserResult and GetuserResult",
             exception.getMessage()
         );
 
@@ -1479,8 +1553,12 @@ class SqlcjCompilerIntegrationTest {
         assertFalse(Files.exists(generatedDirectory));
     }
 
+    /**
+     * Two group names that differ only by the case of their first character
+     * generate one repository name, so they collide as a duplicate path.
+     */
     @Test
-    void shouldRejectRepositoryPathsThatDifferOnlyByCaseBeforeWriting() throws IOException {
+    void shouldRejectRepositoryNamesThatDifferOnlyByTheirFirstCharacterCase() throws IOException {
         Path generatedDirectory = tempDir.resolve("generated");
 
         CompilationException exception = assertThrows(
@@ -1489,10 +1567,28 @@ class SqlcjCompilerIntegrationTest {
         );
 
         assertEquals(
-            "Generated file paths for repositories 'Users' and 'users' differ only by case: "
-                + Path.of("generated", "UsersRepository.java")
+            "Duplicate generated file for repositories 'Users' and 'users': "
+                + Path.of("generated", "UsersRepository.java"),
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    @Test
+    void shouldRejectRepositoryPathsThatDifferOnlyByCaseBeforeWriting() throws IOException {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileUsersGroups("UserData", "Userdata", generatedDirectory)
+        );
+
+        assertEquals(
+            "Generated file paths for repositories 'UserData' and 'Userdata' differ only by case: "
+                + Path.of("generated", "UserDataRepository.java")
                 + " and "
-                + Path.of("generated", "usersRepository.java"),
+                + Path.of("generated", "UserdataRepository.java"),
             exception.getMessage()
         );
 
@@ -1549,7 +1645,7 @@ class SqlcjCompilerIntegrationTest {
 
         String source = Files.readString(generatedFile);
 
-        assertTrue(source.contains("Long user_id"));
+        assertTrue(source.contains("Long userId"));
         assertTrue(source.contains("String class_"));
         assertTrue(source.contains("resultSet.getObject(1, Long.class)"));
         assertTrue(source.contains("resultSet.getObject(2, String.class)"));
@@ -1917,6 +2013,25 @@ class SqlcjCompilerIntegrationTest {
         }
 
         return dataSource;
+    }
+
+    /** The declared components of one generated record, in declared order. */
+    private List<String> recordComponents(String source, String recordName) {
+        int start = source.indexOf("public record " + recordName + "(");
+
+        assertTrue(start >= 0);
+
+        return source.substring(start, source.indexOf(") {", start))
+            .lines()
+            .skip(1)
+            .map(String::strip)
+            .filter(component -> !component.isEmpty())
+            .map(
+                component -> component.endsWith(",")
+                    ? component.substring(0, component.length() - 1)
+                    : component
+            )
+            .toList();
     }
 
     private Object getRecordComponent(Object record, String componentName) throws Exception {

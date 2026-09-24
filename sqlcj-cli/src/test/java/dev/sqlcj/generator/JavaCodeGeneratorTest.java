@@ -579,8 +579,8 @@ class JavaCodeGeneratorTest {
             )
         );
 
-        assertTrue(source.contains("UUID external_id"));
-        assertTrue(source.contains("OffsetDateTime created_at"));
+        assertTrue(source.contains("UUID externalId"));
+        assertTrue(source.contains("OffsetDateTime createdAt"));
 
         assertTrue(source.contains("resultSet.getObject(1, UUID.class)"));
         assertTrue(source.contains("resultSet.getObject(2, OffsetDateTime.class)"));

@@ -20,12 +20,16 @@ import java.util.stream.Collectors;
 /**
  * Resolves the Java identifiers of one generated repository.
  *
- * <p>The configured group name is used unchanged as the repository-name prefix,
- * because configuration already requires it to be a Java identifier. SQL names
- * that are already valid, non-reserved Java identifiers keep their spelling.
- * Every other name is normalized deterministically, and names that collide
- * inside the generated parameter list or result record are disambiguated in
- * their existing SQL order.
+ * <p>Every generated name is derived from its SQL spelling — the configured
+ * group name, a query name, a column name or projection alias, or a parameter's
+ * column name — with one deterministic, locale-independent rule set: the SQL
+ * name is split into words at every character that is not a letter or a digit,
+ * a word written without a lower-case letter is lower-cased so that {@code ID}
+ * becomes {@code Id}, and the words are joined as upper camel case for a type
+ * and lower camel case for a method, record component, or parameter.
+ *
+ * <p>Names that collide inside the generated parameter list or result record are
+ * disambiguated in their existing SQL order.
  *
  * <p>Two queries of one group that would generate the same method are rejected
  * instead of being disambiguated, because a repository method is a name the
@@ -71,11 +75,11 @@ final class JavaNames {
 
     static JavaNames of(QueryGroupModel group) {
         List<String> resultTypeNames = group.queries().stream()
-            .map(query -> className(query.name()) + RESULT_SUFFIX)
+            .map(query -> upperCamelCase(query.name(), null) + RESULT_SUFFIX)
             .toList();
 
         List<String> methodNames = group.queries().stream()
-            .map(query -> methodName(className(query.name())))
+            .map(query -> methodName(query.name()))
             .toList();
 
         rejectDuplicateMethodNames(group, methodNames);
@@ -98,20 +102,22 @@ final class JavaNames {
                         query.parameters().stream()
                             .map(QueryParameter::name)
                             .toList(),
-                        reservedParameterNames
+                        reservedParameterNames,
+                        query.name()
                     ),
                     resolveNames(
                         query.columns().stream()
                             .map(QueryColumn::name)
                             .toList(),
-                        RESERVED_MEMBER_NAMES
+                        RESERVED_MEMBER_NAMES,
+                        query.name()
                     )
                 )
             );
         }
 
         return new JavaNames(
-            group.name() + REPOSITORY_SUFFIX,
+            upperCamelCase(group.name(), null) + REPOSITORY_SUFFIX,
             List.copyOf(queries)
         );
     }
@@ -209,12 +215,8 @@ final class JavaNames {
         return reserved;
     }
 
-    private static String className(String queryName) {
-        return normalize(queryName);
-    }
-
-    private static String methodName(String className) {
-        String name = decapitalize(className);
+    private static String methodName(String queryName) {
+        String name = lowerCamelCase(queryName, null);
 
         while (isKeyword(name) || RESERVED_MEMBER_NAMES.contains(name)) {
             name += "_";
@@ -223,23 +225,18 @@ final class JavaNames {
         return name;
     }
 
-    private static String decapitalize(String className) {
-        int codePoint = className.codePointAt(0);
-
-        return new StringBuilder()
-            .appendCodePoint(Character.toLowerCase(codePoint))
-            .append(className.substring(Character.charCount(codePoint)))
-            .toString();
-    }
-
     /**
      * Resolves one generated namespace, keeping the declared order and using
      * stable {@code name1}, {@code name2}, ... suffixes for names that repeat
      * or are reserved.
      */
-    private static List<String> resolveNames(List<String> sqlNames, Set<String> reserved) {
+    private static List<String> resolveNames(
+        List<String> sqlNames,
+        Set<String> reserved,
+        String queryName
+    ) {
         List<String> bases = sqlNames.stream()
-            .map(JavaNames::normalize)
+            .map(sqlName -> memberName(sqlName, queryName))
             .toList();
 
         Map<String, Long> occurrences = bases.stream()
@@ -292,46 +289,134 @@ final class JavaNames {
     }
 
     /**
-     * Turns a SQL name into a valid Java identifier, preserving names that are
-     * already valid and non-reserved.
+     * Names one record component or method parameter after its SQL name,
+     * keeping a Java keyword or literal usable by suffixing {@code _}.
      */
-    private static String normalize(String sqlName) {
-        if (SourceVersion.isIdentifier(sqlName) && !isKeyword(sqlName)) {
-            return sqlName;
+    private static String memberName(String sqlName, String queryName) {
+        String name = lowerCamelCase(sqlName, queryName);
+
+        return isKeyword(name) ? name + "_" : name;
+    }
+
+    /**
+     * Joins the words of a SQL name in upper camel case, as in
+     * {@code get_author} to {@code GetAuthor} and {@code user_ID} to
+     * {@code UserId}.
+     */
+    private static String upperCamelCase(String sqlName, String queryName) {
+        StringBuilder builder = new StringBuilder();
+
+        for (String word : words(sqlName, queryName)) {
+            int first = word.codePointAt(0);
+
+            builder
+                .appendCodePoint(Character.toUpperCase(first))
+                .append(word.substring(Character.charCount(first)));
         }
 
-        StringBuilder builder = new StringBuilder();
-        boolean invalidRun = false;
+        return startIdentifier(builder.toString());
+    }
+
+    /**
+     * Joins the words of a SQL name in lower camel case, as in
+     * {@code created_at} to {@code createdAt} and {@code GetAuthor} to
+     * {@code getAuthor}.
+     */
+    private static String lowerCamelCase(String sqlName, String queryName) {
+        return decapitalize(upperCamelCase(sqlName, queryName));
+    }
+
+    /**
+     * Lower-cases the leading upper-case run of an upper-camel-case name. A run
+     * of two or more letters that is followed by a lower-case letter keeps its
+     * last letter upper-case, because that letter starts the next word:
+     * {@code HTTPStatus} becomes {@code httpStatus} while {@code HTTP2Status}
+     * becomes {@code http2Status}.
+     */
+    private static String decapitalize(String name) {
+        int end = 0;
+        int letters = 0;
+
+        while (end < name.length() && Character.isUpperCase(name.codePointAt(end))) {
+            end += Character.charCount(name.codePointAt(end));
+            letters++;
+        }
+
+        if (letters == 0) {
+            return name;
+        }
+
+        boolean startsNextWord = letters > 1
+            && end < name.length()
+            && Character.isLowerCase(name.codePointAt(end));
+
+        int lowerCaseEnd = startsNextWord
+            ? name.offsetByCodePoints(end, -1)
+            : end;
+
+        return name.substring(0, lowerCaseEnd).toLowerCase(Locale.ROOT)
+            + name.substring(lowerCaseEnd);
+    }
+
+    /**
+     * Splits a SQL name into the words every generated name is built from. A
+     * word ends at every character that is not a letter or a digit, and a word
+     * written without a lower-case letter is lower-cased so that an acronym
+     * such as {@code ID} or {@code URL} becomes one ordinary word.
+     */
+    private static List<String> words(String sqlName, String queryName) {
+        List<String> words = new ArrayList<>();
+        StringBuilder word = new StringBuilder();
         int index = 0;
 
         while (index < sqlName.length()) {
             int codePoint = sqlName.codePointAt(index);
             index += Character.charCount(codePoint);
 
-            if (Character.isJavaIdentifierPart(codePoint)) {
-                if (invalidRun) {
-                    builder.append('_');
-                    invalidRun = false;
-                }
-
-                builder.appendCodePoint(codePoint);
+            if (Character.isLetterOrDigit(codePoint)) {
+                word.appendCodePoint(codePoint);
                 continue;
             }
 
-            invalidRun = true;
+            addWord(words, word);
         }
 
-        if (invalidRun) {
-            builder.append('_');
+        addWord(words, word);
+
+        if (words.isEmpty()) {
+            throw new IllegalArgumentException(
+                queryName == null
+                    ? "SQL name '%s' has no letter or digit to generate a Java name from"
+                        .formatted(sqlName)
+                    : "SQL name '%s' of query '%s' has no letter or digit to generate a Java name from"
+                        .formatted(sqlName, queryName)
+            );
         }
 
-        if (builder.isEmpty() || !Character.isJavaIdentifierStart(builder.codePointAt(0))) {
-            builder.insert(0, '_');
+        return words;
+    }
+
+    private static void addWord(List<String> words, StringBuilder word) {
+        if (word.isEmpty()) {
+            return;
         }
 
-        String name = builder.toString();
+        String value = word.toString();
 
-        return isKeyword(name) ? name + "_" : name;
+        words.add(
+            value.codePoints().anyMatch(Character::isLowerCase)
+                ? value
+                : value.toLowerCase(Locale.ROOT)
+        );
+
+        word.setLength(0);
+    }
+
+    /** A name built from a digit-initial SQL name cannot start an identifier. */
+    private static String startIdentifier(String name) {
+        return Character.isDigit(name.codePointAt(0))
+            ? "_" + name
+            : name;
     }
 
     private static boolean isKeyword(String name) {

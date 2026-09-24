@@ -245,8 +245,8 @@ class PostgresIntegrationTest {
                     "name",
                     "bio",
                     "active",
-                    "birth_date",
-                    "created_at",
+                    "birthDate",
+                    "createdAt",
                     "balance"
                 ),
                 recordComponentNames(result)
@@ -258,10 +258,10 @@ class PostgresIntegrationTest {
             assertEquals("Alice", component(result, "name"));
             assertEquals("first user", component(result, "bio"));
             assertEquals(true, component(result, "active"));
-            assertEquals(LocalDate.of(1990, 1, 15), component(result, "birth_date"));
+            assertEquals(LocalDate.of(1990, 1, 15), component(result, "birthDate"));
             assertEquals(
                 LocalDateTime.of(2026, 1, 1, 10, 0),
-                component(result, "created_at")
+                component(result, "createdAt")
             );
             assertEquals(
                 new BigDecimal("100.50"),
@@ -363,10 +363,10 @@ class PostgresIntegrationTest {
             assertEquals(5L, component(result, "id"));
             assertEquals(42, component(result, "code"));
             assertEquals("Alice", component(result, "name"));
-            assertEquals(LocalDate.of(1990, 1, 15), component(result, "birth_date"));
+            assertEquals(LocalDate.of(1990, 1, 15), component(result, "birthDate"));
             assertEquals(
                 LocalDateTime.of(2026, 1, 1, 10, 0),
-                component(result, "created_at")
+                component(result, "createdAt")
             );
             assertEquals(new BigDecimal("100.50"), component(result, "balance"));
         }
@@ -441,11 +441,11 @@ class PostgresIntegrationTest {
             assertNull(component(result, "name"));
             assertNull(component(result, "bio"));
             assertNull(component(result, "active"));
-            assertNull(component(result, "birth_date"));
-            assertNull(component(result, "created_at"));
+            assertNull(component(result, "birthDate"));
+            assertNull(component(result, "createdAt"));
             assertNull(component(result, "balance"));
-            assertNull(component(result, "external_id"));
-            assertNull(component(result, "updated_at"));
+            assertNull(component(result, "externalId"));
+            assertNull(component(result, "updatedAt"));
         }
     }
 
@@ -502,18 +502,18 @@ class PostgresIntegrationTest {
             assertNotNull(result);
 
             assertEquals(
-                List.of("id", "serial_id", "revision", "external_id", "updated_at"),
+                List.of("id", "serialId", "revision", "externalId", "updatedAt"),
                 recordComponentNames(result)
             );
 
             assertEquals(7L, component(result, "id"));
-            assertEquals(101, component(result, "serial_id"));
+            assertEquals(101, component(result, "serialId"));
             assertEquals(202L, component(result, "revision"));
-            assertEquals(EXTERNAL_ID, component(result, "external_id"));
+            assertEquals(EXTERNAL_ID, component(result, "externalId"));
 
             OffsetDateTime updatedAt = assertInstanceOf(
                 OffsetDateTime.class,
-                component(result, "updated_at")
+                component(result, "updatedAt")
             );
 
             assertEquals(UPDATED_AT.toInstant(), updatedAt.toInstant());
@@ -553,12 +553,12 @@ class PostgresIntegrationTest {
             assertNotNull(result);
 
             assertEquals(
-                List.of("id", "customer_id", "quantity", "status"),
+                List.of("id", "customerId", "quantity", "status"),
                 recordComponentNames(result)
             );
 
             assertEquals(10L, component(result, "id"));
-            assertEquals(1L, component(result, "customer_id"));
+            assertEquals(1L, component(result, "customerId"));
             assertEquals(1, component(result, "quantity"));
             assertEquals("new", component(result, "status"));
         }
@@ -597,8 +597,8 @@ class PostgresIntegrationTest {
 
             assertNotNull(serialIdResult);
 
-            assertEquals(List.of("serial_id"), recordComponentNames(serialIdResult));
-            assertEquals(1, component(serialIdResult, "serial_id"));
+            assertEquals(List.of("serialId"), recordComponentNames(serialIdResult));
+            assertEquals(1, component(serialIdResult, "serialId"));
 
             Method rowMethod = repository.getClass().getMethod(
                 "insertUserReturningRow",
@@ -619,13 +619,13 @@ class PostgresIntegrationTest {
                     "name",
                     "bio",
                     "active",
-                    "birth_date",
-                    "created_at",
+                    "birthDate",
+                    "createdAt",
                     "balance",
-                    "serial_id",
+                    "serialId",
                     "revision",
-                    "external_id",
-                    "updated_at"
+                    "externalId",
+                    "updatedAt"
                 ),
                 recordComponentNames(row)
             );
@@ -633,11 +633,11 @@ class PostgresIntegrationTest {
             assertEquals(2L, component(row, "id"));
             assertEquals(43, component(row, "code"));
             assertEquals("Bob", component(row, "name"));
-            assertEquals(2, component(row, "serial_id"));
+            assertEquals(2, component(row, "serialId"));
             assertEquals(2L, component(row, "revision"));
             assertNull(component(row, "score"));
             assertNull(component(row, "bio"));
-            assertNull(component(row, "external_id"));
+            assertNull(component(row, "externalId"));
         }
     }
 

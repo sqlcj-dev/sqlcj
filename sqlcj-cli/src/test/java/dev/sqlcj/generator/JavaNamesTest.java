@@ -21,28 +21,26 @@ class JavaNamesTest {
 
     private static final String SQL = "SELECT 1";
 
-    @Test
-    void shouldNameRepositoryAfterConfiguredGroupName() {
-        JavaNames names = names("Author", "GetAuthor");
+    @ParameterizedTest
+    @CsvSource(
+        {
+            "Author, AuthorRepository",
+            "author_admin, AuthorAdminRepository"
+        }
+    )
+    void shouldNameRepositoryAfterConfiguredGroupName(String groupName, String expectedClassName) {
+        JavaNames names = names(groupName, "GetAuthor");
 
-        assertEquals("AuthorRepository", names.repositoryClassName());
+        assertEquals(expectedClassName, names.repositoryClassName());
     }
 
     @Test
-    void shouldKeepSafeQueryNameAsResultTypeAndMethodName() {
+    void shouldNameResultTypeAndRowMapperAfterQueryName() {
         JavaNames.QueryNames names = queryNames("GetUser");
 
         assertEquals("GetUserResult", names.resultTypeName());
         assertEquals("getUser", names.methodName());
         assertEquals("getUserRowMapper", names.rowMapperName());
-    }
-
-    @Test
-    void shouldKeepSafeLowercaseQueryNameAsMethodName() {
-        JavaNames.QueryNames names = queryNames("getUser");
-
-        assertEquals("getUserResult", names.resultTypeName());
-        assertEquals("getUser", names.methodName());
     }
 
     @Test
@@ -56,19 +54,95 @@ class JavaNamesTest {
     @ParameterizedTest
     @CsvSource(
         {
-            "Get-User, Get_UserResult",
-            "get user, get_userResult",
-            "'Get**User', Get_UserResult",
-            "'get user ', get_user_Result",
+            "authors, AuthorsResult",
+            "get_author, GetAuthorResult",
+            "GetAuthor, GetAuthorResult",
+            "user_ID, UserIdResult",
+            "URL, UrlResult",
+            "Get-User, GetUserResult",
+            "get user, GetUserResult",
+            "'Get**User', GetUserResult",
+            "'get user ', GetUserResult",
+            "1st_query, _1stQueryResult",
             "1stQuery, _1stQueryResult",
-            "default, default_Result",
-            "int, int_Result",
-            "'true', true_Result",
-            "_, __Result"
+            "default, DefaultResult",
+            "int, IntResult",
+            "'true', TrueResult"
         }
     )
-    void shouldNormalizeUnsafeQueryName(String queryName, String expectedResultTypeName) {
+    void shouldNameResultTypeInUpperCamelCase(String queryName, String expectedResultTypeName) {
         assertEquals(expectedResultTypeName, queryNames(queryName).resultTypeName());
+    }
+
+    @ParameterizedTest
+    @CsvSource(
+        {
+            "get_author, getAuthor",
+            "GetAuthor, getAuthor",
+            "getAuthor, getAuthor",
+            "HTTPStatus, httpStatus",
+            "HTTP2Status, http2Status",
+            "GetHTTPStatus, getHTTPStatus",
+            "created_at, createdAt",
+            "user_ID, userId",
+            "1st_query, _1stQuery",
+            "default, default_",
+            "'true', true_"
+        }
+    )
+    void shouldNameMethodInLowerCamelCase(String queryName, String expectedMethodName) {
+        assertEquals(expectedMethodName, queryNames(queryName).methodName());
+    }
+
+    @ParameterizedTest
+    @CsvSource(
+        {
+            "created_at, createdAt",
+            "'user id', userId",
+            "user_ID, userId",
+            "ID, id",
+            "URL, url",
+            "HTTPStatus, httpStatus",
+            "class, class_"
+        }
+    )
+    void shouldNameResultComponentInLowerCamelCase(String columnName, String expectedComponentName) {
+        JavaNames.QueryNames names = queryNames("ListUsers", List.of(), List.of(columnName));
+
+        assertEquals(List.of(expectedComponentName), names.componentNames());
+    }
+
+    @ParameterizedTest
+    @CsvSource(
+        {
+            "_",
+            "'***'",
+            "$"
+        }
+    )
+    void shouldRejectQueryNameWithoutAWord(String queryName) {
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> queryNames(queryName)
+        );
+
+        assertEquals(
+            "SQL name '%s' has no letter or digit to generate a Java name from".formatted(queryName),
+            exception.getMessage()
+        );
+    }
+
+    @Test
+    void shouldRejectColumnNameWithoutAWord() {
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> queryNames("ListUsers", List.of(), List.of("***"))
+        );
+
+        assertEquals(
+            "SQL name '***' of query 'ListUsers' has no letter or digit to generate a Java name from",
+            exception.getMessage()
+        );
     }
 
     @ParameterizedTest
@@ -88,11 +162,11 @@ class JavaNamesTest {
     void shouldRejectQueriesOfOneGroupThatGenerateTheSameMethod() {
         IllegalArgumentException exception = assertThrows(
             IllegalArgumentException.class,
-            () -> names("Author", "Get.User", "Get-User")
+            () -> names("Author", "get_author", "GetAuthor")
         );
 
         assertEquals(
-            "Queries 'Get.User' and 'Get-User' generate the same repository method 'get_User'",
+            "Queries 'get_author' and 'GetAuthor' generate the same repository method 'getAuthor'",
             exception.getMessage()
         );
     }
@@ -110,7 +184,7 @@ class JavaNamesTest {
 
         assertEquals(
             "Queries 'GetUser' and 'getuser' generate result types that differ only by case: "
-                + "GetUserResult and getuserResult",
+                + "GetUserResult and GetuserResult",
             exception.getMessage()
         );
     }
@@ -129,10 +203,10 @@ class JavaNamesTest {
     }
 
     @Test
-    void shouldKeepSafeColumnNamesAsResultComponents() {
+    void shouldKeepSelectedColumnOrderOfResultComponents() {
         JavaNames.QueryNames names = queryNames("ListUsers", List.of(), List.of("id", "created_at"));
 
-        assertEquals(List.of("id", "created_at"), names.componentNames());
+        assertEquals(List.of("id", "createdAt"), names.componentNames());
     }
 
     @Test
@@ -144,7 +218,7 @@ class JavaNamesTest {
         );
 
         assertEquals(
-            List.of("user_id1", "user_id2", "class_", "hashCode1"),
+            List.of("userId1", "userId2", "class_", "hashCode1"),
             names.componentNames()
         );
     }

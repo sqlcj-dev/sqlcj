@@ -76,8 +76,8 @@ class JavaCodeGeneratorNamingTest {
 
         assertEquals(Path.of("generated", "UsersRepository.java"), file.path());
         assertTrue(source.contains("public final class UsersRepository {"));
-        assertTrue(source.contains("public record Get_UserResult("));
-        assertTrue(source.contains("public List<Get_UserResult> get_User()"));
+        assertTrue(source.contains("public record GetUserResult("));
+        assertTrue(source.contains("public List<GetUserResult> getUser()"));
         assertTrue(source.contains("Query: Get*&#47;User"));
         assertFalse(source.contains("Query: Get*/User"));
 
@@ -121,8 +121,8 @@ class JavaCodeGeneratorNamingTest {
         assertEquals(Path.of("generated", "UsersRepository.java"), file.path());
         assertTrue(source.contains("import java.util.UUID;"));
         assertTrue(source.contains("public final class UsersRepository {"));
-        assertTrue(source.contains("public record UUIDResult("));
-        assertTrue(source.contains("UUID external_id"));
+        assertTrue(source.contains("public record UuidResult("));
+        assertTrue(source.contains("UUID externalId"));
         assertTrue(source.contains("resultSet.getObject(1, UUID.class)"));
 
         assertCompiles(file);
@@ -147,8 +147,8 @@ class JavaCodeGeneratorNamingTest {
 
         assertTrue(source.contains("Long class_"));
         assertTrue(source.contains("String hashCode1"));
-        assertTrue(source.contains("String user_id1"));
-        assertTrue(source.contains("String user_id2"));
+        assertTrue(source.contains("String userId1"));
+        assertTrue(source.contains("String userId2"));
 
         assertTrue(source.contains("resultSet.getObject(1, Long.class)"));
         assertTrue(source.contains("resultSet.getObject(2, String.class)"));
@@ -170,7 +170,7 @@ class JavaCodeGeneratorNamingTest {
 
         String source = file.content();
 
-        assertTrue(source.contains("String user_id"));
+        assertTrue(source.contains("String userId"));
         assertTrue(source.contains("resultSet.getObject(1, String.class)"));
 
         assertCompiles(file);
@@ -194,11 +194,11 @@ class JavaCodeGeneratorNamingTest {
 
         assertTrue(
             source.contains(
-                "public List<FindUsersResult> findUsers(Long executor1, String user_id1, String user_id2)"
+                "public List<FindUsersResult> findUsers(Long executor1, String userId1, String userId2)"
             )
         );
 
-        assertTrue(source.contains("java.util.Arrays.asList(executor1, user_id1, user_id2)"));
+        assertTrue(source.contains("java.util.Arrays.asList(executor1, userId1, userId2)"));
 
         assertCompiles(file);
     }
@@ -223,7 +223,7 @@ class JavaCodeGeneratorNamingTest {
         GeneratedFile file = generate(query);
 
         assertTrue(file.content().contains("SELECT \"a\\\\q\""));
-        assertTrue(file.content().contains("String a_q"));
+        assertTrue(file.content().contains("String aq"));
 
         assertCompiles(file);
 
