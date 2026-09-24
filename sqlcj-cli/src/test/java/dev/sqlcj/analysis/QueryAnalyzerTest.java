@@ -923,11 +923,167 @@ class QueryAnalyzerTest {
         assertEquals(message, exception.getMessage());
     }
 
+    @Test
+    void shouldResolveRangeBoundParametersFromTestedColumn() {
+        String sql = "SELECT id FROM users WHERE id BETWEEN $1 AND $2";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "id", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+
+        assertEquals(
+            "SELECT id FROM users WHERE id BETWEEN ? AND ?",
+            model.executableSql()
+        );
+    }
+
+    @Test
+    void shouldResolveNegatedRangeBoundParameters() {
+        String sql = "SELECT id FROM users WHERE id NOT BETWEEN $1 AND $2";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "id", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+
+        assertEquals(
+            "SELECT id FROM users WHERE id NOT BETWEEN ? AND ?",
+            model.executableSql()
+        );
+    }
+
+    @Test
+    void shouldResolveRangeBoundParametersInTextualBindingOrder() {
+        String sql = "SELECT id FROM users WHERE name = $1 AND id NOT BETWEEN $3 AND $2";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "name", ColumnType.VARCHAR),
+                new QueryParameter(2, "id", ColumnType.BIGINT),
+                new QueryParameter(3, "id", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 3, 2), model.bindingParameterIndexes());
+    }
+
+    @Test
+    void shouldResolveRangeBoundParameterBesideLiteralBound() {
+        String sql = "SELECT id FROM users WHERE id BETWEEN $1 AND 10";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+
+        assertEquals(
+            "SELECT id FROM users WHERE id BETWEEN ? AND 10",
+            model.executableSql()
+        );
+    }
+
+    @Test
+    void shouldNotCreateParameterForLiteralRange() {
+        String sql = "SELECT id FROM users WHERE id BETWEEN 1 AND 10 AND name = $1";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "name", ColumnType.VARCHAR)),
+            model.parameters()
+        );
+
+        assertEquals(
+            "SELECT id FROM users WHERE id BETWEEN 1 AND 10 AND name = ?",
+            model.executableSql()
+        );
+    }
+
+    @Test
+    void shouldRejectUnknownColumnInRangePredicate() {
+        String sql = "SELECT id FROM users WHERE missing BETWEEN $1 AND $2";
+
+        Query query = new Query("ListUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(
+            "Column not found in sources users: missing",
+            exception.getMessage()
+        );
+    }
+
+    @Test
+    void shouldRejectNamedRangeBound() {
+        String sql = "SELECT id FROM users WHERE id BETWEEN :lo AND :hi";
+
+        Query query = new Query("ListUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(
+            "Named parameter ':lo' is not supported; use an indexed placeholder such as $1",
+            exception.getMessage()
+        );
+    }
+
     @ParameterizedTest
     @ValueSource(
         strings = {
             "SELECT id FROM users WHERE name LIKE '%' || $1 || '%'",
-            "SELECT id FROM users WHERE $1 IS NULL"
+            "SELECT id FROM users WHERE $1 IS NULL",
+            "SELECT id FROM users WHERE $1 BETWEEN id AND id",
+            "SELECT id FROM users WHERE id BETWEEN $1 + 1 AND $2"
         }
     )
     void shouldRejectPlaceholderThatIsNotAnAnalyzedPredicateOperand(String sql) {

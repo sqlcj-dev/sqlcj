@@ -13,6 +13,7 @@ import net.sf.jsqlparser.expression.JdbcNamedParameter;
 import net.sf.jsqlparser.expression.JdbcParameter;
 import net.sf.jsqlparser.expression.operators.conditional.AndExpression;
 import net.sf.jsqlparser.expression.operators.conditional.OrExpression;
+import net.sf.jsqlparser.expression.operators.relational.Between;
 import net.sf.jsqlparser.expression.operators.relational.ComparisonOperator;
 import net.sf.jsqlparser.expression.operators.relational.EqualsTo;
 import net.sf.jsqlparser.expression.operators.relational.ExpressionList;
@@ -771,6 +772,11 @@ public final class QueryAnalyzer {
             return;
         }
 
+        if (expression instanceof Between between) {
+            resolveBetweenExpression(between, sources, parameters);
+            return;
+        }
+
         if (expression instanceof ComparisonOperator comparison) {
             resolveParameterComparison(
                 comparison.getLeftExpression(),
@@ -972,6 +978,45 @@ public final class QueryAnalyzer {
     private void resolveIsNullExpression(IsNullExpression isNull, List<Source> sources) {
         if (isNull.getLeftExpression() instanceof net.sf.jsqlparser.schema.Column column) {
             resolveColumn(column, sources);
+        }
+    }
+
+    /**
+     * Resolves the bounds of {@code <column> BETWEEN $a AND $b} and its
+     * negation, typing each placeholder bound from the tested column and adding
+     * the start bound before the end bound. A bound that binds no placeholder
+     * reaches the database as written, so a range of literal bounds stays
+     * unanalyzed.
+     */
+    private void resolveBetweenExpression(
+        Between between,
+        List<Source> sources,
+        List<QueryParameter> parameters
+    ) {
+        Expression left = between.getLeftExpression();
+        Expression start = between.getBetweenExpressionStart();
+        Expression end = between.getBetweenExpressionEnd();
+
+        requireIndexedParameter(left);
+        requireIndexedParameter(start);
+        requireIndexedParameter(end);
+
+        if (!(start instanceof JdbcParameter) && !(end instanceof JdbcParameter)) {
+            return;
+        }
+
+        if (!(left instanceof net.sf.jsqlparser.schema.Column column)) {
+            return;
+        }
+
+        dev.sqlcj.schema.Column schemaColumn = resolveColumn(column, sources).column();
+
+        if (start instanceof JdbcParameter startParameter) {
+            addParameter(startParameter, schemaColumn, parameters);
+        }
+
+        if (end instanceof JdbcParameter endParameter) {
+            addParameter(endParameter, schemaColumn, parameters);
         }
     }
 

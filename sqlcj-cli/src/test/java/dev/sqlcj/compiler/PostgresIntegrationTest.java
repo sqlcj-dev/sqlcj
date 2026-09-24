@@ -446,6 +446,63 @@ class PostgresIntegrationTest {
         }
     }
 
+    /**
+     * Covers the range predicates end to end: a {@code BETWEEN} range and a
+     * {@code NOT BETWEEN} range whose bounds use out-of-order placeholder
+     * indexes are generated, compiled, and executed against PostgreSQL, so a
+     * swapped binding order would change the returned names.
+     */
+    @Test
+    void shouldExecuteGeneratedRangePredicatesAgainstPostgres() throws Exception {
+        Path classesDirectory = generateAndCompile("""
+            -- name: ListUsersInCodeRange :many
+            SELECT id, name
+            FROM users
+            WHERE code BETWEEN $1 AND $2
+            ORDER BY id;
+
+            -- name: ListUsersOutsideCodeRange :many
+            SELECT id, name
+            FROM users
+            WHERE code NOT BETWEEN $2 AND $1
+            ORDER BY id;
+            """);
+
+        execute("""
+            INSERT INTO users (id, code, name)
+            VALUES
+                (1, 5, 'Alice'),
+                (2, 20, 'Bob'),
+                (3, 40, 'Cara')
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method inRange = repository.getClass().getMethod(
+                "listUsersInCodeRange",
+                Integer.class,
+                Integer.class
+            );
+
+            Method outsideRange = repository.getClass().getMethod(
+                "listUsersOutsideCodeRange",
+                Integer.class,
+                Integer.class
+            );
+
+            assertEquals(
+                List.of("Bob"),
+                names(inRange.invoke(repository, 10, 30))
+            );
+
+            assertEquals(
+                List.of("Alice", "Cara"),
+                names(outsideRange.invoke(repository, 30, 10))
+            );
+        }
+    }
+
     @Test
     void shouldExecuteGeneratedWriteAgainstPostgres() throws Exception {
         Path classesDirectory = generateAndCompile("""
