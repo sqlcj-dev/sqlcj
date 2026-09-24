@@ -1720,6 +1720,34 @@ class QueryAnalyzerTest {
     }
 
     @Test
+    void shouldAnalyzeSelectDeclaredAsOptional() {
+        String sql = "SELECT id, name FROM users WHERE id = $1";
+
+        QueryModel model = analyzer.analyze(
+            new Query("FindUser", QueryType.OPTIONAL, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals("FindUser", model.name());
+        assertEquals(QueryType.OPTIONAL, model.type());
+        assertEquals("users", model.table());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            model.parameters()
+        );
+    }
+
+    @Test
     void shouldRejectSelectWithoutResultQueryType() {
         String sql = "SELECT id FROM users WHERE id = $1";
 
@@ -1732,7 +1760,7 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(
-            "SELECT queries must be declared as :one or :many",
+            "SELECT queries must be declared as :one, :optional, or :many",
             exception.getMessage()
         );
     }
@@ -1755,7 +1783,7 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(
-            "Write queries with RETURNING must be declared as :one or :many",
+            "Write queries with RETURNING must be declared as :one, :optional, or :many",
             exception.getMessage()
         );
     }
@@ -1768,8 +1796,8 @@ class QueryAnalyzerTest {
             "DELETE FROM users WHERE id = $1 RETURNING id"
         }
     )
-    void shouldAnalyzeReturningWriteForBothResultQueryTypes(String sql) {
-        for (QueryType type : List.of(QueryType.ONE, QueryType.MANY)) {
+    void shouldAnalyzeReturningWriteForEveryResultQueryType(String sql) {
+        for (QueryType type : List.of(QueryType.ONE, QueryType.OPTIONAL, QueryType.MANY)) {
             QueryModel model = analyzer.analyze(
                 new Query("WriteUser", type, sql),
                 parser.parse(sql),

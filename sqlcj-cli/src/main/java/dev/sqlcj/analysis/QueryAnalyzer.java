@@ -208,9 +208,9 @@ public final class QueryAnalyzer {
     }
 
     private void requireResultQueryType(Query query) {
-        if (query.type() != QueryType.ONE && query.type() != QueryType.MANY) {
+        if (!producesResult(query)) {
             throw new UnsupportedOperationException(
-                "SELECT queries must be declared as :one or :many"
+                "SELECT queries must be declared as :one, :optional, or :many"
             );
         }
     }
@@ -231,11 +231,18 @@ public final class QueryAnalyzer {
             return;
         }
 
-        if (query.type() != QueryType.ONE && query.type() != QueryType.MANY) {
+        if (!producesResult(query)) {
             throw new UnsupportedOperationException(
-                "Write queries with RETURNING must be declared as :one or :many"
+                "Write queries with RETURNING must be declared as :one, :optional, or :many"
             );
         }
+    }
+
+    /** The annotations that declare a row-producing result shape. */
+    private boolean producesResult(Query query) {
+        return query.type() == QueryType.ONE
+            || query.type() == QueryType.OPTIONAL
+            || query.type() == QueryType.MANY;
     }
 
     /**

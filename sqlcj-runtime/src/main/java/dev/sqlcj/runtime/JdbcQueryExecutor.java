@@ -8,15 +8,16 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Executes generated queries over JDBC.
  *
  * <p>An executor is constructed either with a {@link DataSource} or with a
  * caller-owned {@link Connection}. Both construction paths share the same
- * positional parameter binding, row mapping, single-row and multi-row result
- * handling, affected-row counting, and exception translation. Only connection
- * ownership differs:
+ * positional parameter binding, row mapping, cardinality enforcement,
+ * affected-row counting, and exception translation. Only connection ownership
+ * differs:
  *
  * <ul>
  * <li>{@link #JdbcQueryExecutor(DataSource)} obtains one connection per
@@ -31,15 +32,23 @@ import java.util.Objects;
  * commit or rollback.</li>
  * </ul>
  *
+ * <p>{@link #queryOne} reads the first row, maps it, and then advances the
+ * result set once more to prove that there is no second row.
+ * {@link #queryOptional} does the same but reports no row as
+ * {@link Optional#empty()}. A row count an annotation does not allow raises a
+ * {@link QueryCardinalityException} naming the query and its repository; the
+ * statement has already executed, so a returning write that fails the check has
+ * already changed the database.
+ *
  * <p>In both paths the {@link PreparedStatement} and any {@link ResultSet}
- * opened for an operation are closed before that operation returns, on success
- * and on failure.
+ * opened for an operation are closed before that operation returns, on success,
+ * on a cardinality failure, and on any other failure.
  *
  * <p>Every {@link SQLException} raised while acquiring a connection, preparing
  * a statement, binding parameters, executing, reading results, or closing a
  * DataSource-acquired connection is translated into a
  * {@link QueryExecutionException} with the message {@code "Failed to execute
- * query"} and the {@code SQLException} as its cause.
+ * query '<query>' in <repository>"} and the {@code SQLException} as its cause.
  *
  * <p>This executor is blocking and synchronous. An instance constructed with a
  * caller-owned connection inherits that connection's confinement to a single
@@ -71,21 +80,82 @@ public final class JdbcQueryExecutor implements QueryExecutor {
     }
 
     @Override
-    public <T> T query(String sql, List<?> parameters, RowMapper<T> mapper) {
-        return onStatement(sql, parameters, statement -> {
+    public <T> T queryOne(
+        String repository,
+        String query,
+        String sql,
+        List<?> parameters,
+        RowMapper<T> mapper
+    ) {
+        return onStatement(repository, query, sql, parameters, statement -> {
             try (ResultSet resultSet = statement.executeQuery()) {
                 if (!resultSet.next()) {
-                    return null;
+                    throw new QueryCardinalityException(
+                        cardinalityMessage(
+                            repository,
+                            query,
+                            "returned no row; expected exactly one"
+                        )
+                    );
                 }
 
-                return mapper.map(resultSet);
+                T row = mapper.map(resultSet);
+
+                if (resultSet.next()) {
+                    throw new QueryCardinalityException(
+                        cardinalityMessage(
+                            repository,
+                            query,
+                            "returned more than one row; expected exactly one"
+                        )
+                    );
+                }
+
+                return row;
             }
         });
     }
 
     @Override
-    public <T> List<T> queryMany(String sql, List<?> parameters, RowMapper<T> mapper) {
-        return onStatement(sql, parameters, statement -> {
+    public <T> Optional<T> queryOptional(
+        String repository,
+        String query,
+        String sql,
+        List<?> parameters,
+        RowMapper<T> mapper
+    ) {
+        return onStatement(repository, query, sql, parameters, statement -> {
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    return Optional.empty();
+                }
+
+                T row = mapper.map(resultSet);
+
+                if (resultSet.next()) {
+                    throw new QueryCardinalityException(
+                        cardinalityMessage(
+                            repository,
+                            query,
+                            "returned more than one row; expected at most one"
+                        )
+                    );
+                }
+
+                return Optional.of(row);
+            }
+        });
+    }
+
+    @Override
+    public <T> List<T> queryMany(
+        String repository,
+        String query,
+        String sql,
+        List<?> parameters,
+        RowMapper<T> mapper
+    ) {
+        return onStatement(repository, query, sql, parameters, statement -> {
             try (ResultSet resultSet = statement.executeQuery()) {
                 List<T> results = new ArrayList<>();
 
@@ -99,8 +169,8 @@ public final class JdbcQueryExecutor implements QueryExecutor {
     }
 
     @Override
-    public int execute(String sql, List<?> parameters) {
-        return onStatement(sql, parameters, PreparedStatement::executeUpdate);
+    public int execute(String repository, String query, String sql, List<?> parameters) {
+        return onStatement(repository, query, sql, parameters, PreparedStatement::executeUpdate);
     }
 
     /**
@@ -109,19 +179,21 @@ public final class JdbcQueryExecutor implements QueryExecutor {
      * the connection only when this executor acquired it.
      */
     private <T> T onStatement(
+        String repository,
+        String query,
         String sql,
         List<?> parameters,
         StatementOperation<T> operation
     ) {
         if (connection != null) {
-            return onConnection(connection, sql, parameters, operation);
+            return onConnection(connection, repository, query, sql, parameters, operation);
         }
 
         try (Connection acquired = Objects.requireNonNull(dataSource).getConnection()) {
-            return onConnection(acquired, sql, parameters, operation);
+            return onConnection(acquired, repository, query, sql, parameters, operation);
         } catch (SQLException e) {
             throw new QueryExecutionException(
-                "Failed to execute query",
+                failureMessage(repository, query),
                 e
             );
         }
@@ -129,6 +201,8 @@ public final class JdbcQueryExecutor implements QueryExecutor {
 
     private <T> T onConnection(
         Connection target,
+        String repository,
+        String query,
         String sql,
         List<?> parameters,
         StatementOperation<T> operation
@@ -139,7 +213,7 @@ public final class JdbcQueryExecutor implements QueryExecutor {
             return operation.run(statement);
         } catch (SQLException e) {
             throw new QueryExecutionException(
-                "Failed to execute query",
+                failureMessage(repository, query),
                 e
             );
         }
@@ -149,6 +223,14 @@ public final class JdbcQueryExecutor implements QueryExecutor {
         for (int i = 0; i < parameters.size(); i++) {
             statement.setObject(i + 1, parameters.get(i));
         }
+    }
+
+    private static String failureMessage(String repository, String query) {
+        return "Failed to execute query '%s' in %s".formatted(query, repository);
+    }
+
+    private static String cardinalityMessage(String repository, String query, String outcome) {
+        return "Query '%s' in %s %s".formatted(query, repository, outcome);
     }
 
     private interface StatementOperation<T> {

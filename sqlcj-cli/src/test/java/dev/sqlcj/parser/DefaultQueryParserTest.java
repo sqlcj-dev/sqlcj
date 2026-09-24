@@ -63,6 +63,22 @@ class DefaultQueryParserTest {
     }
 
     @Test
+    void parsesOptionalQueryType() {
+        String source = """
+            -- name: FindUser :optional
+            SELECT *
+            FROM users
+            WHERE id = $1;
+            """;
+
+        List<Query> queries = parser.parse(source);
+
+        assertEquals(1, queries.size());
+        assertEquals("FindUser", queries.getFirst().name());
+        assertEquals(QueryType.OPTIONAL, queries.getFirst().type());
+    }
+
+    @Test
     void parsesExecQueryType() {
         String source = """
             -- name: DeleteUser :exec

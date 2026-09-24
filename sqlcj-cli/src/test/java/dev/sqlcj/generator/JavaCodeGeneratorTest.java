@@ -735,7 +735,7 @@ class JavaCodeGeneratorTest {
 
         String source = generate(query).content();
 
-        assertTrue(source.contains("return executor.query("));
+        assertTrue(source.contains("return executor.queryOne("));
         assertTrue(source.contains("java.util.Arrays.asList(id)"));
         assertTrue(source.contains("getUserRowMapper"));
         assertFalse(source.contains("UnsupportedOperationException"));
@@ -1179,7 +1179,7 @@ class JavaCodeGeneratorTest {
 
         assertTrue(
             source.contains("""
-                return executor.query(
+                return executor.queryOne(
                 """)
         );
 
@@ -1207,7 +1207,7 @@ class JavaCodeGeneratorTest {
 
         assertTrue(
             source.contains("""
-                return executor.query(
+                return executor.queryOne(
                 """)
         );
 
@@ -1270,7 +1270,7 @@ class JavaCodeGeneratorTest {
 
         assertFalse(
             source.contains(
-                "return executor.query("
+                "return executor.queryOne("
             )
         );
     }
@@ -1716,6 +1716,236 @@ class JavaCodeGeneratorTest {
 
         assertTrue(
             source.indexOf("public record UsersRow(") < source.indexOf("public UsersRow createUser(")
+        );
+
+        assertCompiles(file);
+    }
+
+    @Test
+    void shouldGenerateOptionalExecutionForOptionalQuery() throws IOException {
+        QueryModel query = new QueryModel(
+            "FindUser",
+            QueryType.OPTIONAL,
+            "users",
+            """
+                SELECT id, name
+                FROM users
+                WHERE id = ?
+                """,
+            List.of(1),
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true)
+            ),
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            null
+        );
+
+        GeneratedFile file = generate(query);
+
+        String source = file.content();
+
+        assertTrue(source.contains("import java.util.Optional;"));
+        assertTrue(source.contains("public record FindUserResult("));
+        assertTrue(
+            source.contains("private static final RowMapper<FindUserResult> findUserRowMapper =")
+        );
+        assertTrue(source.contains("public Optional<FindUserResult> findUser(Long id)"));
+        assertTrue(source.contains("return executor.queryOptional("));
+        assertTrue(source.contains("java.util.Arrays.asList(id)"));
+        assertTrue(source.contains("Type: OPTIONAL"));
+
+        assertFalse(source.contains("return executor.queryOne("));
+        assertFalse(source.contains("UnsupportedOperationException"));
+
+        assertCompiles(file);
+    }
+
+    @Test
+    void shouldShareOneRowRecordBetweenOptionalAndOtherFullRowQueries() throws IOException {
+        List<QueryColumn> columns = List.of(
+            new QueryColumn("id", ColumnType.BIGINT, false),
+            new QueryColumn("name", ColumnType.VARCHAR, true)
+        );
+
+        QueryModel getUser = new QueryModel(
+            "GetUser",
+            QueryType.ONE,
+            "users",
+            "SELECT * FROM users WHERE id = ?",
+            List.of(1),
+            columns,
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            "users"
+        );
+
+        QueryModel findUser = new QueryModel(
+            "FindUser",
+            QueryType.OPTIONAL,
+            "users",
+            "SELECT * FROM users WHERE id = ?",
+            List.of(1),
+            columns,
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            "users"
+        );
+
+        GeneratedFile file = codeGenerator.generate(
+            new QueryGroupModel(
+                GROUP,
+                List.of(getUser, findUser)
+            )
+        );
+
+        String source = file.content();
+
+        assertEquals(
+            1,
+            source.lines()
+                .filter(line -> line.equals("    public record UsersRow("))
+                .count()
+        );
+
+        assertEquals(
+            1,
+            source.lines()
+                .filter(line -> line.contains("private static final RowMapper<UsersRow> usersRowMapper"))
+                .count()
+        );
+
+        assertTrue(source.contains("public UsersRow getUser(Long id)"));
+        assertTrue(source.contains("public Optional<UsersRow> findUser(Long id)"));
+
+        assertCompiles(file);
+    }
+
+    @Test
+    void shouldNotImportOptionalWithoutAnOptionalQuery() {
+        QueryModel getUser = new QueryModel(
+            "GetUser",
+            QueryType.ONE,
+            "users",
+            SQL,
+            List.of(),
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            List.of(),
+            null
+        );
+
+        QueryModel listUsers = new QueryModel(
+            "ListUsers",
+            QueryType.MANY,
+            "users",
+            SQL,
+            List.of(),
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            List.of(),
+            null
+        );
+
+        String source = codeGenerator
+            .generate(
+                new QueryGroupModel(
+                    GROUP,
+                    List.of(getUser, listUsers)
+                )
+            )
+            .content();
+
+        assertTrue(source.contains("import java.util.List;"));
+        assertFalse(source.contains("import java.util.Optional;"));
+    }
+
+    /**
+     * Every executor call names the generated repository and the query it was
+     * generated from, so a runtime failure identifies the method the
+     * application called.
+     */
+    @Test
+    void shouldPassRepositoryAndQueryIdentityToEveryExecutorCall() throws IOException {
+        QueryModel getUser = new QueryModel(
+            "GetUser",
+            QueryType.ONE,
+            "users",
+            "SELECT id FROM users WHERE id = ?",
+            List.of(1),
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            null
+        );
+
+        QueryModel findUser = new QueryModel(
+            "FindUser",
+            QueryType.OPTIONAL,
+            "users",
+            "SELECT id FROM users WHERE id = ?",
+            List.of(1),
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            null
+        );
+
+        QueryModel listUsers = new QueryModel(
+            "ListUsers",
+            QueryType.MANY,
+            "users",
+            "SELECT id FROM users",
+            List.of(),
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            List.of(),
+            null
+        );
+
+        QueryModel deleteUser = new QueryModel(
+            "DeleteUser",
+            QueryType.EXEC,
+            "users",
+            "DELETE FROM users WHERE id = ?",
+            List.of(1),
+            List.of(),
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            null
+        );
+
+        GeneratedFile file = codeGenerator.generate(
+            new QueryGroupModel(
+                GROUP,
+                List.of(getUser, findUser, listUsers, deleteUser)
+            )
+        );
+
+        String source = file.content();
+
+        assertTrue(
+            source.contains("""
+                        return executor.queryOne(
+                                "UsersRepository",
+                                "GetUser",
+                """)
+        );
+
+        assertTrue(
+            source.contains("""
+                        return executor.queryOptional(
+                                "UsersRepository",
+                                "FindUser",
+                """)
+        );
+
+        assertTrue(
+            source.contains("""
+                        return executor.queryMany(
+                                "UsersRepository",
+                                "ListUsers",
+                """)
+        );
+
+        assertTrue(
+            source.contains("""
+                        return executor.execute(
+                                "UsersRepository",
+                                "DeleteUser",
+                """)
         );
 
         assertCompiles(file);
