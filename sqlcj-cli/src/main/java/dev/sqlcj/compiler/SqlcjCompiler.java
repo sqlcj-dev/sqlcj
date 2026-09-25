@@ -8,6 +8,7 @@ import dev.sqlcj.generator.CodeGenerator;
 import dev.sqlcj.generator.GeneratedFile;
 import dev.sqlcj.generator.JavaCodeGenerator;
 import dev.sqlcj.io.GeneratedFileWriter;
+import dev.sqlcj.io.GeneratedOutputManifest;
 import dev.sqlcj.parser.Query;
 import dev.sqlcj.schema.Schema;
 import dev.sqlcj.schema.parser.DefaultSchemaParser;
@@ -29,12 +30,18 @@ public final class SqlcjCompiler {
     private final SqlParser sqlParser = new SqlParser();
     private final QueryAnalyzer queryAnalyzer = new QueryAnalyzer();
     private final GeneratedFileWriter generatedFileWriter = new GeneratedFileWriter();
+    private final GeneratedOutputManifest generatedOutputManifest = new GeneratedOutputManifest();
     private final SchemaParser schemaParser = new DefaultSchemaParser();
 
     /**
      * Compiles every configured entry before any generated file is written, so
      * a failure in a later source cannot leave a mixture of previously
      * generated and newly generated output.
+     *
+     * <p>The manifest of the previous run is read before the first write, and
+     * the files it lists that this run did not produce are deleted before the
+     * new manifest replaces it, so a failed write or cleanup keeps the previous
+     * manifest for the next run.
      */
     public void compile(Config config) {
         List<Source> sources = sourceLoader.load(config);
@@ -45,9 +52,19 @@ public final class SqlcjCompiler {
 
         Path outputDirectory = Path.of(config.java().out());
 
+        List<String> previousEntries = readManifest(outputDirectory);
+
         for (GeneratedFile file : files) {
             write(file, outputDirectory);
         }
+
+        List<Path> generatedPaths = files.stream()
+            .map(GeneratedFile::path)
+            .toList();
+
+        deleteStale(outputDirectory, previousEntries, generatedPaths);
+
+        writeManifest(outputDirectory, generatedPaths);
     }
 
     /** Generates one repository per configured query group. */
@@ -196,6 +213,34 @@ public final class SqlcjCompiler {
     private void write(GeneratedFile file, Path outputDirectory) {
         try {
             generatedFileWriter.write(file, outputDirectory);
+        } catch (IOException e) {
+            throw new CompilationException(e.getMessage(), e);
+        }
+    }
+
+    private List<String> readManifest(Path outputDirectory) {
+        try {
+            return generatedOutputManifest.read(outputDirectory);
+        } catch (IOException e) {
+            throw new CompilationException(e.getMessage(), e);
+        }
+    }
+
+    private void deleteStale(
+        Path outputDirectory,
+        List<String> previousEntries,
+        List<Path> generatedPaths
+    ) {
+        try {
+            generatedOutputManifest.deleteStale(outputDirectory, previousEntries, generatedPaths);
+        } catch (IOException e) {
+            throw new CompilationException(e.getMessage(), e);
+        }
+    }
+
+    private void writeManifest(Path outputDirectory, List<Path> generatedPaths) {
+        try {
+            generatedOutputManifest.write(outputDirectory, generatedPaths);
         } catch (IOException e) {
             throw new CompilationException(e.getMessage(), e);
         }

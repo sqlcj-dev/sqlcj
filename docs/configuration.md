@@ -288,15 +288,18 @@ sqlcj: Generated file paths for repositories 'UserData' and 'Userdata' differ on
 ## Diagnostics
 
 Invalid configuration, unreadable SQL sources, and output that cannot be written
-make `sqlcj generate` print a single message on standard error and exit with a
-non-zero status. The message names the configuration file and, when available,
-the offending field, value, source path, or output path:
+or cleaned up make `sqlcj generate` print a single message on standard error and
+exit with a non-zero status. The message names the configuration file and, when
+available, the offending field, value, source path, or output path:
 
 ```text
 sqlcj: Invalid configuration in /home/dev/project/sqlcj.yaml: 'java.package' value 'dev.class.generated' is not a valid Java package name
 sqlcj: Cannot read queries source: /home/dev/project/sql/missing.sql
 sqlcj: Cannot create output directory: /home/dev/project/target/generated-sources/sqlcj/dev/example/generated
 sqlcj: Cannot write generated file: /home/dev/project/target/generated-sources/sqlcj/dev/example/generated/UsersRepository.java
+sqlcj: Cannot read output manifest: /home/dev/project/target/generated-sources/sqlcj/sqlcj-manifest.txt
+sqlcj: Cannot delete stale generated file: /home/dev/project/target/generated-sources/sqlcj/dev/example/generated/OrdersRepository.java
+sqlcj: Cannot write output manifest: /home/dev/project/target/generated-sources/sqlcj/sqlcj-manifest.txt
 ```
 
 ## Generated Output and Failures
@@ -316,8 +319,22 @@ A filesystem failure while writing ends the run with one diagnostic naming the
 output directory or generated file it could not write and exit status `1`. The
 files the run had already written stay in place.
 
-sqlcj also never deletes a generated file that the current run did not produce,
-so a renamed or removed configuration entry leaves its previous repository
-behind. Generate into a
-build-owned directory and let the build's clean step remove stale output, as the
-[Quickstart](quickstart.md) does.
+A successful run records what it generated in `sqlcj-manifest.txt` inside
+`java.out`. The manifest is a UTF-8 text file listing every generated file as a
+path relative to `java.out`, with `/` between its name elements, sorted, one per
+line. The next successful run deletes the files the previous manifest listed
+that it did not generate itself, so a renamed or removed configuration entry
+leaves no stale repository behind.
+
+Cleanup is deliberately narrow:
+
+- A file no previous manifest listed is never deleted, so a hand-written file in
+  the generated package survives, and so does output written before the first
+  manifest existed.
+- No directory is deleted, so a package directory stays in place after the
+  repository inside it is removed.
+- Changing `java.out` leaves the previous directory and its files untouched,
+  because cleanup only reads the manifest of the directory it generates into.
+- A run that fails while writing a generated file, deleting a stale one, or
+  writing the manifest leaves the previous manifest in place, so the next
+  successful run cleans up the files it still lists.
