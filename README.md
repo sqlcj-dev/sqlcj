@@ -83,8 +83,8 @@ java -jar sqlcj-cli-0.1.0-SNAPSHOT.jar generate --config ../project/sqlcj.yaml
 A relative `--config` value is resolved against the directory the command is
 run in, while the relative paths inside the file stay relative to the file's own
 directory. `generate` exits with status `0` on success, and with status `1`
-after printing one diagnostic for invalid configuration, an unreadable source,
-or a query it cannot compile.
+after printing one diagnostic for invalid configuration, an unreadable source, a
+query it cannot compile, or an output directory or file it cannot write.
 
 ## Getting started
 
