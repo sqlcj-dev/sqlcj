@@ -72,9 +72,19 @@ java -jar sqlcj-cli-0.1.0-SNAPSHOT.jar generate   # compile sqlcj.yaml into Java
 java -jar sqlcj-cli-0.1.0-SNAPSHOT.jar --help     # list the commands
 ```
 
-`generate` reads `sqlcj.yaml` from the directory it is run in. It exits with
-status `0` on success, and with status `1` after printing one diagnostic for
-invalid configuration, an unreadable source, or a query it cannot compile.
+`generate` reads `sqlcj.yaml` from the directory it is run in.
+`--config <path>` names another configuration file, so generation can run from
+any working directory:
+
+```bash
+java -jar sqlcj-cli-0.1.0-SNAPSHOT.jar generate --config ../project/sqlcj.yaml
+```
+
+A relative `--config` value is resolved against the directory the command is
+run in, while the relative paths inside the file stay relative to the file's own
+directory. `generate` exits with status `0` on success, and with status `1`
+after printing one diagnostic for invalid configuration, an unreadable source,
+or a query it cannot compile.
 
 ## Getting started
 
