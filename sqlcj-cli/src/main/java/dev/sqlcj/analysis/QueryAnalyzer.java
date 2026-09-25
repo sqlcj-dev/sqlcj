@@ -67,9 +67,11 @@ public final class QueryAnalyzer {
 
     /**
      * One query source and the name it exposes to column references, which is
-     * its alias when present and otherwise its table name.
+     * its alias when present and otherwise its table name. A left-joined
+     * source contributes no row when the join finds no match, so every column
+     * read from it is nullable regardless of its schema declaration.
      */
-    private record Source(String name, dev.sqlcj.schema.Table table) {
+    private record Source(String name, dev.sqlcj.schema.Table table, boolean leftJoined) {
     }
 
     /** One column reference resolved against the ordered query sources. */
@@ -602,7 +604,7 @@ public final class QueryAnalyzer {
     private List<Source> resolveSources(PlainSelect plainSelect, Table table, Schema schema) {
         List<Source> sources = new ArrayList<>();
 
-        addSource(sources, table, schema);
+        addSource(sources, table, schema, false);
 
         List<Join> joins = plainSelect.getJoins();
 
@@ -611,7 +613,12 @@ public final class QueryAnalyzer {
         }
 
         for (Join join : joins) {
-            Source joined = addSource(sources, requireSupportedJoin(join), schema);
+            Source joined = addSource(
+                sources,
+                requireSupportedJoin(join),
+                schema,
+                join.isLeft()
+            );
 
             requireJoinCondition(join, sources, joined);
         }
@@ -619,8 +626,8 @@ public final class QueryAnalyzer {
         return List.copyOf(sources);
     }
 
-    private Source addSource(List<Source> sources, Table table, Schema schema) {
-        Source source = toSource(table, schema);
+    private Source addSource(List<Source> sources, Table table, Schema schema, boolean leftJoined) {
+        Source source = toSource(table, schema, leftJoined);
 
         boolean duplicate = sources.stream()
             .anyMatch(existing -> existing.name().equalsIgnoreCase(source.name()));
@@ -636,40 +643,32 @@ public final class QueryAnalyzer {
         return source;
     }
 
+    /** A base or write source, which always contributes a row of its own. */
     private Source toSource(Table table, Schema schema) {
+        return toSource(table, schema, false);
+    }
+
+    private Source toSource(Table table, Schema schema, boolean leftJoined) {
         return new Source(
             table.getAlias() == null
                 ? table.getUnquotedName()
                 : table.getAlias().getUnquotedName(),
-            findTable(schema, table.getUnquotedName())
+            findTable(schema, table.getUnquotedName()),
+            leftJoined
         );
     }
 
     /**
-     * Accepts only a bare {@code JOIN} or explicit {@code INNER JOIN} of one
-     * table source. {@link Join#isInnerJoin()} also reports shapes that this
-     * subset excludes, so every excluded modifier is rejected explicitly.
+     * Accepts only a bare {@code JOIN} or explicit {@code INNER JOIN}, or a
+     * {@code LEFT JOIN} in its bare or {@code LEFT OUTER JOIN} spelling, of one
+     * table source. {@link Join#isInnerJoin()} and {@link Join#isLeft()} also
+     * report shapes that this subset excludes, so every excluded modifier is
+     * rejected explicitly.
      */
     private Table requireSupportedJoin(Join join) {
-        boolean supported = join.isInnerJoin()
-            && !join.isSimple()
-            && !join.isOuter()
-            && !join.isLeft()
-            && !join.isRight()
-            && !join.isFull()
-            && !join.isCross()
-            && !join.isNatural()
-            && !join.isSemi()
-            && !join.isApply()
-            && !join.isStraight()
-            && !join.isGlobal()
-            && !join.isWindowJoin()
-            && join.getJoinHint() == null
-            && join.getUsingColumns().isEmpty();
-
-        if (!supported) {
+        if (!isSupportedInnerJoin(join) && !isSupportedLeftJoin(join)) {
             throw new UnsupportedOperationException(
-                "Only unmodified INNER JOIN clauses are supported."
+                "Only unmodified INNER JOIN and LEFT JOIN clauses are supported."
             );
         }
 
@@ -680,6 +679,43 @@ public final class QueryAnalyzer {
         }
 
         return table;
+    }
+
+    private boolean isSupportedInnerJoin(Join join) {
+        return join.isInnerJoin()
+            && !join.isOuter()
+            && !join.isLeft()
+            && !join.isRight()
+            && !join.isFull()
+            && !join.isCross()
+            && !join.isNatural()
+            && hasNoOtherJoinModifier(join);
+    }
+
+    /**
+     * Reports a {@code LEFT JOIN}, whose {@code LEFT OUTER JOIN} spelling also
+     * sets the {@code OUTER} keyword. Every other qualifier, including the bare
+     * {@code OUTER JOIN} that sets no side, is excluded.
+     */
+    private boolean isSupportedLeftJoin(Join join) {
+        return join.isLeft()
+            && !join.isInner()
+            && !join.isRight()
+            && !join.isFull()
+            && !join.isCross()
+            && !join.isNatural()
+            && hasNoOtherJoinModifier(join);
+    }
+
+    private boolean hasNoOtherJoinModifier(Join join) {
+        return !join.isSimple()
+            && !join.isSemi()
+            && !join.isApply()
+            && !join.isStraight()
+            && !join.isGlobal()
+            && !join.isWindowJoin()
+            && join.getJoinHint() == null
+            && join.getUsingColumns().isEmpty();
     }
 
     /**
@@ -1198,7 +1234,9 @@ public final class QueryAnalyzer {
     /**
      * Resolves the selected columns in declared order, expanding {@code *}
      * across the query sources in their declared order and
-     * {@code qualifier.*} across one source, each in schema column order.
+     * {@code qualifier.*} across one source, each in schema column order. A
+     * column of a left-joined source is nullable even when its schema
+     * declaration is not, because an unmatched row reads it as {@code NULL}.
      */
     private List<QueryColumn> resolveColumns(PlainSelect plainSelect, List<Source> sources) {
         List<QueryColumn> columns = new ArrayList<>();
@@ -1228,13 +1266,14 @@ public final class QueryAnalyzer {
             }
 
             if (expression instanceof net.sf.jsqlparser.schema.Column column) {
-                dev.sqlcj.schema.Column schemaColumn = resolveColumn(column, sources).column();
+                ResolvedColumn resolved = resolveColumn(column, sources);
+                dev.sqlcj.schema.Column schemaColumn = resolved.column();
 
                 columns.add(
                     new QueryColumn(
                         selectedColumnName(selectItem.getAlias(), schemaColumn),
                         schemaColumn.type(),
-                        schemaColumn.nullable()
+                        schemaColumn.nullable() || resolved.source().leftJoined()
                     )
                 );
 
@@ -1330,7 +1369,8 @@ public final class QueryAnalyzer {
     /**
      * Names a selected direct column after its explicit alias when the
      * projection declares one, so the alias reaches Java naming. The column's
-     * type and nullability still come from the schema column.
+     * type still comes from the schema column, and its nullability from the
+     * schema column and its source.
      */
     private String selectedColumnName(Alias alias, dev.sqlcj.schema.Column schemaColumn) {
         return alias == null
@@ -1418,7 +1458,7 @@ public final class QueryAnalyzer {
                 column -> new QueryColumn(
                     column.name(),
                     column.type(),
-                    column.nullable()
+                    column.nullable() || source.leftJoined()
                 )
             )
             .toList();
