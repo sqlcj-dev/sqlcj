@@ -12,8 +12,21 @@ The `generate` command reads `sqlcj.yaml` from the directory it is run in:
 sqlcj generate
 ```
 
-There is no configuration-path option and no configuration discovery in parent
-directories.
+`--config <path>` selects another file, so generation can run from any working
+directory:
+
+```bash
+sqlcj generate --config ../project/sqlcj.yaml
+```
+
+The option defaults to `sqlcj.yaml`, and a relative value is resolved against
+the directory the command is run in. Relative paths inside the file are still
+resolved against the directory that contains the file, not against the working
+directory. A missing or invalid explicit file reports the usual configuration
+diagnostic and exits with status `1`; there is no fallback to `sqlcj.yaml`.
+
+There is no short alias, no environment variable, and no configuration
+discovery in parent directories.
 
 ## Supported Version
 
@@ -109,8 +122,9 @@ generated/dev/example/generated/AuthorRepository.java
 ## Path Resolution
 
 A relative `schema`, `queries`, or `java.out` path is resolved against the
-directory that contains `sqlcj.yaml`, not against the process working directory
-at a later point in time. An absolute path is used as-is.
+directory that contains the configuration file, whether that file is the
+default `sqlcj.yaml` or one named by `--config`, and not against the process
+working directory at a later point in time. An absolute path is used as-is.
 
 Resolved paths are normalized lexically, so `../sql/schema.sql` is supported.
 Resolution does not require `java.out` to exist, does not expand `~`,
