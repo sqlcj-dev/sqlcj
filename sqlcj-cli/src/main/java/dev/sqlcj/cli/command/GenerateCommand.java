@@ -9,6 +9,7 @@ import dev.sqlcj.config.YamlConfigLoader;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Model.CommandSpec;
+import picocli.CommandLine.Option;
 import picocli.CommandLine.Spec;
 
 import java.nio.file.Path;
@@ -20,17 +21,28 @@ import java.util.concurrent.Callable;
 )
 public class GenerateCommand implements Callable<Integer> {
 
-    private static final String CONFIG_FILE = "sqlcj.yaml";
-
     private final ConfigLoader configLoader = new YamlConfigLoader();
 
     @Spec
     CommandSpec spec;
 
+    @Option(
+        names = "--config",
+        paramLabel = "<path>",
+        defaultValue = "sqlcj.yaml",
+        description = """
+            Configuration file to generate from. A relative path is \
+            resolved against the current directory, while relative paths \
+            inside the file are resolved against its own directory. \
+            Default: ${DEFAULT-VALUE}
+            """
+    )
+    Path configFile;
+
     @Override
     public Integer call() {
         try {
-            Config config = configLoader.load(configPath());
+            Config config = configLoader.load(configFile);
             SqlcjCompiler compiler = new SqlcjCompiler();
             compiler.compile(config);
             return CommandLine.ExitCode.OK;
@@ -41,9 +53,5 @@ public class GenerateCommand implements Callable<Integer> {
 
             return CommandLine.ExitCode.SOFTWARE;
         }
-    }
-
-    private Path configPath() {
-        return Path.of(CONFIG_FILE);
     }
 }
