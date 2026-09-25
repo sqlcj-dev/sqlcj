@@ -16,7 +16,6 @@ import dev.sqlcj.sql.ParsedSql;
 import dev.sqlcj.sql.SqlParser;
 
 import java.io.IOException;
-import java.io.UncheckedIOException;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -198,7 +197,7 @@ public final class SqlcjCompiler {
         try {
             generatedFileWriter.write(file, outputDirectory);
         } catch (IOException e) {
-            throw new UncheckedIOException(e);
+            throw new CompilationException(e.getMessage(), e);
         }
     }
 

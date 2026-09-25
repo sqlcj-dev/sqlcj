@@ -9,6 +9,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class GeneratedFileWriterTest {
@@ -55,6 +56,51 @@ class GeneratedFileWriterTest {
         assertEquals(
             "public final class GetUser {}",
             Files.readString(outputFile)
+        );
+    }
+
+    @Test
+    void shouldReportTheDirectoryItCannotCreate() throws IOException {
+        Path outputDirectory = tempDir.resolve("generated");
+
+        Files.writeString(outputDirectory, "not a directory");
+
+        GeneratedFile file = new GeneratedFile(
+            Path.of("nested", "GetUser.java"),
+            "public final class GetUser {}"
+        );
+
+        IOException failure = assertThrows(
+            IOException.class,
+            () -> writer.write(file, outputDirectory)
+        );
+
+        assertEquals(
+            "Cannot create output directory: "
+                + outputDirectory.resolve(file.path()).getParent(),
+            failure.getMessage()
+        );
+    }
+
+    @Test
+    void shouldReportTheFileItCannotWrite() throws IOException {
+        Path outputDirectory = tempDir.resolve("generated");
+
+        GeneratedFile file = new GeneratedFile(
+            Path.of("GetUser.java"),
+            "public final class GetUser {}"
+        );
+
+        Files.createDirectories(outputDirectory.resolve(file.path()));
+
+        IOException failure = assertThrows(
+            IOException.class,
+            () -> writer.write(file, outputDirectory)
+        );
+
+        assertEquals(
+            "Cannot write generated file: " + outputDirectory.resolve(file.path()),
+            failure.getMessage()
         );
     }
 }

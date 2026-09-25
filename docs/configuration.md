@@ -287,14 +287,16 @@ sqlcj: Generated file paths for repositories 'UserData' and 'Userdata' differ on
 
 ## Diagnostics
 
-Invalid configuration and unreadable SQL sources make `sqlcj generate` print a
-single message on standard error and exit with a non-zero status. The message
-names the configuration file and, when available, the offending field, value, or
-source path:
+Invalid configuration, unreadable SQL sources, and output that cannot be written
+make `sqlcj generate` print a single message on standard error and exit with a
+non-zero status. The message names the configuration file and, when available,
+the offending field, value, source path, or output path:
 
 ```text
 sqlcj: Invalid configuration in /home/dev/project/sqlcj.yaml: 'java.package' value 'dev.class.generated' is not a valid Java package name
 sqlcj: Cannot read queries source: /home/dev/project/sql/missing.sql
+sqlcj: Cannot create output directory: /home/dev/project/target/generated-sources/sqlcj/dev/example/generated
+sqlcj: Cannot write generated file: /home/dev/project/target/generated-sources/sqlcj/dev/example/generated/UsersRepository.java
 ```
 
 ## Generated Output and Failures
@@ -309,6 +311,10 @@ written one after another, each created or truncated in place, so a filesystem
 failure part-way through can leave a mixture of newly written files and files
 from a previous run. sqlcj does not remove or roll back files it has already
 written.
+
+A filesystem failure while writing ends the run with one diagnostic naming the
+output directory or generated file it could not write and exit status `1`. The
+files the run had already written stay in place.
 
 sqlcj also never deletes a generated file that the current run did not produce,
 so a renamed or removed configuration entry leaves its previous repository

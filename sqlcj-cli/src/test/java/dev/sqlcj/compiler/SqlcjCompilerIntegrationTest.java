@@ -1479,6 +1479,57 @@ class SqlcjCompilerIntegrationTest {
     }
 
     @Test
+    void shouldReportTheGeneratedFileItCannotWrite() throws IOException {
+        Path usersSchema = tempDir.resolve("users-schema.sql");
+        Path usersQueries = tempDir.resolve("users-queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Files.writeString(
+            usersSchema,
+            """
+                CREATE TABLE users
+                (
+                    id   BIGINT NOT NULL,
+                    name VARCHAR(255)
+                );
+                """
+        );
+
+        Files.writeString(
+            usersQueries,
+            """
+                -- name: GetUser :one
+                SELECT id
+                FROM users
+                WHERE id = $1;
+                """
+        );
+
+        Path generatedFile = generatedDirectory
+            .resolve("dev/example/generated")
+            .resolve("UsersRepository.java");
+
+        Files.createDirectories(generatedFile);
+
+        Config config = new Config(
+            List.of(new SqlConfig("Users", usersSchema.toString(), usersQueries.toString())),
+            new JavaConfig(generatedDirectory.toString(), "dev.example.generated")
+        );
+
+        SqlcjCompiler compiler = new SqlcjCompiler();
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compiler.compile(config)
+        );
+
+        assertEquals(
+            "Cannot write generated file: " + generatedFile,
+            exception.getMessage()
+        );
+    }
+
+    @Test
     void shouldRejectAnonymousPlaceholderBeforeWriting() {
         Path generatedDirectory = tempDir.resolve("generated");
 

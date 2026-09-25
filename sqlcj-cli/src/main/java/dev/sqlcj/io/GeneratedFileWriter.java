@@ -15,14 +15,22 @@ public final class GeneratedFileWriter {
         Path parent = outputFile.getParent();
 
         if (parent != null) {
-            Files.createDirectories(parent);
+            try {
+                Files.createDirectories(parent);
+            } catch (IOException e) {
+                throw new IOException("Cannot create output directory: " + parent, e);
+            }
         }
 
-        Files.writeString(
-            outputFile,
-            file.content(),
-            StandardOpenOption.CREATE,
-            StandardOpenOption.TRUNCATE_EXISTING
-        );
+        try {
+            Files.writeString(
+                outputFile,
+                file.content(),
+                StandardOpenOption.CREATE,
+                StandardOpenOption.TRUNCATE_EXISTING
+            );
+        } catch (IOException e) {
+            throw new IOException("Cannot write generated file: " + outputFile, e);
+        }
     }
 }
