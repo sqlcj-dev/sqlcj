@@ -410,10 +410,11 @@ mvn compile
 mvn exec:java
 ```
 
-- `mvn clean` deletes `target`, including previously generated sources. sqlcj
-  writes and overwrites its own files but never deletes a file it did not just
-  generate, so a query that was renamed or removed would otherwise leave a stale
-  class behind that still compiles.
+- `mvn clean` deletes `target`, including previously generated sources and the
+  classes compiled from them. sqlcj writes and overwrites its own files and
+  deletes a repository its previous run recorded that the current run no longer
+  generates, but it never deletes a compiled class, so a query that was renamed
+  or removed would otherwise leave a stale class behind that still compiles.
 - `sqlcj generate` is a separate command. It is not bound to the Maven
   lifecycle, so it must run after `clean` and before `compile`. The commands
   above run from the project root, because `generate` reads `sqlcj.yaml` from

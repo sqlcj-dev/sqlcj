@@ -84,7 +84,8 @@ A relative `--config` value is resolved against the directory the command is
 run in, while the relative paths inside the file stay relative to the file's own
 directory. `generate` exits with status `0` on success, and with status `1`
 after printing one diagnostic for invalid configuration, an unreadable source, a
-query it cannot compile, or an output directory or file it cannot write.
+query it cannot compile, an output directory or file it cannot write, a stale
+generated file it cannot delete, or an output manifest it cannot read or write.
 
 ## Getting started
 
