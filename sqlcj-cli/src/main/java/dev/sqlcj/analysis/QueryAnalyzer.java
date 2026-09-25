@@ -9,6 +9,7 @@ import dev.sqlcj.type.DefaultTypeResolver;
 import dev.sqlcj.type.TypeResolver;
 import net.sf.jsqlparser.expression.Alias;
 import net.sf.jsqlparser.expression.Expression;
+import net.sf.jsqlparser.expression.Function;
 import net.sf.jsqlparser.expression.JdbcNamedParameter;
 import net.sf.jsqlparser.expression.JdbcParameter;
 import net.sf.jsqlparser.expression.operators.conditional.AndExpression;
@@ -1240,6 +1241,17 @@ public final class QueryAnalyzer {
                 continue;
             }
 
+            if (expression instanceof Function function && isScalarCount(function)) {
+                columns.add(
+                    scalarCountColumn(
+                        selectItem.getAlias(),
+                        plainSelect.getSelectItems().size()
+                    )
+                );
+
+                continue;
+            }
+
             throw new UnsupportedOperationException(
                 "Unsupported SELECT expression: "
                     + expression.getClass().getSimpleName()
@@ -1247,6 +1259,53 @@ public final class QueryAnalyzer {
         }
 
         return columns;
+    }
+
+    /**
+     * Reports whether a projected function is the supported scalar count, which
+     * is an unqualified case-insensitive {@code COUNT} whose single argument is
+     * exactly {@code *}. A qualified name such as {@code pg_catalog.count(*)},
+     * a {@code DISTINCT} count, and {@code COUNT(t.*)}, whose argument is a
+     * subtype of the {@code COUNT(*)} argument, are other functions.
+     */
+    private boolean isScalarCount(Function function) {
+        List<String> name = function.getMultipartName();
+
+        if (name == null || name.size() != 1 || !name.getFirst().equalsIgnoreCase("count")) {
+            return false;
+        }
+
+        if (function.isDistinct()) {
+            return false;
+        }
+
+        ExpressionList<?> arguments = function.getParameters();
+
+        return arguments != null
+            && arguments.size() == 1
+            && arguments.getFirst().getClass() == AllColumns.class;
+    }
+
+    /**
+     * Resolves the scalar count projection into its single result column, which
+     * is named after the required alias. The column is {@code BIGINT} because
+     * {@code count(*)} returns {@code bigint}, and it is non-null because a
+     * count is always a number, {@code 0} when no row matches.
+     */
+    private QueryColumn scalarCountColumn(Alias alias, int selectItemCount) {
+        if (selectItemCount > 1) {
+            throw new UnsupportedOperationException(
+                "COUNT(*) must be the only SELECT item."
+            );
+        }
+
+        if (alias == null) {
+            throw new UnsupportedOperationException(
+                "COUNT(*) requires a result alias, such as COUNT(*) AS total."
+            );
+        }
+
+        return new QueryColumn(alias.getUnquotedName(), ColumnType.BIGINT, false);
     }
 
     /**

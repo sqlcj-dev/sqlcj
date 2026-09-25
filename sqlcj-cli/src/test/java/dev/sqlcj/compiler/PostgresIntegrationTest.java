@@ -561,6 +561,52 @@ class PostgresIntegrationTest {
         }
     }
 
+    /**
+     * Covers the scalar count end to end: a {@code :one} count read is
+     * generated, compiled, and executed against PostgreSQL, so its result
+     * record exposes one {@code Long} component that counts the matching rows
+     * and is {@code 0} when none match.
+     */
+    @Test
+    void shouldExecuteGeneratedScalarCountAgainstPostgres() throws Exception {
+        Path classesDirectory = generateAndCompile("""
+            -- name: CountUsersByName :one
+            SELECT COUNT(*) AS total
+            FROM users
+            WHERE name LIKE $1;
+            """);
+
+        execute("""
+            INSERT INTO users (id, code, name)
+            VALUES
+                (1, 1, 'Alice'),
+                (2, 2, 'Amy'),
+                (3, 3, 'Bob')
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method count = repository.getClass().getMethod(
+                "countUsersByName",
+                String.class
+            );
+
+            Object matching = count.invoke(repository, "A%");
+
+            assertEquals(List.of("total"), recordComponentNames(matching));
+
+            assertEquals(
+                Long.class,
+                matching.getClass().getRecordComponents()[0].getType()
+            );
+
+            assertEquals(2L, component(matching, "total"));
+
+            assertEquals(0L, component(count.invoke(repository, "Z%"), "total"));
+        }
+    }
+
     @Test
     void shouldExecuteGeneratedWriteAgainstPostgres() throws Exception {
         Path classesDirectory = generateAndCompile("""
