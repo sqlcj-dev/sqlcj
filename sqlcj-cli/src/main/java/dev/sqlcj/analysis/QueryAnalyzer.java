@@ -29,6 +29,8 @@ import net.sf.jsqlparser.statement.insert.Insert;
 import net.sf.jsqlparser.statement.select.AllColumns;
 import net.sf.jsqlparser.statement.select.AllTableColumns;
 import net.sf.jsqlparser.statement.select.Join;
+import net.sf.jsqlparser.statement.select.Limit;
+import net.sf.jsqlparser.statement.select.Offset;
 import net.sf.jsqlparser.statement.select.PlainSelect;
 import net.sf.jsqlparser.statement.select.Select;
 import net.sf.jsqlparser.statement.select.SelectItem;
@@ -49,6 +51,12 @@ public final class QueryAnalyzer {
 
     private static final String ANONYMOUS_PARAMETER_REJECTION = """
         Anonymous '?' parameters are not supported; use an indexed placeholder such as $1""";
+
+    /** The parameter name of a {@code LIMIT} row count placeholder. */
+    private static final String LIMIT_PARAMETER_NAME = "limit";
+
+    /** The parameter name of an {@code OFFSET} value placeholder. */
+    private static final String OFFSET_PARAMETER_NAME = "offset";
 
     /**
      * Resolves the Java type of parameter occurrence, which decides whether a
@@ -714,19 +722,88 @@ public final class QueryAnalyzer {
      * positions.
      */
     private List<QueryParameter> resolveBindingParameters(PlainSelect plainSelect, List<Source> sources) {
-        if (plainSelect.getWhere() == null) {
-            return List.of();
-        }
-
         List<QueryParameter> parameters = new ArrayList<>();
 
-        resolveParameters(
-            plainSelect.getWhere(),
-            sources,
-            parameters
-        );
+        if (plainSelect.getWhere() != null) {
+            resolveParameters(
+                plainSelect.getWhere(),
+                sources,
+                parameters
+            );
+        }
+
+        resolvePaginationParameters(plainSelect, parameters);
 
         return parameters;
+    }
+
+    /**
+     * Resolves the pagination parameters, which follow every {@code WHERE}
+     * parameter in textual order. A {@code LIMIT} row count and an
+     * {@code OFFSET} value that is a placeholder each becomes an
+     * {@code INTEGER} parameter named after its own clause. The parser stores
+     * {@code OFFSET a LIMIT b} exactly like {@code LIMIT b OFFSET a}, so two
+     * placeholders are ordered by their source positions.
+     */
+    private void resolvePaginationParameters(PlainSelect plainSelect, List<QueryParameter> parameters) {
+        JdbcParameter rowCount = resolvePaginationPlaceholder(
+            resolveLimitRowCount(plainSelect.getLimit())
+        );
+
+        Offset offset = plainSelect.getOffset();
+
+        JdbcParameter offsetValue = resolvePaginationPlaceholder(
+            offset == null ? null : offset.getOffset()
+        );
+
+        if (rowCount != null && offsetValue != null && sourcePosition(offsetValue) < sourcePosition(rowCount)) {
+            addParameter(offsetValue, OFFSET_PARAMETER_NAME, ColumnType.INTEGER, parameters);
+            addParameter(rowCount, LIMIT_PARAMETER_NAME, ColumnType.INTEGER, parameters);
+
+            return;
+        }
+
+        if (rowCount != null) {
+            addParameter(rowCount, LIMIT_PARAMETER_NAME, ColumnType.INTEGER, parameters);
+        }
+
+        if (offsetValue != null) {
+            addParameter(offsetValue, OFFSET_PARAMETER_NAME, ColumnType.INTEGER, parameters);
+        }
+    }
+
+    /**
+     * Reports the analyzed row count of a {@code LIMIT} clause, which is absent
+     * when the clause carries an offset of its own, as in the {@code LIMIT a, b}
+     * form.
+     */
+    private Expression resolveLimitRowCount(Limit limit) {
+        return limit == null || limit.getOffset() != null
+            ? null
+            : limit.getRowCount();
+    }
+
+    /**
+     * Rejects a named pagination value and reports the placeholder to bind,
+     * which is absent when the value binds none. A value such as a literal or
+     * {@code ALL} reaches the database as written, while a computed value keeps
+     * its placeholder unaccounted for the placeholder accounting check.
+     */
+    private JdbcParameter resolvePaginationPlaceholder(Expression value) {
+        if (value == null) {
+            return null;
+        }
+
+        requireIndexedParameter(value);
+
+        return value instanceof JdbcParameter parameter
+            ? parameter
+            : null;
+    }
+
+    /** The source position of a placeholder token, counted from one. */
+    private int sourcePosition(JdbcParameter parameter) {
+        return parameter.getASTNode().jjtGetFirstToken().absoluteBegin;
     }
 
     private void resolveParameters(
@@ -1065,6 +1142,20 @@ public final class QueryAnalyzer {
         dev.sqlcj.schema.Column column,
         List<QueryParameter> parameters
     ) {
+        addParameter(
+            parameter,
+            column.name(),
+            column.type(),
+            parameters
+        );
+    }
+
+    private void addParameter(
+        JdbcParameter parameter,
+        String name,
+        ColumnType type,
+        List<QueryParameter> parameters
+    ) {
         if (!parameter.isUseFixedIndex()) {
             throw new UnsupportedOperationException(ANONYMOUS_PARAMETER_REJECTION);
         }
@@ -1072,8 +1163,8 @@ public final class QueryAnalyzer {
         parameters.add(
             new QueryParameter(
                 parameter.getIndex(),
-                column.name(),
-                column.type()
+                name,
+                type
             )
         );
     }

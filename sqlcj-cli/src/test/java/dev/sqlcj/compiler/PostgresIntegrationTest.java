@@ -503,6 +503,64 @@ class PostgresIntegrationTest {
         }
     }
 
+    /**
+     * Covers pagination end to end: a {@code LIMIT ... OFFSET ...} page and the
+     * same page written as {@code OFFSET ... LIMIT ...} are generated,
+     * compiled, and executed against PostgreSQL, so a swapped binding order
+     * would change the returned page.
+     */
+    @Test
+    void shouldExecuteGeneratedPaginationAgainstPostgres() throws Exception {
+        Path classesDirectory = generateAndCompile("""
+            -- name: ListUserPage :many
+            SELECT id, name
+            FROM users
+            ORDER BY id
+            LIMIT $1 OFFSET $2;
+
+            -- name: ListUserPageWithLeadingOffset :many
+            SELECT id, name
+            FROM users
+            ORDER BY id
+            OFFSET $2 LIMIT $1;
+            """);
+
+        execute("""
+            INSERT INTO users (id, code, name)
+            VALUES
+                (1, 1, 'Alice'),
+                (2, 2, 'Bob'),
+                (3, 3, 'Cara'),
+                (4, 4, 'Dora')
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method page = repository.getClass().getMethod(
+                "listUserPage",
+                Integer.class,
+                Integer.class
+            );
+
+            Method pageWithLeadingOffset = repository.getClass().getMethod(
+                "listUserPageWithLeadingOffset",
+                Integer.class,
+                Integer.class
+            );
+
+            assertEquals(
+                List.of("Bob", "Cara"),
+                names(page.invoke(repository, 2, 1))
+            );
+
+            assertEquals(
+                List.of("Bob", "Cara"),
+                names(pageWithLeadingOffset.invoke(repository, 2, 1))
+            );
+        }
+    }
+
     @Test
     void shouldExecuteGeneratedWriteAgainstPostgres() throws Exception {
         Path classesDirectory = generateAndCompile("""

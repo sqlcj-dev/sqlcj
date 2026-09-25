@@ -1097,6 +1097,142 @@ class QueryAnalyzerTest {
     }
 
     @Test
+    void shouldResolvePaginationParametersAfterPredicateParameters() {
+        String sql = "SELECT id FROM users WHERE name = $1 ORDER BY id LIMIT $2 OFFSET $3";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "name", ColumnType.VARCHAR),
+                new QueryParameter(2, "limit", ColumnType.INTEGER),
+                new QueryParameter(3, "offset", ColumnType.INTEGER)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2, 3), model.bindingParameterIndexes());
+
+        assertEquals(
+            "SELECT id FROM users WHERE name = ? ORDER BY id LIMIT ? OFFSET ?",
+            model.executableSql()
+        );
+    }
+
+    @Test
+    void shouldResolvePaginationParametersInTextualBindingOrder() {
+        String sql = "SELECT id FROM users ORDER BY id OFFSET $2 LIMIT $1";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "limit", ColumnType.INTEGER),
+                new QueryParameter(2, "offset", ColumnType.INTEGER)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(2, 1), model.bindingParameterIndexes());
+
+        assertEquals(
+            "SELECT id FROM users ORDER BY id OFFSET ? LIMIT ?",
+            model.executableSql()
+        );
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "SELECT id FROM users ORDER BY id LIMIT 10 OFFSET $1",
+            "SELECT id FROM users ORDER BY id LIMIT ALL OFFSET $1"
+        }
+    )
+    void shouldResolveOffsetParameterBesideUnanalyzedRowCount(String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "offset", ColumnType.INTEGER)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+    }
+
+    @Test
+    void shouldNotCreateParametersForLiteralPagination() {
+        String sql = "SELECT id FROM users ORDER BY id LIMIT 10 OFFSET 5";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertTrue(model.parameters().isEmpty());
+        assertTrue(model.bindingParameterIndexes().isEmpty());
+
+        assertEquals(
+            "SELECT id FROM users ORDER BY id LIMIT 10 OFFSET 5",
+            model.executableSql()
+        );
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "SELECT id FROM users ORDER BY id LIMIT :n",
+            "SELECT id FROM users ORDER BY id OFFSET :n"
+        }
+    )
+    void shouldRejectNamedPaginationValue(String sql) {
+        Query query = new Query("ListUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(
+            "Named parameter ':n' is not supported; use an indexed placeholder such as $1",
+            exception.getMessage()
+        );
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "SELECT id FROM users ORDER BY id LIMIT $1 + 1",
+            "SELECT id FROM users ORDER BY id OFFSET $1 + 1",
+            "SELECT id FROM users ORDER BY id LIMIT 5, $1",
+            "SELECT id FROM users ORDER BY id LIMIT $1, $2",
+            "SELECT id FROM users ORDER BY id FETCH FIRST $1 ROWS ONLY"
+        }
+    )
+    void shouldRejectPlaceholderInUnsupportedPaginationValue(String sql) {
+        Query query = new Query("ListUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+    }
+
+    @Test
     void shouldResolveQueryParametersInsideInExpression() {
         Query query = new Query(
             "FindUsers",
@@ -1965,7 +2101,7 @@ class QueryAnalyzerTest {
 
     @Test
     void shouldRejectPlaceholderInUnsupportedLocation() {
-        String sql = "SELECT * FROM users WHERE id = $1 LIMIT $2";
+        String sql = "SELECT * FROM users WHERE id = $1 LIMIT $2 + 1";
 
         Query query = new Query("FindUsers", QueryType.MANY, sql);
         ParsedSql parsedSql = parser.parse(sql);
