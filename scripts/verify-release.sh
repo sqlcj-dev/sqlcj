@@ -123,7 +123,8 @@ generated_count=$(find "${generated_root}" -type f -name '*.java' | wc -l)
 [ "${generated_count}" -eq 1 ] \
     || fail "expected 1 generated source but found ${generated_count}"
 
-for method in createAuthor getAuthor findAuthor listAuthors updateAuthorBio deleteAuthor; do
+for method in createAuthor getAuthor findAuthor listAuthors updateAuthorBio deleteAuthor \
+    searchAuthors countAuthors listAuthorPage createBook listAuthorBooks; do
     grep -q " ${method}(" "${generated_package}/AuthorRepository.java" \
         || fail "the generated repository is missing the ${method} method"
 done
@@ -154,7 +155,7 @@ PGPASSWORD="${db_password}" psql \
     --set=ON_ERROR_STOP=1 \
     --quiet \
     --username "${db_user}" \
-    --command 'DROP TABLE IF EXISTS authors;' \
+    --command 'DROP TABLE IF EXISTS books, authors;' \
     --file "${sample_dir}/sql/schema.sql" \
     "${jdbc_url#jdbc:}"
 
