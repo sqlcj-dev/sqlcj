@@ -155,6 +155,38 @@ statement, including the ordering clause, reaches JDBC exactly as written. A
 placeholder in `ORDER BY` is rejected, because it is not an analyzed parameter
 location.
 
+### Pagination
+
+A read may page its rows with `LIMIT` and `OFFSET`. Each clause takes either a
+literal value or a `$N` placeholder:
+
+```sql
+-- name: ListAuthorPage :many
+SELECT id, name
+FROM authors
+ORDER BY id
+LIMIT $1 OFFSET $2;
+```
+
+- A `LIMIT` row count placeholder is an `INTEGER` parameter named `limit`, and an
+  `OFFSET` value placeholder is an `INTEGER` parameter named `offset`, so
+  `ListAuthorPage` generates `listAuthorPage(Integer limit, Integer offset)`.
+- The pagination parameters are bound after every `WHERE` parameter, in the
+  textual order of the two clauses, so both `LIMIT $1 OFFSET $2` and
+  `OFFSET $2 LIMIT $1` generate the same `(limit, offset)` method parameters
+  while the second binds the offset first.
+- A value that binds no placeholder contributes no parameter and reaches the
+  database as written, so `LIMIT 10 OFFSET 5` binds none, while
+  `LIMIT 10 OFFSET $1` and `LIMIT ALL OFFSET $1` each bind one `offset`
+  parameter.
+- Both values must be non-negative. sqlcj generates no validation, so PostgreSQL
+  rejects a negative value when the query executes.
+- A named value such as `LIMIT :n` or `OFFSET :n` is rejected like any other
+  named placeholder. A placeholder in a computed value, as in `LIMIT $1 + 1` or
+  `OFFSET $1 + 1`, in the `LIMIT a, b` form, as in `LIMIT 5, $1`, and in a
+  `FETCH FIRST $1 ROWS ONLY` clause are rejected as unanalyzed placeholder
+  locations.
+
 ## Writes
 
 A write targets exactly one table of its entry's schema.
@@ -213,8 +245,8 @@ identifier, or a comment is not a parameter.
 - The Java type of a placeholder is the type of the column it is compared with,
   assigned to, or inserted into.
 - Anonymous `?` placeholders and named `:name` placeholders are rejected.
-- A placeholder in a location sqlcj does not analyze — for example `LIMIT $1` —
-  is rejected rather than left unbound.
+- A placeholder in a location sqlcj does not analyze — for example `ORDER BY $1`
+  — is rejected rather than left unbound.
 
 ### Logical order versus textual order
 
@@ -413,16 +445,19 @@ name, and its header line.
 - A `FROM` item that is not a table, a comma-separated source list, a join that
   is not a plain inner join, a join predicate that is not one qualified
   equality, and a set operation such as `UNION`.
-- A placeholder in a location sqlcj does not analyze, including `LIMIT $1`, a
+- A placeholder in a location sqlcj does not analyze, including `ORDER BY $1`, a
   computed `LIKE` pattern such as `'%' || $1 || '%'`, a placeholder as the
-  tested value of a range such as `$1 BETWEEN id AND id`, and a computed range
-  bound such as `id BETWEEN $1 + 1 AND $2`, so parameterized pagination and
-  dynamic `IN` expansion are unavailable.
+  tested value of a range such as `$1 BETWEEN id AND id`, a computed range
+  bound such as `id BETWEEN $1 + 1 AND $2`, a computed pagination value such as
+  `LIMIT $1 + 1` or `OFFSET $1 + 1`, a `LIMIT a, b` row count such as
+  `LIMIT 5, $1`, and a `FETCH FIRST $1 ROWS ONLY` clause, so dynamic `IN`
+  expansion is unavailable.
 - A `LIKE`-family pattern placeholder that is negated, uses another keyword such
   as `SIMILAR TO`, carries an `ESCAPE` clause or a `BINARY` modifier, tests a
   non-text column, or stands as the tested value.
-- A named range bound such as `id BETWEEN :lo AND :hi`, which fails with the
-  named-placeholder diagnostic.
+- A named range bound such as `id BETWEEN :lo AND :hi` and a named pagination
+  value such as `LIMIT :n` or `OFFSET :n`, which fail with the named-placeholder
+  diagnostic.
 - Anonymous `?` and named `:name` placeholders, and non-contiguous or
   non-positive placeholder indexes.
 - An `INSERT` without an explicit column list, with more than one `VALUES` row,
@@ -446,7 +481,6 @@ them:
   literal pattern, a range whose bounds are both literal such as
   `id BETWEEN 1 AND 10`, or `IN` with a subquery,
 - common table expressions, and subqueries outside the `FROM` item,
-- `LIMIT` and `OFFSET` with literal values,
 - `ON CONFLICT`, `UPDATE ... FROM`, and `DELETE ... USING` on a non-returning
   `:exec` write.
 
@@ -544,6 +578,16 @@ Reads:
   `PostgresIntegrationTest.shouldExecuteGeneratedRangePredicatesAgainstPostgres`
   executes a `BETWEEN` read and a `NOT BETWEEN` read whose bounds use
   out-of-order placeholder indexes against PostgreSQL 16.
+- `QueryAnalyzerTest.shouldResolvePaginationParametersAfterPredicateParameters`,
+  `QueryAnalyzerTest.shouldResolvePaginationParametersInTextualBindingOrder`,
+  `QueryAnalyzerTest.shouldResolveOffsetParameterBesideUnanalyzedRowCount`,
+  `QueryAnalyzerTest.shouldNotCreateParametersForLiteralPagination`,
+  `QueryAnalyzerTest.shouldRejectNamedPaginationValue`, and
+  `QueryAnalyzerTest.shouldRejectPlaceholderInUnsupportedPaginationValue` cover
+  pagination, and
+  `PostgresIntegrationTest.shouldExecuteGeneratedPaginationAgainstPostgres`
+  executes a `LIMIT ... OFFSET ...` page and the same page written as
+  `OFFSET ... LIMIT ...` against PostgreSQL 16.
 - `QueryAnalyzerTest.shouldResolveRowTableForFullRowSelect`,
   `QueryAnalyzerTest.shouldNotResolveRowTableForQuerySpecificResult`,
   `QueryAnalyzerTest.shouldNotResolveRowTableForJoinedWildcard`, and
