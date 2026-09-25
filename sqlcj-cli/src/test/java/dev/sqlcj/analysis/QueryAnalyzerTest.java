@@ -1233,6 +1233,85 @@ class QueryAnalyzerTest {
     }
 
     @Test
+    void shouldResolveScalarCountColumnFromItsAlias() {
+        String sql = "SELECT COUNT(*) AS total FROM users";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CountUsers", QueryType.ONE, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("total", ColumnType.BIGINT, false)),
+            model.columns()
+        );
+
+        assertTrue(model.parameters().isEmpty());
+        assertNull(model.rowTable());
+    }
+
+    @Test
+    void shouldResolveScalarCountBesidePredicateParameter() {
+        String sql = "SELECT count(*) user_count FROM users WHERE name LIKE $1";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CountMatchingUsers", QueryType.ONE, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("user_count", ColumnType.BIGINT, false)),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "name", ColumnType.VARCHAR)),
+            model.parameters()
+        );
+    }
+
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "SELECT COUNT(*) FROM users"
+                + "|COUNT(*) requires a result alias, such as COUNT(*) AS total.",
+            "SELECT COUNT(*) AS n, id FROM users"
+                + "|COUNT(*) must be the only SELECT item.",
+            "SELECT id, COUNT(*) AS n FROM users"
+                + "|COUNT(*) must be the only SELECT item.",
+            "SELECT COUNT(id) AS n FROM users"
+                + "|Unsupported SELECT expression: Function",
+            "SELECT COUNT(DISTINCT id) AS n FROM users"
+                + "|Unsupported SELECT expression: Function",
+            "SELECT COUNT(u.*) AS n FROM users u"
+                + "|Unsupported SELECT expression: Function",
+            "SELECT pg_catalog.count(*) AS n FROM users"
+                + "|Unsupported SELECT expression: Function",
+            "SELECT lower(name) AS n FROM users"
+                + "|Unsupported SELECT expression: Function",
+            "SELECT COUNT(*) FILTER (WHERE id > 1) AS n FROM users"
+                + "|Unsupported SELECT expression: AnalyticExpression",
+            "SELECT COUNT(*) OVER () AS n FROM users"
+                + "|Unsupported SELECT expression: AnalyticExpression"
+        }
+    )
+    void shouldRejectUnsupportedCountProjectionForm(String sql, String message) {
+        Query query = new Query("CountUsers", QueryType.ONE, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(message, exception.getMessage());
+    }
+
+    @Test
     void shouldResolveQueryParametersInsideInExpression() {
         Query query = new Query(
             "FindUsers",
