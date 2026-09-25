@@ -1,7 +1,7 @@
 # Quickstart
 
-This walkthrough builds a small Maven application that reads and writes a
-PostgreSQL table through sqlcj-generated Java. Every file is listed in full, so
+This walkthrough builds a small Maven application that reads and writes two
+PostgreSQL tables through sqlcj-generated Java. Every file is listed in full, so
 the steps can be followed from an empty directory.
 
 The finished project uses only the packaged sqlcj artifacts: the executable CLI
@@ -169,6 +169,13 @@ CREATE TABLE authors
     bio        TEXT,
     created_at TIMESTAMP
 );
+
+CREATE TABLE books
+(
+    id        BIGSERIAL PRIMARY KEY,
+    author_id BIGINT       NOT NULL REFERENCES authors (id),
+    title     VARCHAR(255) NOT NULL
+);
 ```
 
 The accepted column types and `CREATE TABLE` constructs are listed in
@@ -206,16 +213,47 @@ WHERE id = $1;
 DELETE
 FROM authors
 WHERE id = $1;
+
+-- name: SearchAuthors :many
+SELECT *
+FROM authors
+WHERE name ILIKE $1
+ORDER BY id;
+
+-- name: CountAuthors :one
+SELECT COUNT(*) AS total
+FROM authors;
+
+-- name: ListAuthorPage :many
+SELECT *
+FROM authors
+ORDER BY id
+LIMIT $1 OFFSET $2;
+
+-- name: CreateBook :exec
+INSERT INTO books (author_id, title)
+VALUES ($1, $2);
+
+-- name: ListAuthorBooks :many
+SELECT a.name, b.title
+FROM authors a
+LEFT JOIN books b ON b.author_id = a.id
+ORDER BY a.id, b.id;
 ```
 
-All six queries become methods of the one generated `AuthorRepository`:
-`createAuthor`, `getAuthor`, `findAuthor`, `listAuthors`, `updateAuthorBio`, and
-`deleteAuthor`. `CreateAuthor`, `GetAuthor`, `FindAuthor`, and `ListAuthors`
-each return one complete `authors` row, so all four share the nested record
-`AuthorRepository.AuthorsRow`, generated once from the schema's column order. A
-query with its own result shape, such as a partial projection or a `RETURNING`
-column list, generates a nested `AuthorRepository.<QueryName>Result` record
-instead.
+All eleven queries become methods of the one generated `AuthorRepository`:
+`createAuthor`, `getAuthor`, `findAuthor`, `listAuthors`, `updateAuthorBio`,
+`deleteAuthor`, `searchAuthors`, `countAuthors`, `listAuthorPage`, `createBook`,
+and `listAuthorBooks`. `CreateAuthor`, `GetAuthor`, `FindAuthor`, `ListAuthors`,
+`SearchAuthors`, and `ListAuthorPage` each return one complete `authors` row, so
+all six share the nested record `AuthorRepository.AuthorsRow`, generated once
+from the schema's column order. A query with its own result shape, such as a
+partial projection or a `RETURNING` column list, generates a nested
+`AuthorRepository.<QueryName>Result` record instead: `CountAuthors` generates
+`CountAuthorsResult` with the single non-null `Long` component `total`, and
+`ListAuthorBooks` generates `ListAuthorBooksResult` with the components `name`
+and `title`, where `title` is `null` for an author that the left-joined `books`
+table does not match.
 
 `GetAuthor` and `FindAuthor` read the same row by the same key and differ only
 in cardinality: `getAuthor` returns `AuthorsRow` and requires exactly one row,
@@ -273,6 +311,8 @@ public final class App {
             System.out.println("missing row rejected: " + e.getMessage());
         }
 
+        Long committedId;
+
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
 
@@ -284,7 +324,9 @@ public final class App {
 
             connection.commit();
 
-            System.out.println("committed: " + authors.getAuthor(committed.id()).bio());
+            committedId = committed.id();
+
+            System.out.println("committed: " + authors.getAuthor(committedId).bio());
         }
 
         try (Connection connection = dataSource.getConnection()) {
@@ -299,6 +341,24 @@ public final class App {
             connection.rollback();
 
             System.out.println("rolled back: " + authors.findAuthor(discarded.id()).isPresent());
+        }
+
+        for (AuthorRepository.AuthorsRow author : authors.searchAuthors("%lovelace%")) {
+            System.out.println("searched: " + author.id() + " " + author.name());
+        }
+
+        System.out.println("count: " + authors.countAuthors().total());
+
+        for (AuthorRepository.AuthorsRow author : authors.listAuthorPage(1, 1)) {
+            System.out.println("page: " + author.id() + " " + author.name());
+        }
+
+        int bookRows = authors.createBook(committedId, "The Education of a Computer");
+
+        System.out.println("created book rows: " + bookRows);
+
+        for (AuthorRepository.ListAuthorBooksResult book : authors.listAuthorBooks()) {
+            System.out.println("book: " + book.name() + " / " + book.title());
         }
 
         System.out.println("deleted rows: " + authors.deleteAuthor(created.id()));
@@ -376,6 +436,12 @@ missing row: false
 missing row rejected: Query 'GetAuthor' in AuthorRepository returned no row; expected exactly one
 committed: Compiler pioneer
 rolled back: false
+searched: 1 Ada Lovelace
+count: 2
+page: 2 Grace Hopper
+created book rows: 1
+book: Ada Lovelace / null
+book: Grace Hopper / The Education of a Computer
 deleted rows: 1
 ```
 
@@ -393,10 +459,24 @@ That output is the whole MVP contract in one run:
   missing, rolled back, or deleted author.
 - `ListAuthors` is a `:many` read, and returns an empty list when no row
   matches.
-- `UpdateAuthorBio` and `DeleteAuthor` are `:exec` writes and return their
-  affected-row counts. `UpdateAuthorBio` also shows that parameter order and
-  binding order are different things: `$1` is the first method parameter even
-  though `$2` occurs first in the SQL text.
+- `SearchAuthors` filters with `name ILIKE $1`, so the pattern is a `String`
+  parameter carrying its own `%` wildcards, and PostgreSQL matches it without
+  regard to case.
+- `CountAuthors` projects an aliased `COUNT(*)` as its only result item, so
+  `countAuthors()` returns a `CountAuthorsResult` whose `total` is a non-null
+  `Long`.
+- `ListAuthorPage` pages with `LIMIT $1 OFFSET $2`, which generates
+  `listAuthorPage(Integer limit, Integer offset)`, so asking for one row after
+  the first returns the second author alone.
+- `ListAuthorBooks` selects one column from each side of a `LEFT JOIN`, so it
+  gets its own `ListAuthorBooksResult` record and reads `title` as `null` for
+  the author with no book, even though `books.title` is declared `NOT NULL`.
+- `UpdateAuthorBio`, `DeleteAuthor`, and `CreateBook` are `:exec` writes and
+  return their affected-row counts. `UpdateAuthorBio` also shows that parameter
+  order and binding order are different things: `$1` is the first method
+  parameter even though `$2` occurs first in the SQL text. `CreateBook` writes
+  the schema's other table, so the methods of one query group may span every
+  table of its schema.
 - The two `try` blocks run generated operations on a caller-owned `Connection`
   with auto-commit disabled. The runtime never closes, commits, rolls back, or
   reconfigures that connection, so the application's own `commit` makes both
@@ -416,7 +496,7 @@ If a query is invalid, `sqlcj generate` prints one diagnostic naming the source,
 the query, and the line, and exits with status `1`:
 
 ```text
-sqlcj: Invalid query 'CountAuthorBios' in /home/dev/my-app/sql/queries.sql at line 31: Unsupported SELECT expression: Function
+sqlcj: Invalid query 'CountAuthorBios' in /home/dev/my-app/sql/queries.sql at line 57: Unsupported SELECT expression: Function
 ```
 
 Every configured source is compiled before any file is written, so a diagnostic
