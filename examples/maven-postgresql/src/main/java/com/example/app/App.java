@@ -16,16 +16,22 @@ import java.util.Optional;
 /**
  * Runs the documented sqlcj workflow against PostgreSQL through generated
  * code: create, read, optional read, list, update, a missing-row read, a
- * committed transaction, a rolled back transaction, and delete.
+ * committed transaction, a rolled back transaction, a case-insensitive search,
+ * a count, a page, a book insert, a left-joined projection, and delete.
  *
- * <p>All six named queries are methods of one generated
+ * <p>All eleven named queries are methods of one generated
  * {@link AuthorRepository}. The repository is constructed once per execution
  * context: once from the {@code DataSource}-backed executor, and once more per
  * transaction from a caller-owned connection.
  *
- * <p>Create, read, optional read, and list each return one complete
- * {@code authors} row, so all four share the repository's single
- * {@link AuthorRepository.AuthorsRow} record.
+ * <p>Create, read, optional read, list, search, and page each return one
+ * complete {@code authors} row, so all six share the repository's single
+ * {@link AuthorRepository.AuthorsRow} record. A query with its own result shape
+ * generates its own record: {@link AuthorRepository.CountAuthorsResult} carries
+ * the non-null {@code Long} count, and
+ * {@link AuthorRepository.ListAuthorBooksResult} carries an author name beside
+ * the title of the left-joined {@code books} row, which is {@code null} for an
+ * author without a book.
  *
  * <p>Row absence is expressed by the {@code :optional} {@code FindAuthor}
  * query, which returns an empty {@link Optional}, while the {@code :one}
@@ -35,8 +41,8 @@ import java.util.Optional;
  * <p>Every step is checked, so the process exits non-zero as soon as one
  * generated operation returns an unexpected result.
  *
- * <p>The verification harness applies {@code sql/schema.sql} to an empty
- * {@code authors} table before this application runs.
+ * <p>The verification harness applies {@code sql/schema.sql} to empty
+ * {@code authors} and {@code books} tables before this application runs.
  */
 public final class App {
 
@@ -123,6 +129,50 @@ public final class App {
         );
 
         System.out.println("rolled back: empty");
+
+        List<AuthorRepository.AuthorsRow> searched = authors.searchAuthors("%lovelace%");
+
+        checkEquals(1, searched.size(), "SearchAuthors row count");
+        checkEquals(created.id(), searched.get(0).id(), "SearchAuthors id");
+        checkEquals("Ada Lovelace", searched.get(0).name(), "SearchAuthors name");
+
+        System.out.println("searched: " + searched.get(0).id() + " " + searched.get(0).name());
+
+        AuthorRepository.CountAuthorsResult count = authors.countAuthors();
+
+        check(count != null, "CountAuthors returned no row");
+        checkEquals(2L, count.total(), "CountAuthors total");
+
+        System.out.println("count: " + count.total());
+
+        List<AuthorRepository.AuthorsRow> page = authors.listAuthorPage(1, 1);
+
+        checkEquals(1, page.size(), "ListAuthorPage row count");
+        checkEquals(committedId, page.get(0).id(), "ListAuthorPage id");
+        checkEquals("Grace Hopper", page.get(0).name(), "ListAuthorPage name");
+
+        System.out.println("page: " + page.get(0).id() + " " + page.get(0).name());
+
+        String bookTitle = "The Education of a Computer";
+
+        int bookRows = authors.createBook(committedId, bookTitle);
+
+        checkEquals(1, bookRows, "CreateBook affected rows");
+
+        System.out.println("created book rows: " + bookRows);
+
+        List<AuthorRepository.ListAuthorBooksResult> books = authors.listAuthorBooks();
+
+        checkEquals(2, books.size(), "ListAuthorBooks row count");
+        checkEquals("Ada Lovelace", books.get(0).name(), "ListAuthorBooks unmatched author name");
+        checkEquals(null, books.get(0).title(), "ListAuthorBooks unmatched title");
+        checkEquals("Grace Hopper", books.get(1).name(), "ListAuthorBooks matched author name");
+        checkEquals(bookTitle, books.get(1).title(), "ListAuthorBooks matched title");
+
+        System.out.println(
+            "author books: " + books.get(0).name() + " / " + books.get(0).title()
+                + ", " + books.get(1).name() + " / " + books.get(1).title()
+        );
 
         int deletedRows = authors.deleteAuthor(created.id());
 
