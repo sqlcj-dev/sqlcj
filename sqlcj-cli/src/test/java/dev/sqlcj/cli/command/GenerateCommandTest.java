@@ -244,6 +244,45 @@ class GenerateCommandTest {
         assertFalse(Files.exists(workingDirectory.resolve("generated")));
     }
 
+    @Test
+    void shouldFailWithConciseDiagnosticForUnwritableOutputDirectory() throws Exception {
+        Files.writeString(workingDirectory.resolve("schema.sql"), SCHEMA);
+        Files.writeString(workingDirectory.resolve("queries.sql"), QUERIES);
+        Files.writeString(
+            workingDirectory.resolve("sqlcj.yaml"),
+            """
+                version: "1"
+                sql:
+                  - name: Users
+                    schema: schema.sql
+                    queries: queries.sql
+                java:
+                  package: dev.example.generated
+                  out: generated
+                """
+        );
+
+        Path output = workingDirectory.resolve("generated");
+
+        Files.writeString(output, "not a directory");
+
+        Result result = runGenerate();
+
+        assertEquals(1, result.exitCode(), result.error());
+
+        assertEquals(
+            List.of(
+                "sqlcj: Cannot create output directory: "
+                    + workingDirectory.resolve("generated/dev/example/generated")
+            ),
+            result.error().lines().toList()
+        );
+
+        assertFalse(result.error().contains("\tat "));
+        assertTrue(Files.isRegularFile(output));
+        assertEquals("not a directory", Files.readString(output));
+    }
+
     private Result runGenerate(String... arguments) throws IOException, InterruptedException {
         return runGenerateIn(workingDirectory, arguments);
     }
