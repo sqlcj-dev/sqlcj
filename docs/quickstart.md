@@ -416,7 +416,7 @@ If a query is invalid, `sqlcj generate` prints one diagnostic naming the source,
 the query, and the line, and exits with status `1`:
 
 ```text
-sqlcj: Invalid query 'CountAuthors' in /home/dev/my-app/sql/queries.sql at line 26: Unsupported SELECT expression: Function
+sqlcj: Invalid query 'CountAuthorBios' in /home/dev/my-app/sql/queries.sql at line 31: Unsupported SELECT expression: Function
 ```
 
 Every configured source is compiled before any file is written, so a diagnostic

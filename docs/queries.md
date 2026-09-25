@@ -99,12 +99,38 @@ configuration entry.
   positional row mapper.
 - An unqualified column must be found in exactly one source; an ambiguous or
   unknown column is rejected.
-- A result expression that is not a direct column or a wildcard, such as a
-  function call, an arithmetic expression, or a literal, is rejected.
+- A result expression that is not a direct column, a wildcard, or the scalar
+  count below — such as another function call, an arithmetic expression, or a
+  literal — is rejected.
 - An explicit alias names the result column, so `SELECT id AS author_id`
   generates the record component `authorId` while the component's type and
   nullability still come from the column. sqlcj itself resolves an alias only in
   the projection; every other clause reaches the database as written.
+
+A read may count its matching rows with an aliased `COUNT(*)` as its only
+projection:
+
+```sql
+-- name: CountAuthors :one
+SELECT COUNT(*) AS total
+FROM authors;
+```
+
+- The alias is required and may be written with or without `AS`, so both
+  `COUNT(*) AS total` and `COUNT(*) total` generate the result record
+  `CountAuthorsResult` with the single component `total`.
+- The component is a non-null `Long`: the count is typed `BIGINT` because
+  `count(*)` returns `bigint`, and it is never null because a count is `0` when
+  no row matches.
+- The count is accepted over any supported source, predicate, ordering, and
+  pagination shape, and under any annotation.
+- `COUNT(*)` without an alias is rejected with
+  `COUNT(*) requires a result alias, such as COUNT(*) AS total.`, and a
+  `COUNT(*)` beside another projection item is rejected with
+  `COUNT(*) must be the only SELECT item.`
+- Every other count is still an unsupported result expression, including
+  `COUNT(column)`, `COUNT(DISTINCT column)`, `COUNT(t.*)`, a qualified
+  `pg_catalog.count(*)`, and the `FILTER` and `OVER` forms.
 
 ### Predicates
 
@@ -440,8 +466,12 @@ the documented shapes are contract, tested, and safe to rely on.
 Rejection stops the run with a diagnostic naming the query source, the query
 name, and its header line.
 
-- A result expression that is not a direct column or a wildcard, including a
-  function call, an aggregate, and a literal.
+- A result expression that is not a direct column, a wildcard, or an aliased
+  sole `COUNT(*)`, including another function call, another aggregate, and a
+  literal. A `COUNT(*)` without an alias and a `COUNT(*)` beside another
+  projection item each fail with their own diagnostic, while `COUNT(column)`,
+  `COUNT(DISTINCT column)`, `COUNT(t.*)`, `pg_catalog.count(*)`, and the
+  `FILTER` and `OVER` forms keep the unsupported-expression rejection.
 - A `FROM` item that is not a table, a comma-separated source list, a join that
   is not a plain inner join, a join predicate that is not one qualified
   equality, and a set operation such as `UNION`.
@@ -588,6 +618,14 @@ Reads:
   `PostgresIntegrationTest.shouldExecuteGeneratedPaginationAgainstPostgres`
   executes a `LIMIT ... OFFSET ...` page and the same page written as
   `OFFSET ... LIMIT ...` against PostgreSQL 16.
+- `QueryAnalyzerTest.shouldResolveScalarCountColumnFromItsAlias`,
+  `QueryAnalyzerTest.shouldResolveScalarCountBesidePredicateParameter`, and
+  `QueryAnalyzerTest.shouldRejectUnsupportedCountProjectionForm` cover the
+  aliased sole `COUNT(*)`, its focused diagnostics, and the count and function
+  forms that stay rejected, and
+  `PostgresIntegrationTest.shouldExecuteGeneratedScalarCountAgainstPostgres`
+  compiles a `:one` count into a result record with one `Long` component and
+  executes it against PostgreSQL 16 for a matching and a non-matching pattern.
 - `QueryAnalyzerTest.shouldResolveRowTableForFullRowSelect`,
   `QueryAnalyzerTest.shouldNotResolveRowTableForQuerySpecificResult`,
   `QueryAnalyzerTest.shouldNotResolveRowTableForJoinedWildcard`, and
