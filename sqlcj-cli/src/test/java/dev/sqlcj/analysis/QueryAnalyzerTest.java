@@ -1736,6 +1736,166 @@ class QueryAnalyzerTest {
         );
     }
 
+    /**
+     * A left-joined source contributes no row when the join finds no match, so
+     * every column projected from it is nullable even when its schema
+     * declaration is not. Both accepted spellings are analyzed identically.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = { "LEFT JOIN", "LEFT OUTER JOIN" })
+    void shouldAnalyzeLeftJoinWithNullableJoinedColumns(String joinKeywords) {
+        String sql = """
+            SELECT u.id, p.id AS profile_id, p.nickname
+            FROM users u
+            %s profiles p ON p.user_id = u.id
+            """.formatted(joinKeywords);
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUserProfiles", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("profile_id", ColumnType.BIGINT, true),
+                new QueryColumn("nickname", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+    }
+
+    @Test
+    void shouldExpandAllColumnsOfLeftJoinedSourceAsNullable() {
+        String sql = """
+            SELECT *
+            FROM users u
+            LEFT JOIN profiles p ON p.user_id = u.id
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUserProfiles", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true),
+                new QueryColumn("id", ColumnType.BIGINT, true),
+                new QueryColumn("user_id", ColumnType.BIGINT, true),
+                new QueryColumn("nickname", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+    }
+
+    @Test
+    void shouldExpandQualifiedAllColumnsOfLeftJoinedSourceAsNullable() {
+        String sql = """
+            SELECT p.*, u.name
+            FROM users u
+            LEFT JOIN profiles p ON p.user_id = u.id
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListProfiles", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, true),
+                new QueryColumn("user_id", ColumnType.BIGINT, true),
+                new QueryColumn("nickname", ColumnType.VARCHAR, true),
+                new QueryColumn("name", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+    }
+
+    /**
+     * Inner and left joins may be chained in either order, and only the
+     * left-joined sources become nullable.
+     */
+    @Test
+    void shouldAnalyzeLeftJoinAfterInnerJoin() {
+        String sql = """
+            SELECT p.id, p.nickname, o.id, o.total
+            FROM users u
+            JOIN profiles p ON p.user_id = u.id
+            LEFT JOIN orders o ON o.user_id = u.id
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUserOrders", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("nickname", ColumnType.VARCHAR, true),
+                new QueryColumn("id", ColumnType.BIGINT, true),
+                new QueryColumn("total", ColumnType.DECIMAL, true)
+            ),
+            model.columns()
+        );
+    }
+
+    @Test
+    void shouldAnalyzeInnerJoinAfterLeftJoin() {
+        String sql = """
+            SELECT p.id, o.id, o.total
+            FROM users u
+            LEFT JOIN profiles p ON p.user_id = u.id
+            JOIN orders o ON o.user_id = u.id
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUserOrders", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, true),
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("total", ColumnType.DECIMAL, true)
+            ),
+            model.columns()
+        );
+    }
+
+    /** A left join changes no parameter and no binding order. */
+    @Test
+    void shouldResolveLeftJoinedParametersInTextualBindingOrder() {
+        String sql = """
+            SELECT u.id, p.nickname
+            FROM users u
+            LEFT JOIN profiles p ON p.user_id = u.id
+            WHERE u.id = $1
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("GetUserProfile", QueryType.ONE, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+    }
+
     @Test
     void shouldExpandAllColumnsAcrossJoinedSourcesInOrder() {
         String sql = """
@@ -2020,6 +2180,74 @@ class QueryAnalyzerTest {
         assertThrows(
             UnsupportedOperationException.class,
             () -> analyzer.analyze(query, parsedSql, joinSchema)
+        );
+    }
+
+    /**
+     * Only a bare or {@code INNER} join and a {@code LEFT} join in its two
+     * spellings are supported, so every other qualifier stays rejected,
+     * including the qualifiers that also report {@code isOuter()} or
+     * {@code isLeft()}.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "RIGHT JOIN profiles p ON p.user_id = u.id",
+            "RIGHT OUTER JOIN profiles p ON p.user_id = u.id",
+            "FULL OUTER JOIN profiles p ON p.user_id = u.id",
+            "OUTER JOIN profiles p ON p.user_id = u.id",
+            "NATURAL LEFT JOIN profiles p",
+            "LEFT SEMI JOIN profiles p ON p.user_id = u.id",
+            "LEFT JOIN profiles p USING (user_id)"
+        }
+    )
+    void shouldRejectUnsupportedJoinModifier(String joinClause) {
+        String sql = """
+            SELECT u.id
+            FROM users u
+            %s
+            """.formatted(joinClause);
+
+        Query query = new Query("ListIds", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
+        );
+
+        assertEquals(
+            "Only unmodified INNER JOIN and LEFT JOIN clauses are supported.",
+            exception.getMessage()
+        );
+    }
+
+    /** A left join keeps the inner join's {@code ON} equality requirement. */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "ON p.user_id = u.id AND p.nickname = u.name",
+            "ON p.user_id > u.id"
+        }
+    )
+    void shouldRejectLeftJoinWithoutSingleQualifiedEquality(String onClause) {
+        String sql = """
+            SELECT u.id
+            FROM users u
+            LEFT JOIN profiles p %s
+            """.formatted(onClause);
+
+        Query query = new Query("ListIds", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
+        );
+
+        assertEquals(
+            "A join requires exactly one ON equality.",
+            exception.getMessage()
         );
     }
 

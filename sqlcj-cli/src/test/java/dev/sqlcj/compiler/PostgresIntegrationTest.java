@@ -856,6 +856,60 @@ class PostgresIntegrationTest {
     }
 
     /**
+     * Covers a left join end to end: the read is generated, compiled, and
+     * executed against PostgreSQL, so a matched row carries the joined values
+     * while an unmatched row reads every component of the left-joined source as
+     * {@code null}, including its {@code NOT NULL} columns.
+     */
+    @Test
+    void shouldExecuteGeneratedLeftJoinAgainstPostgres() throws Exception {
+        execute(CONSTRAINT_SCHEMA);
+
+        Path classesDirectory = generateAndCompile(
+            CONSTRAINT_SCHEMA,
+            """
+                -- name: ListCustomerOrders :many
+                SELECT c.id, c.name, o.id AS order_id, o.quantity
+                FROM customers c
+                LEFT JOIN customer_orders o ON o.customer_id = c.id
+                ORDER BY c.id;
+                """
+        );
+
+        execute("INSERT INTO customers (id, name) VALUES (1, 'Alice'), (2, 'Bob')");
+        execute("INSERT INTO customer_orders (id, customer_id, quantity) VALUES (10, 1, 3)");
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method method = repository.getClass().getMethod("listCustomerOrders");
+
+            Object result = method.invoke(repository);
+
+            assertInstanceOf(List.class, result);
+
+            List<?> rows = (List<?>) result;
+
+            assertEquals(2, rows.size());
+
+            assertEquals(
+                List.of("id", "name", "orderId", "quantity"),
+                recordComponentNames(rows.getFirst())
+            );
+
+            assertEquals(1L, component(rows.get(0), "id"));
+            assertEquals("Alice", component(rows.get(0), "name"));
+            assertEquals(10L, component(rows.get(0), "orderId"));
+            assertEquals(3, component(rows.get(0), "quantity"));
+
+            assertEquals(2L, component(rows.get(1), "id"));
+            assertEquals("Bob", component(rows.get(1), "name"));
+            assertNull(component(rows.get(1), "orderId"));
+            assertNull(component(rows.get(1), "quantity"));
+        }
+    }
+
+    /**
      * Covers a returning insert: the database-generated serial values and the
      * target-table order of {@code RETURNING *} are read through the generated
      * typed result record.
