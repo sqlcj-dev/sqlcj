@@ -24,9 +24,11 @@ import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.Statement;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -1411,6 +1413,10 @@ class SqlcjCompilerIntegrationTest {
 
         assertTrue(previous.contains("resultSet.getObject(1, Long.class)"));
 
+        byte[] previousManifest = Files.readAllBytes(
+            generatedDirectory.resolve("sqlcj-manifest.txt")
+        );
+
         Files.writeString(
             usersQueries,
             """
@@ -1469,11 +1475,150 @@ class SqlcjCompilerIntegrationTest {
 
         assertEquals(previous, Files.readString(generatedFile));
 
+        assertArrayEquals(
+            previousManifest,
+            Files.readAllBytes(generatedDirectory.resolve("sqlcj-manifest.txt"))
+        );
+
         assertFalse(
             Files.exists(
                 generatedDirectory
                     .resolve("dev/example/generated")
                     .resolve("OrdersRepository.java")
+            )
+        );
+    }
+
+    @Test
+    void shouldDeleteTheStaleRepositoriesOfRenamedAndRemovedGroups() throws IOException {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        compileGroups(generatedDirectory, "dev.example.generated", "Users", "Orders");
+
+        Path packageDirectory = generatedDirectory.resolve("dev/example/generated");
+
+        assertTrue(Files.exists(packageDirectory.resolve("UsersRepository.java")));
+        assertTrue(Files.exists(packageDirectory.resolve("OrdersRepository.java")));
+
+        compileGroups(generatedDirectory, "dev.example.generated", "Customers");
+
+        assertFalse(Files.exists(packageDirectory.resolve("UsersRepository.java")));
+        assertFalse(Files.exists(packageDirectory.resolve("OrdersRepository.java")));
+        assertTrue(Files.exists(packageDirectory.resolve("CustomersRepository.java")));
+
+        assertEquals(
+            "dev/example/generated/CustomersRepository.java\n",
+            Files.readString(generatedDirectory.resolve("sqlcj-manifest.txt"))
+        );
+    }
+
+    /** A changed package leaves the previous package directory in place. */
+    @Test
+    void shouldDeleteTheStaleRepositoryOfAChangedPackage() throws IOException {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        compileGroups(generatedDirectory, "dev.example.generated", "Users");
+
+        Path previousPackageDirectory = generatedDirectory.resolve("dev/example/generated");
+
+        assertTrue(Files.exists(previousPackageDirectory.resolve("UsersRepository.java")));
+
+        compileGroups(generatedDirectory, "dev.other.generated", "Users");
+
+        assertFalse(Files.exists(previousPackageDirectory.resolve("UsersRepository.java")));
+        assertTrue(Files.isDirectory(previousPackageDirectory));
+
+        assertTrue(
+            Files.exists(
+                generatedDirectory.resolve("dev/other/generated/UsersRepository.java")
+            )
+        );
+
+        assertEquals(
+            "dev/other/generated/UsersRepository.java\n",
+            Files.readString(generatedDirectory.resolve("sqlcj-manifest.txt"))
+        );
+    }
+
+    @Test
+    void shouldKeepAFileNoPreviousManifestListed() throws IOException {
+        Path generatedDirectory = tempDir.resolve("generated");
+        Path packageDirectory = generatedDirectory.resolve("dev/example/generated");
+
+        Files.createDirectories(packageDirectory);
+
+        Path staleLookingFile = packageDirectory.resolve("OrdersRepository.java");
+
+        Files.writeString(staleLookingFile, "// written before the first run\n");
+
+        compileGroups(generatedDirectory, "dev.example.generated", "Users");
+
+        assertEquals(
+            "// written before the first run\n",
+            Files.readString(staleLookingFile)
+        );
+
+        Path userFile = packageDirectory.resolve("Helper.java");
+
+        Files.writeString(userFile, "// hand written\n");
+
+        compileGroups(generatedDirectory, "dev.example.generated", "Users");
+
+        assertEquals("// hand written\n", Files.readString(userFile));
+
+        assertEquals(
+            "// written before the first run\n",
+            Files.readString(staleLookingFile)
+        );
+    }
+
+    @Test
+    void shouldGenerateByteIdenticalRepositoriesAndManifestForTwoRuns() throws IOException {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        compileGroups(generatedDirectory, "dev.example.generated", "Users", "Orders");
+
+        Path manifestFile = generatedDirectory.resolve("sqlcj-manifest.txt");
+        Path usersFile = generatedDirectory.resolve("dev/example/generated/UsersRepository.java");
+        Path ordersFile = generatedDirectory.resolve("dev/example/generated/OrdersRepository.java");
+
+        byte[] firstManifest = Files.readAllBytes(manifestFile);
+        byte[] firstUsers = Files.readAllBytes(usersFile);
+        byte[] firstOrders = Files.readAllBytes(ordersFile);
+
+        compileGroups(generatedDirectory, "dev.example.generated", "Users", "Orders");
+
+        assertArrayEquals(firstManifest, Files.readAllBytes(manifestFile));
+        assertArrayEquals(firstUsers, Files.readAllBytes(usersFile));
+        assertArrayEquals(firstOrders, Files.readAllBytes(ordersFile));
+
+        assertEquals(
+            "dev/example/generated/OrdersRepository.java\n"
+                + "dev/example/generated/UsersRepository.java\n",
+            Files.readString(manifestFile)
+        );
+    }
+
+    @Test
+    void shouldReportTheOutputManifestItCannotRead() throws IOException {
+        Path generatedDirectory = tempDir.resolve("generated");
+        Path manifestFile = generatedDirectory.resolve("sqlcj-manifest.txt");
+
+        Files.createDirectories(manifestFile);
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileGroups(generatedDirectory, "dev.example.generated", "Users")
+        );
+
+        assertEquals(
+            "Cannot read output manifest: " + manifestFile,
+            exception.getMessage()
+        );
+
+        assertFalse(
+            Files.exists(
+                generatedDirectory.resolve("dev/example/generated/UsersRepository.java")
             )
         );
     }
@@ -1904,6 +2049,59 @@ class SqlcjCompilerIntegrationTest {
         );
 
         new SqlcjCompiler().compile(config);
+    }
+
+    /**
+     * Compiles the named query groups of one shared users schema and query
+     * source into one configured package.
+     */
+    private void compileGroups(
+        Path generatedDirectory,
+        String packageName,
+        String... groupNames
+    ) throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE users
+                (
+                    id   BIGINT NOT NULL,
+                    name VARCHAR(255)
+                );
+                """
+        );
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: GetUser :one
+                SELECT id, name
+                FROM users
+                WHERE id = $1;
+                """
+        );
+
+        List<SqlConfig> sql = new ArrayList<>(groupNames.length);
+
+        for (String groupName : groupNames) {
+            sql.add(
+                new SqlConfig(
+                    groupName,
+                    schemaFile.toString(),
+                    queriesFile.toString()
+                )
+            );
+        }
+
+        new SqlcjCompiler().compile(
+            new Config(
+                List.copyOf(sql),
+                new JavaConfig(generatedDirectory.toString(), packageName)
+            )
+        );
     }
 
     /** Compiles two configured groups that share one schema and query source. */
