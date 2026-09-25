@@ -155,7 +155,9 @@ input and is not carried into the model at all.
 
 Every generated method parameter and every generated result component uses a
 reference type, so each of them can represent SQL `NULL`. A result component may
-be `null` exactly when its column is modeled nullable by the schema snapshot.
+be `null` exactly when its column is modeled nullable by the schema snapshot or
+is read from a left-joined source, whose columns are all nullable because an
+unmatched row supplies no value for them.
 
 Row absence is a different thing from a null component, and the two are never
 mixed:

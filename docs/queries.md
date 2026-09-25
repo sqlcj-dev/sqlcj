@@ -78,12 +78,17 @@ configuration entry.
 ### Sources
 
 - The `FROM` item must be a table of that schema, optionally with an alias.
-- A table may be joined with `JOIN` or `INNER JOIN`. A comma-separated source
-  list and every other join modifier — `LEFT`, `RIGHT`, `FULL`, `OUTER`,
-  `CROSS`, `NATURAL`, `SEMI`, `APPLY`, `STRAIGHT`, `GLOBAL`, a join hint, and
-  `USING (...)` — are rejected.
+- A table may be joined with `JOIN`, `INNER JOIN`, `LEFT JOIN`, or
+  `LEFT OUTER JOIN`, and inner and left joins may be chained in any order. A
+  comma-separated source list and every other join modifier — `RIGHT`, `FULL`, a
+  bare `OUTER`, `CROSS`, `NATURAL`, `SEMI`, `APPLY`, `STRAIGHT`, `GLOBAL`, a
+  join hint, and `USING (...)` — are rejected.
 - Each join requires exactly one `ON` equality between a qualified column of the
-  joined source and a qualified column of a source introduced earlier.
+  joined source and a qualified column of a source introduced earlier. A left
+  join uses the same rule as an inner join.
+- Every column read from a left-joined source is nullable, even when the schema
+  declares it `NOT NULL`, because an unmatched row reads it as `NULL`. The base
+  source and every inner-joined source keep their schema nullability.
 - An alias replaces the table name as the exposed source name, so a qualified
   reference to an aliased table must use the alias and not the table name.
 - Two sources may not expose the same name.
@@ -103,9 +108,10 @@ configuration entry.
   count below — such as another function call, an arithmetic expression, or a
   literal — is rejected.
 - An explicit alias names the result column, so `SELECT id AS author_id`
-  generates the record component `authorId` while the component's type and
-  nullability still come from the column. sqlcj itself resolves an alias only in
-  the projection; every other clause reaches the database as written.
+  generates the record component `authorId` while the component's type still
+  comes from the column and its nullability from the column and its source.
+  sqlcj itself resolves an alias only in the projection; every other clause
+  reaches the database as written.
 
 A read may count its matching rows with an aliased `COUNT(*)` as its only
 projection:
@@ -473,7 +479,7 @@ name, and its header line.
   `COUNT(DISTINCT column)`, `COUNT(t.*)`, `pg_catalog.count(*)`, and the
   `FILTER` and `OVER` forms keep the unsupported-expression rejection.
 - A `FROM` item that is not a table, a comma-separated source list, a join that
-  is not a plain inner join, a join predicate that is not one qualified
+  is not a plain inner or left join, a join predicate that is not one qualified
   equality, and a set operation such as `UNION`.
 - A placeholder in a location sqlcj does not analyze, including `ORDER BY $1`, a
   computed `LIKE` pattern such as `'%' || $1 || '%'`, a placeholder as the
@@ -626,6 +632,20 @@ Reads:
   `PostgresIntegrationTest.shouldExecuteGeneratedScalarCountAgainstPostgres`
   compiles a `:one` count into a result record with one `Long` component and
   executes it against PostgreSQL 16 for a matching and a non-matching pattern.
+- `QueryAnalyzerTest.shouldAnalyzeLeftJoinWithNullableJoinedColumns`,
+  `QueryAnalyzerTest.shouldExpandAllColumnsOfLeftJoinedSourceAsNullable`,
+  `QueryAnalyzerTest.shouldExpandQualifiedAllColumnsOfLeftJoinedSourceAsNullable`,
+  `QueryAnalyzerTest.shouldAnalyzeLeftJoinAfterInnerJoin`,
+  `QueryAnalyzerTest.shouldAnalyzeInnerJoinAfterLeftJoin`,
+  `QueryAnalyzerTest.shouldResolveLeftJoinedParametersInTextualBindingOrder`,
+  `QueryAnalyzerTest.shouldRejectUnsupportedJoinModifier`, and
+  `QueryAnalyzerTest.shouldRejectLeftJoinWithoutSingleQualifiedEquality` cover
+  both left-join spellings, the nullable columns of a left-joined source, the
+  chained join orders, the unchanged parameters, and the join kinds and `ON`
+  shapes that stay rejected, and
+  `PostgresIntegrationTest.shouldExecuteGeneratedLeftJoinAgainstPostgres`
+  executes a left join against PostgreSQL 16 whose unmatched row reads the
+  joined columns as `null`.
 - `QueryAnalyzerTest.shouldResolveRowTableForFullRowSelect`,
   `QueryAnalyzerTest.shouldNotResolveRowTableForQuerySpecificResult`,
   `QueryAnalyzerTest.shouldNotResolveRowTableForJoinedWildcard`, and
