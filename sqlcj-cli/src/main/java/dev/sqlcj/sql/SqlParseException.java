@@ -6,7 +6,7 @@ public class SqlParseException extends RuntimeException {
         super(message);
     }
 
-    public SqlParseException(Throwable cause) {
-        super(cause);
+    public SqlParseException(String message, Throwable cause) {
+        super(message, cause);
     }
 }

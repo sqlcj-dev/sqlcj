@@ -173,6 +173,91 @@ class GenerateCommandTest {
     }
 
     @Test
+    void shouldFailWithConciseDiagnosticForSchemaSyntaxError() throws Exception {
+        Files.writeString(
+            workingDirectory.resolve("schema.sql"),
+            """
+                CREATE TABLE users (
+                 id BIGINT NOT NULL,
+                 name VARCHAR(255)
+                ;
+                """
+        );
+        Files.writeString(workingDirectory.resolve("queries.sql"), QUERIES);
+        Files.writeString(
+            workingDirectory.resolve("sqlcj.yaml"),
+            """
+                version: "1"
+                sql:
+                  - name: Users
+                    schema: schema.sql
+                    queries: queries.sql
+                java:
+                  package: dev.example.generated
+                  out: generated
+                """
+        );
+
+        Result result = runGenerate();
+
+        assertEquals(1, result.exitCode(), result.error());
+        assertEquals(
+            List.of(
+                "sqlcj: Invalid schema source %s: "
+                    .formatted(workingDirectory.resolve("schema.sql"))
+                    + "Encountered unexpected token: \";\" <ST_SEMICOLON> "
+                    + "at line 4, column 1"
+            ),
+            result.error().lines().toList()
+        );
+        assertFalse(result.error().contains("\tat "));
+        assertFalse(Files.exists(workingDirectory.resolve("generated")));
+    }
+
+    @Test
+    void shouldFailWithConciseDiagnosticForQuerySyntaxError() throws Exception {
+        Files.writeString(workingDirectory.resolve("schema.sql"), SCHEMA);
+        Files.writeString(
+            workingDirectory.resolve("queries.sql"),
+            """
+                -- name: GetUser :one
+                SELECT id, name
+                FROM users
+                WHERE id = $1
+                  AND AND name = $2;
+                """
+        );
+        Files.writeString(
+            workingDirectory.resolve("sqlcj.yaml"),
+            """
+                version: "1"
+                sql:
+                  - name: Users
+                    schema: schema.sql
+                    queries: queries.sql
+                java:
+                  package: dev.example.generated
+                  out: generated
+                """
+        );
+
+        Result result = runGenerate();
+
+        assertEquals(1, result.exitCode(), result.error());
+        assertEquals(
+            List.of(
+                "sqlcj: Invalid query 'GetUser' in %s at line 1: "
+                    .formatted(workingDirectory.resolve("queries.sql"))
+                    + "Encountered unexpected token: \"AND\" \"AND\""
+            ),
+            result.error().lines().toList()
+        );
+        assertFalse(result.error().contains("net.sf.jsqlparser"));
+        assertFalse(result.error().contains("\tat "));
+        assertFalse(Files.exists(workingDirectory.resolve("generated")));
+    }
+
+    @Test
     void shouldFailWithConciseDiagnosticForMalformedConfiguration() throws Exception {
         Files.writeString(
             workingDirectory.resolve("sqlcj.yaml"),

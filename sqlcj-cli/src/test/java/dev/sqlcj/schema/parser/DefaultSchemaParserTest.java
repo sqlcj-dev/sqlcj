@@ -420,6 +420,52 @@ class DefaultSchemaParserTest {
     }
 
     @Test
+    void shouldReportSyntaxFailureWithItsReasonAndLocation() {
+        String sql = """
+            CREATE TABLE users (
+             id BIGINT NOT NULL,
+             name VARCHAR(255)
+            ;
+            """;
+
+        SchemaParseException exception = assertThrows(
+            SchemaParseException.class,
+            () -> parser.parse(sql)
+        );
+
+        assertEquals(
+            "Encountered unexpected token: \";\" <ST_SEMICOLON> at line 4, column 1",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A lexical failure such as an unterminated string literal reaches the
+     * compiler wrapped in exceptions that repeat their cause's class name, so the
+     * reason states the lexical wording alone, which already names its location.
+     */
+    @Test
+    void shouldReportLexicalFailureWithoutExceptionClassNames() {
+        String sql = """
+            CREATE TABLE users (
+             id BIGINT NOT NULL,
+             name VARCHAR(255) DEFAULT 'x);
+            """;
+
+        SchemaParseException exception = assertThrows(
+            SchemaParseException.class,
+            () -> parser.parse(sql)
+        );
+
+        assertEquals(
+            "Lexical error at line 4, column 0."
+                + "  Encountered: <EOF> after prefix \"\\'x);\\n\"",
+            exception.getMessage()
+        );
+        assertFalse(exception.getMessage().contains("net.sf.jsqlparser"));
+    }
+
+    @Test
     void shouldThrowSchemaParseExceptionForInvalidSql() {
         String sql = """
             CREATE TABLE users (
