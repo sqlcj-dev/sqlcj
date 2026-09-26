@@ -219,20 +219,22 @@ accepted:
 
 ### Failure Behavior
 
-An unsupported type or an unsupported statement stops compilation. `sqlcj
-generate` prints a single message on standard error and exits with a non-zero
-status. Because every configured source is analyzed and generated before the
-run writes its first file, such a failure writes no generated file, and output
+An unsupported type, an unsupported statement, or a schema sqlcj cannot parse
+stops compilation. `sqlcj generate` prints a single message on standard error
+and exits with status `1`. Because every configured source is analyzed and
+generated before the run writes its first file, such a failure writes no
+generated file, and output
 written by an earlier successful run is left unchanged. The writing step itself
 is sequential rather than atomic; see
 [Generated Output and Failures](configuration.md#generated-output-and-failures).
 
-The message names the schema source and the offending type or statement:
+The message names the schema source and the offending type or statement, or the
+syntax error with the line and column it was found at:
 
 ```text
 sqlcj: Invalid schema source /home/dev/project/schema.sql: Unsupported SQL column type: TIMESTAMPTZ
 sqlcj: Invalid schema source /home/dev/project/schema.sql: Unsupported schema statement: Alter
-sqlcj: Invalid schema source /home/dev/project/schema.sql: Failed to parse schema
+sqlcj: Invalid schema source /home/dev/project/schema.sql: Encountered unexpected token: ";" <ST_SEMICOLON> at line 4, column 1
 ```
 
 ## Verified by

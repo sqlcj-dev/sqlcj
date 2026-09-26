@@ -289,17 +289,21 @@ sqlcj: Generated file paths for repositories 'UserData' and 'Userdata' differ on
 
 Invalid configuration, unreadable SQL sources, and output that cannot be written
 or cleaned up make `sqlcj generate` print a single message on standard error and
-exit with a non-zero status. The message names the configuration file and, when
-available, the offending field, value, source path, or output path:
+exit with status `1`. The message names the configuration file and, when
+available, the offending field, value, source path, or output path, and ends
+with the fact that explains the failure, such as the reason the filesystem
+reports or the problem the YAML parser reports with its line and column:
 
 ```text
+sqlcj: Cannot read configuration file: /home/dev/project/sqlcj.yaml: No such file or directory
+sqlcj: Malformed configuration file: /home/dev/project/sqlcj.yaml: expected <block end>, but found '<block mapping start>' at line 2, column 3
 sqlcj: Invalid configuration in /home/dev/project/sqlcj.yaml: 'java.package' value 'dev.class.generated' is not a valid Java package name
-sqlcj: Cannot read queries source: /home/dev/project/sql/missing.sql
-sqlcj: Cannot create output directory: /home/dev/project/target/generated-sources/sqlcj/dev/example/generated
-sqlcj: Cannot write generated file: /home/dev/project/target/generated-sources/sqlcj/dev/example/generated/UsersRepository.java
-sqlcj: Cannot read output manifest: /home/dev/project/target/generated-sources/sqlcj/sqlcj-manifest.txt
-sqlcj: Cannot delete stale generated file: /home/dev/project/target/generated-sources/sqlcj/dev/example/generated/OrdersRepository.java
-sqlcj: Cannot write output manifest: /home/dev/project/target/generated-sources/sqlcj/sqlcj-manifest.txt
+sqlcj: Cannot read queries source: /home/dev/project/sql/missing.sql: No such file or directory
+sqlcj: Cannot create output directory: /home/dev/project/target/generated-sources/sqlcj/dev/example/generated: Not a directory
+sqlcj: Cannot write generated file: /home/dev/project/target/generated-sources/sqlcj/dev/example/generated/UsersRepository.java: Permission denied
+sqlcj: Cannot read output manifest: /home/dev/project/target/generated-sources/sqlcj/sqlcj-manifest.txt: Permission denied
+sqlcj: Cannot delete stale generated file: /home/dev/project/target/generated-sources/sqlcj/dev/example/generated/OrdersRepository.java: Permission denied
+sqlcj: Cannot write output manifest: /home/dev/project/target/generated-sources/sqlcj/sqlcj-manifest.txt: Permission denied
 ```
 
 ## Generated Output and Failures
