@@ -413,8 +413,10 @@ mvn exec:java
 - `mvn clean` deletes `target`, including previously generated sources and the
   classes compiled from them. sqlcj writes and overwrites its own files and
   deletes a repository its previous run recorded that the current run no longer
-  generates, but it never deletes a compiled class, so a query that was renamed
-  or removed would otherwise leave a stale class behind that still compiles.
+  generates, so a renamed or removed `sql` entry leaves no stale repository
+  source behind. It never deletes a compiled class, though, so `mvn clean`
+  stays in the sequence to drop the class an earlier run compiled from a
+  repository that is no longer generated.
 - `sqlcj generate` is a separate command. It is not bound to the Maven
   lifecycle, so it must run after `clean` and before `compile`. The commands
   above run from the project root, because `generate` reads `sqlcj.yaml` from
@@ -424,10 +426,12 @@ mvn exec:java
 - `mvn compile` then compiles `src/main/java` together with
   `target/generated-sources/sqlcj`.
 
-Generation writes one file per configured entry:
+Generation writes one repository per configured entry, plus the manifest that
+records what it wrote:
 
 ```text
 target/generated-sources/sqlcj/com/example/app/db/AuthorRepository.java
+target/generated-sources/sqlcj/sqlcj-manifest.txt
 ```
 
 `mvn exec:java` prints:
@@ -496,6 +500,13 @@ mvn clean
 java -jar tools/sqlcj-cli-0.1.0-SNAPSHOT.jar generate
 mvn compile
 ```
+
+Regeneration cleans up after itself. The previous run recorded every file it
+wrote in `target/generated-sources/sqlcj/sqlcj-manifest.txt`, so renaming or
+removing an `sql` entry deletes the repository that entry used to generate,
+while a file sqlcj never generated is left alone. See
+[Configuration](configuration.md#generated-output-and-failures) for the full
+manifest and cleanup rules.
 
 If a query is invalid, `sqlcj generate` prints one diagnostic naming the source,
 the query, and the line, and exits with status `1`:
