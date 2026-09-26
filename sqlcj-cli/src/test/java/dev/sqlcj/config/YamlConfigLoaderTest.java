@@ -12,7 +12,6 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class YamlConfigLoaderTest {
 
@@ -178,10 +177,25 @@ class YamlConfigLoaderTest {
             () -> configLoader.load(configFile)
         );
 
-        assertTrue(
-            exception.getMessage().contains(
-                "Cannot read configuration file: " + configFile
-            ),
+        assertEquals(
+            "Cannot read configuration file: %s: No such file or directory"
+                .formatted(configFile),
+            exception.getMessage()
+        );
+    }
+
+    @Test
+    void shouldRejectConfigurationFileThatIsADirectory() throws IOException {
+        Path configFile = Files.createDirectory(tempDir.resolve("sqlcj.yaml"));
+
+        ConfigurationException exception = assertThrows(
+            ConfigurationException.class,
+            () -> configLoader.load(configFile)
+        );
+
+        assertEquals(
+            "Cannot read configuration file: %s: Is a directory"
+                .formatted(configFile),
             exception.getMessage()
         );
     }
@@ -198,10 +212,10 @@ class YamlConfigLoaderTest {
             () -> configLoader.load(configFile)
         );
 
-        assertTrue(
-            exception.getMessage().contains(
-                "Malformed configuration file: " + configFile
-            ),
+        assertEquals(
+            "Malformed configuration file: %s: expected <block end>, but found "
+                .formatted(configFile)
+                + "'<block mapping start>' at line 2, column 3",
             exception.getMessage()
         );
     }

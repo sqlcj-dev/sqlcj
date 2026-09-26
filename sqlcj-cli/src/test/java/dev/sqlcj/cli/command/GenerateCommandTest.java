@@ -135,13 +135,124 @@ class GenerateCommandTest {
         Result result = runGenerate("--config", "missing.yaml");
 
         assertEquals(1, result.exitCode(), result.error());
-        assertTrue(
-            result.error().contains(
-                "sqlcj: Cannot read configuration file: "
-                    + workingDirectory.resolve("missing.yaml")
+        assertEquals(
+            List.of(
+                "sqlcj: Cannot read configuration file: %s: No such file or directory"
+                    .formatted(workingDirectory.resolve("missing.yaml"))
             ),
-            result.error()
+            result.error().lines().toList()
         );
+        assertFalse(result.error().contains("\tat "));
+        assertFalse(Files.exists(workingDirectory.resolve("generated")));
+    }
+
+    @Test
+    void shouldFailWithConciseDiagnosticForMalformedYaml() throws Exception {
+        Files.writeString(
+            workingDirectory.resolve("sqlcj.yaml"),
+            """
+                version: "1"
+                  sql: [
+                """
+        );
+
+        Result result = runGenerate();
+
+        assertEquals(1, result.exitCode(), result.error());
+        assertEquals(
+            List.of(
+                "sqlcj: Malformed configuration file: %s: "
+                    .formatted(workingDirectory.resolve("sqlcj.yaml"))
+                    + "expected <block end>, but found '<block mapping start>' "
+                    + "at line 2, column 3"
+            ),
+            result.error().lines().toList()
+        );
+        assertFalse(result.error().contains("\tat "));
+        assertFalse(Files.exists(workingDirectory.resolve("generated")));
+    }
+
+    @Test
+    void shouldFailWithConciseDiagnosticForSchemaSyntaxError() throws Exception {
+        Files.writeString(
+            workingDirectory.resolve("schema.sql"),
+            """
+                CREATE TABLE users (
+                 id BIGINT NOT NULL,
+                 name VARCHAR(255)
+                ;
+                """
+        );
+        Files.writeString(workingDirectory.resolve("queries.sql"), QUERIES);
+        Files.writeString(
+            workingDirectory.resolve("sqlcj.yaml"),
+            """
+                version: "1"
+                sql:
+                  - name: Users
+                    schema: schema.sql
+                    queries: queries.sql
+                java:
+                  package: dev.example.generated
+                  out: generated
+                """
+        );
+
+        Result result = runGenerate();
+
+        assertEquals(1, result.exitCode(), result.error());
+        assertEquals(
+            List.of(
+                "sqlcj: Invalid schema source %s: "
+                    .formatted(workingDirectory.resolve("schema.sql"))
+                    + "Encountered unexpected token: \";\" <ST_SEMICOLON> "
+                    + "at line 4, column 1"
+            ),
+            result.error().lines().toList()
+        );
+        assertFalse(result.error().contains("\tat "));
+        assertFalse(Files.exists(workingDirectory.resolve("generated")));
+    }
+
+    @Test
+    void shouldFailWithConciseDiagnosticForQuerySyntaxError() throws Exception {
+        Files.writeString(workingDirectory.resolve("schema.sql"), SCHEMA);
+        Files.writeString(
+            workingDirectory.resolve("queries.sql"),
+            """
+                -- name: GetUser :one
+                SELECT id, name
+                FROM users
+                WHERE id = $1
+                  AND AND name = $2;
+                """
+        );
+        Files.writeString(
+            workingDirectory.resolve("sqlcj.yaml"),
+            """
+                version: "1"
+                sql:
+                  - name: Users
+                    schema: schema.sql
+                    queries: queries.sql
+                java:
+                  package: dev.example.generated
+                  out: generated
+                """
+        );
+
+        Result result = runGenerate();
+
+        assertEquals(1, result.exitCode(), result.error());
+        assertEquals(
+            List.of(
+                "sqlcj: Invalid query 'GetUser' in %s at line 1: "
+                    .formatted(workingDirectory.resolve("queries.sql"))
+                    + "Encountered unexpected token: \"AND\" \"AND\""
+            ),
+            result.error().lines().toList()
+        );
+        assertFalse(result.error().contains("net.sf.jsqlparser"));
         assertFalse(result.error().contains("\tat "));
         assertFalse(Files.exists(workingDirectory.resolve("generated")));
     }
@@ -190,11 +301,12 @@ class GenerateCommandTest {
         Result result = runGenerate();
 
         assertEquals(1, result.exitCode(), result.error());
-        assertTrue(result.error().contains("sqlcj: Cannot read queries source"));
-        assertTrue(
-            result.error().contains(
-                workingDirectory.resolve("missing.sql").toString()
-            )
+        assertEquals(
+            List.of(
+                "sqlcj: Cannot read queries source: %s: No such file or directory"
+                    .formatted(workingDirectory.resolve("missing.sql"))
+            ),
+            result.error().lines().toList()
         );
         assertFalse(result.error().contains("\tat "));
         assertFalse(Files.exists(workingDirectory.resolve("generated")));
@@ -276,8 +388,8 @@ class GenerateCommandTest {
 
         assertEquals(
             List.of(
-                "sqlcj: Cannot create output directory: "
-                    + workingDirectory.resolve("generated/dev/example/generated")
+                "sqlcj: Cannot create output directory: %s: Not a directory"
+                    .formatted(workingDirectory.resolve("generated/dev/example/generated"))
             ),
             result.error().lines().toList()
         );

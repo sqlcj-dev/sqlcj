@@ -28,7 +28,7 @@ public final class SqlParser {
         try {
             statement = CCJSqlParserUtil.parse(sql, parser::set);
         } catch (JSQLParserException e) {
-            throw new SqlParseException(e);
+            throw new SqlParseException(SqlParseReason.of(e, false), e);
         }
 
         if (statement == null || parser.get() == null) {

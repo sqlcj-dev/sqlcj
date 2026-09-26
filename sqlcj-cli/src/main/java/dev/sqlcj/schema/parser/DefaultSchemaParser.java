@@ -6,6 +6,7 @@ import dev.sqlcj.schema.Constraint;
 import dev.sqlcj.schema.ConstraintType;
 import dev.sqlcj.schema.Schema;
 import dev.sqlcj.schema.Table;
+import dev.sqlcj.sql.SqlParseReason;
 import net.sf.jsqlparser.JSQLParserException;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.schema.MultiPartName;
@@ -47,7 +48,7 @@ public class DefaultSchemaParser implements SchemaParser {
 
             return new Schema(tables);
         } catch (JSQLParserException e) {
-            throw new SchemaParseException("Failed to parse schema", e);
+            throw new SchemaParseException(SqlParseReason.of(e, true), e);
         }
     }
 

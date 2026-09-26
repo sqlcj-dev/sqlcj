@@ -18,7 +18,11 @@ public final class GeneratedFileWriter {
             try {
                 Files.createDirectories(parent);
             } catch (IOException e) {
-                throw new IOException("Cannot create output directory: " + parent, e);
+                throw new IOException(
+                    "Cannot create output directory: %s: %s"
+                        .formatted(parent, FileSystemReason.of(e)),
+                    e
+                );
             }
         }
 
@@ -30,7 +34,11 @@ public final class GeneratedFileWriter {
                 StandardOpenOption.TRUNCATE_EXISTING
             );
         } catch (IOException e) {
-            throw new IOException("Cannot write generated file: " + outputFile, e);
+            throw new IOException(
+                "Cannot write generated file: %s: %s"
+                    .formatted(outputFile, FileSystemReason.of(e)),
+                e
+            );
         }
     }
 }

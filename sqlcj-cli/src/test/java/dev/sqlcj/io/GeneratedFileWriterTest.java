@@ -76,8 +76,8 @@ class GeneratedFileWriterTest {
         );
 
         assertEquals(
-            "Cannot create output directory: "
-                + outputDirectory.resolve(file.path()).getParent(),
+            "Cannot create output directory: %s: Not a directory"
+                .formatted(outputDirectory.resolve(file.path()).getParent()),
             failure.getMessage()
         );
     }
@@ -99,7 +99,8 @@ class GeneratedFileWriterTest {
         );
 
         assertEquals(
-            "Cannot write generated file: " + outputDirectory.resolve(file.path()),
+            "Cannot write generated file: %s: Is a directory"
+                .formatted(outputDirectory.resolve(file.path())),
             failure.getMessage()
         );
     }

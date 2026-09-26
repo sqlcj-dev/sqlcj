@@ -1,5 +1,8 @@
 package dev.sqlcj.config;
 
+import dev.sqlcj.io.FileSystemReason;
+import org.snakeyaml.engine.v2.exceptions.Mark;
+import org.snakeyaml.engine.v2.exceptions.MarkedYamlEngineException;
 import tools.jackson.core.JacksonException;
 import tools.jackson.core.JsonToken;
 import tools.jackson.databind.DeserializationFeature;
@@ -12,11 +15,13 @@ import tools.jackson.databind.exc.UnrecognizedPropertyException;
 import tools.jackson.databind.type.LogicalType;
 import tools.jackson.dataformat.yaml.YAMLMapper;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 public class YamlConfigLoader implements ConfigLoader {
 
@@ -55,16 +60,12 @@ public class YamlConfigLoader implements ConfigLoader {
     }
 
     private Config read(Path configFile) {
-        if (!Files.isReadable(configFile)) {
-            throw new ConfigurationException(
-                "Cannot read configuration file: " + configFile
-            );
-        }
+        byte[] content = readBytes(configFile);
 
         Config config;
 
         try {
-            config = OBJECT_MAPPER.readValue(configFile.toFile(), Config.class);
+            config = OBJECT_MAPPER.readValue(content, Config.class);
         } catch (UnrecognizedPropertyException e) {
             throw new ConfigurationException(
                 "Invalid configuration in %s: unknown field '%s'"
@@ -74,10 +75,7 @@ public class YamlConfigLoader implements ConfigLoader {
         } catch (MismatchedInputException e) {
             throw invalidValue(configFile, e);
         } catch (JacksonException e) {
-            throw new ConfigurationException(
-                "Malformed configuration file: " + configFile,
-                e
-            );
+            throw malformed(configFile, e);
         }
 
         if (config == null) {
@@ -87,6 +85,68 @@ public class YamlConfigLoader implements ConfigLoader {
         }
 
         return config;
+    }
+
+    private byte[] readBytes(Path configFile) {
+        try {
+            return Files.readAllBytes(configFile);
+        } catch (IOException e) {
+            throw new ConfigurationException(
+                "Cannot read configuration file: %s: %s"
+                    .formatted(configFile, FileSystemReason.of(e)),
+                e
+            );
+        }
+    }
+
+    /**
+     * Translates a YAML syntax failure into a configuration diagnostic naming
+     * the configuration file and the problem the YAML parser reports, with the
+     * one-based line and column it reports the problem at.
+     */
+    private ConfigurationException malformed(Path configFile, JacksonException e) {
+        MarkedYamlEngineException yamlFailure = yamlFailure(e);
+
+        Optional<Mark> mark = yamlFailure == null
+            ? Optional.empty()
+            : yamlFailure.getProblemMark();
+
+        String detail = mark
+            .map(
+                problemMark -> "%s at line %d, column %d".formatted(
+                    yamlFailure.getProblem(),
+                    problemMark.getLine() + 1,
+                    problemMark.getColumn() + 1
+                )
+            )
+            .orElseGet(() -> firstLine(e.getOriginalMessage(), e));
+
+        return new ConfigurationException(
+            "Malformed configuration file: %s: %s".formatted(configFile, detail),
+            e
+        );
+    }
+
+    /** The YAML failure the exception chain carries, or {@code null}. */
+    private MarkedYamlEngineException yamlFailure(JacksonException e) {
+        for (Throwable cause = e; cause != null; cause = cause.getCause()) {
+            if (cause instanceof MarkedYamlEngineException yamlFailure) {
+                return yamlFailure;
+            }
+        }
+
+        return null;
+    }
+
+    private String firstLine(String message, JacksonException e) {
+        if (message == null || message.isBlank()) {
+            return e.getClass().getSimpleName();
+        }
+
+        return message.lines()
+            .findFirst()
+            .orElse(message)
+            .trim();
     }
 
     /**

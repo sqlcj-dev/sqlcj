@@ -136,6 +136,47 @@ class SqlParserTest {
         );
     }
 
+    /**
+     * The compiler names the failing query and its header line, so the reason
+     * carries the parser's own wording without an exception class name.
+     */
+    @Test
+    void shouldReportSyntaxFailureWithoutExceptionClassNames() {
+        SqlParseException exception = assertThrows(
+            SqlParseException.class,
+            () -> parser.parse("""
+                SELECT id, name
+                FROM users
+                WHERE id = $1
+                  AND AND name = $2""")
+        );
+
+        assertEquals(
+            "Encountered unexpected token: \"AND\" \"AND\"",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A lexical failure such as an unterminated string literal reaches the
+     * compiler wrapped in exceptions that repeat their cause's class name, so the
+     * reason states the lexical wording alone.
+     */
+    @Test
+    void shouldReportLexicalFailureWithoutExceptionClassNames() {
+        SqlParseException exception = assertThrows(
+            SqlParseException.class,
+            () -> parser.parse("SELECT id, name FROM users WHERE name = 'abc;")
+        );
+
+        assertEquals(
+            "Lexical error at line 1, column 46."
+                + "  Encountered: <EOF> after prefix \"\\'abc;\"",
+            exception.getMessage()
+        );
+        assertFalse(exception.getMessage().contains("net.sf.jsqlparser"));
+    }
+
     /** A block comment ends at its first delimiter and does not nest. */
     @Test
     void shouldPreserveParameterTextInsideBlockCommentWithNestedDelimiter() {

@@ -4,6 +4,7 @@ import dev.sqlcj.config.Config;
 import dev.sqlcj.config.SqlConfig;
 import dev.sqlcj.io.DefaultFileLoader;
 import dev.sqlcj.io.FileLoader;
+import dev.sqlcj.io.FileSystemReason;
 import dev.sqlcj.parser.DefaultQueryParser;
 import dev.sqlcj.parser.Query;
 import dev.sqlcj.parser.QueryParser;
@@ -53,7 +54,8 @@ public final class DefaultSourceLoader implements SourceLoader {
             return fileLoader.read(path);
         } catch (IOException e) {
             throw new CompilationException(
-                "Cannot read %s source: %s".formatted(kind, path),
+                "Cannot read %s source: %s: %s"
+                    .formatted(kind, path, FileSystemReason.of(e)),
                 e
             );
         }

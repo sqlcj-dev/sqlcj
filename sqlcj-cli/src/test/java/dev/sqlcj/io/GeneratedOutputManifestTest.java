@@ -82,7 +82,7 @@ class GeneratedOutputManifestTest {
         );
 
         assertEquals(
-            "Cannot read output manifest: " + manifestFile,
+            "Cannot read output manifest: %s: Is a directory".formatted(manifestFile),
             failure.getMessage()
         );
     }
@@ -103,7 +103,7 @@ class GeneratedOutputManifestTest {
         );
 
         assertEquals(
-            "Cannot write output manifest: " + manifestFile,
+            "Cannot write output manifest: %s: Is a directory".formatted(manifestFile),
             failure.getMessage()
         );
     }
