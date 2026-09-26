@@ -141,7 +141,8 @@ class DefaultSourceLoaderTest {
         );
 
         assertEquals(
-            "Cannot read queries source: " + missingQueries,
+            "Cannot read queries source: %s: No such file or directory"
+                .formatted(missingQueries),
             exception.getMessage()
         );
     }
@@ -171,7 +172,8 @@ class DefaultSourceLoaderTest {
         );
 
         assertEquals(
-            "Cannot read schema source: " + missingSchema,
+            "Cannot read schema source: %s: No such file or directory"
+                .formatted(missingSchema),
             exception.getMessage()
         );
     }

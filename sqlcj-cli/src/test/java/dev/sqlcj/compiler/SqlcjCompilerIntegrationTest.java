@@ -1620,7 +1620,7 @@ class SqlcjCompilerIntegrationTest {
         );
 
         assertEquals(
-            "Cannot read output manifest: " + manifestFile,
+            "Cannot read output manifest: %s: Is a directory".formatted(manifestFile),
             exception.getMessage()
         );
 
@@ -1677,7 +1677,7 @@ class SqlcjCompilerIntegrationTest {
         );
 
         assertEquals(
-            "Cannot write generated file: " + generatedFile,
+            "Cannot write generated file: %s: Is a directory".formatted(generatedFile),
             exception.getMessage()
         );
     }

@@ -39,7 +39,11 @@ public final class GeneratedOutputManifest {
                 Files.readAllLines(manifestPath, StandardCharsets.UTF_8)
             );
         } catch (IOException e) {
-            throw new IOException("Cannot read output manifest: " + manifestPath, e);
+            throw new IOException(
+                "Cannot read output manifest: %s: %s"
+                    .formatted(manifestPath, FileSystemReason.of(e)),
+                e
+            );
         }
     }
 
@@ -84,7 +88,11 @@ public final class GeneratedOutputManifest {
                 StandardOpenOption.TRUNCATE_EXISTING
             );
         } catch (IOException e) {
-            throw new IOException("Cannot write output manifest: " + manifestPath, e);
+            throw new IOException(
+                "Cannot write output manifest: %s: %s"
+                    .formatted(manifestPath, FileSystemReason.of(e)),
+                e
+            );
         }
     }
 
@@ -118,7 +126,11 @@ public final class GeneratedOutputManifest {
 
             Files.delete(file);
         } catch (IOException e) {
-            throw new IOException("Cannot delete stale generated file: " + file, e);
+            throw new IOException(
+                "Cannot delete stale generated file: %s: %s"
+                    .formatted(file, FileSystemReason.of(e)),
+                e
+            );
         }
     }
 
