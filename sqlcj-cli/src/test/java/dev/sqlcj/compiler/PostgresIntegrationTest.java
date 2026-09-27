@@ -124,6 +124,29 @@ class PostgresIntegrationTest {
         """;
 
     /**
+     * A snapshot that declares every supported type through its PostgreSQL
+     * spelling, including the serial spellings, which PostgreSQL fills from
+     * their own sequences.
+     */
+    private static final String ALIAS_SCHEMA = """
+        CREATE TABLE user_aliases
+        (
+            id           INT8 PRIMARY KEY,
+            code         INT4 NOT NULL,
+            score        INT2,
+            label        CHARACTER VARYING(20),
+            tag          CHAR(3),
+            initials     CHARACTER(3),
+            created_at   TIMESTAMP(3) WITHOUT TIME ZONE,
+            updated_at   TIMESTAMPTZ,
+            small_serial SMALLSERIAL,
+            serial_two   SERIAL2,
+            serial_four  SERIAL4,
+            serial_eight SERIAL8
+        );
+        """;
+
+    /**
      * Queries used by the caller-owned transaction tests: an affected-row
      * write, a returning write, and a read.
      */
@@ -229,6 +252,7 @@ class PostgresIntegrationTest {
     void resetDatabase() throws Exception {
         execute("DROP TABLE IF EXISTS customer_orders");
         execute("DROP TABLE IF EXISTS customers");
+        execute("DROP TABLE IF EXISTS user_aliases");
         execute("DROP TABLE IF EXISTS users");
         execute(SCHEMA);
     }
@@ -808,6 +832,135 @@ class PostgresIntegrationTest {
             );
 
             assertEquals(UPDATED_AT.toInstant(), updatedAt.toInstant());
+        }
+    }
+
+    /**
+     * Proves that a snapshot declaring the PostgreSQL type spellings is valid
+     * PostgreSQL DDL and round trips through generated code: the non-serial
+     * columns are written through the generated write method and read back with
+     * the Java types the spellings map to, while the omitted serial columns are
+     * filled by their sequences.
+     *
+     * <p>PostgreSQL blank-pads a {@code character} value to the declared
+     * length, so {@code "ab"} written into {@code CHAR(3)} reads back as
+     * {@code "ab "}. A {@code timestamptz} is normalized to the session time
+     * zone, so it is compared by instant.
+     */
+    @Test
+    void shouldRoundTripPostgresTypeSpellingValues() throws Exception {
+        execute(ALIAS_SCHEMA);
+
+        Path classesDirectory = generateAndCompile(
+            ALIAS_SCHEMA,
+            """
+                -- name: InsertUserAlias :exec
+                INSERT INTO user_aliases
+                    (id, code, score, label, tag, initials, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
+
+                -- name: GetUserAlias :one
+                SELECT id, code, score, label, tag, initials, created_at, updated_at,
+                       small_serial, serial_two, serial_four, serial_eight
+                FROM user_aliases
+                WHERE id = $1;
+                """
+        );
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method insertMethod = repository.getClass().getMethod(
+                "insertUserAlias",
+                Long.class,
+                Integer.class,
+                Short.class,
+                String.class,
+                String.class,
+                String.class,
+                LocalDateTime.class,
+                OffsetDateTime.class
+            );
+
+            Object affectedRows = insertMethod.invoke(
+                repository,
+                8L,
+                42,
+                (short) 7,
+                "gold",
+                "ab",
+                "xyz",
+                LocalDateTime.of(2026, 1, 1, 10, 0),
+                UPDATED_AT
+            );
+
+            assertEquals(1, affectedRows);
+
+            Object result = repository
+                .getClass()
+                .getMethod("getUserAlias", Long.class)
+                .invoke(repository, 8L);
+
+            assertNotNull(result);
+
+            assertEquals(
+                List.of(
+                    "id",
+                    "code",
+                    "score",
+                    "label",
+                    "tag",
+                    "initials",
+                    "createdAt",
+                    "updatedAt",
+                    "smallSerial",
+                    "serialTwo",
+                    "serialFour",
+                    "serialEight"
+                ),
+                recordComponentNames(result)
+            );
+
+            assertEquals(
+                List.of(
+                    Long.class,
+                    Integer.class,
+                    Short.class,
+                    String.class,
+                    String.class,
+                    String.class,
+                    LocalDateTime.class,
+                    OffsetDateTime.class,
+                    Short.class,
+                    Short.class,
+                    Integer.class,
+                    Long.class
+                ),
+                recordComponentTypes(result)
+            );
+
+            assertEquals(8L, component(result, "id"));
+            assertEquals(42, component(result, "code"));
+            assertEquals((short) 7, component(result, "score"));
+            assertEquals("gold", component(result, "label"));
+            assertEquals("ab ", component(result, "tag"));
+            assertEquals("xyz", component(result, "initials"));
+            assertEquals(
+                LocalDateTime.of(2026, 1, 1, 10, 0),
+                component(result, "createdAt")
+            );
+
+            OffsetDateTime updatedAt = assertInstanceOf(
+                OffsetDateTime.class,
+                component(result, "updatedAt")
+            );
+
+            assertEquals(UPDATED_AT.toInstant(), updatedAt.toInstant());
+
+            assertEquals((short) 1, component(result, "smallSerial"));
+            assertEquals((short) 1, component(result, "serialTwo"));
+            assertEquals(1, component(result, "serialFour"));
+            assertEquals(1L, component(result, "serialEight"));
         }
     }
 
@@ -1538,6 +1691,12 @@ class PostgresIntegrationTest {
     private List<String> recordComponentNames(Object record) {
         return Arrays.stream(record.getClass().getRecordComponents())
             .map(RecordComponent::getName)
+            .toList();
+    }
+
+    private List<Class<?>> recordComponentTypes(Object record) {
+        return Arrays.stream(record.getClass().getRecordComponents())
+            .<Class<?>>map(RecordComponent::getType)
             .toList();
     }
 
