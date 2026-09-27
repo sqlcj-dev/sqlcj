@@ -110,15 +110,16 @@ accepted and map exactly like their unparameterized spellings.
 
 | Accepted SQL spellings | Java type | Notes |
 | --- | --- | --- |
-| `INTEGER`, `INT`, `SERIAL` | `Integer` | A `SERIAL` column is always modeled non-null. |
-| `BIGINT`, `BIGSERIAL` | `Long` | A `BIGSERIAL` column is always modeled non-null. |
-| `SMALLINT` | `Short` | |
+| `INTEGER`, `INT`, `INT4`, `SERIAL`, `SERIAL4` | `Integer` | A serial column is always modeled non-null. |
+| `BIGINT`, `INT8`, `BIGSERIAL`, `SERIAL8` | `Long` | A serial column is always modeled non-null. |
+| `SMALLINT`, `INT2`, `SMALLSERIAL`, `SERIAL2` | `Short` | A serial column is always modeled non-null. |
 | `BOOLEAN`, `BOOL` | `Boolean` | |
-| `VARCHAR` | `String` | |
+| `VARCHAR`, `CHARACTER VARYING` | `String` | |
+| `CHAR`, `CHARACTER` | `String` | PostgreSQL blank-pads a stored value to the declared length, so `ab` written into a `CHAR(3)` column reads back as `ab `. |
 | `TEXT` | `String` | |
 | `DATE` | `java.time.LocalDate` | |
-| `TIMESTAMP` | `java.time.LocalDateTime` | |
-| `TIMESTAMP WITH TIME ZONE` | `java.time.OffsetDateTime` | PostgreSQL normalizes the stored value to the session time zone, so a value read back equals the written value by instant rather than by offset. |
+| `TIMESTAMP`, `TIMESTAMP WITHOUT TIME ZONE` | `java.time.LocalDateTime` | |
+| `TIMESTAMP WITH TIME ZONE`, `TIMESTAMPTZ` | `java.time.OffsetDateTime` | PostgreSQL normalizes the stored value to the session time zone, so a value read back equals the written value by instant rather than by offset. |
 | `DECIMAL`, `NUMERIC` | `java.math.BigDecimal` | |
 | `UUID` | `java.util.UUID` | |
 
@@ -185,9 +186,10 @@ Nullability itself is parsed from `NOT NULL` only:
 
 - a column without `NOT NULL` is modeled nullable, so a column declared bare
   `PRIMARY KEY` is modeled nullable,
-- a `SERIAL` or `BIGSERIAL` column is always modeled non-null, because
-  PostgreSQL defines those spellings as an integer type with a sequence default
-  and `NOT NULL`,
+- a serial column, declared `SMALLSERIAL`, `SERIAL`, `BIGSERIAL`, `SERIAL2`,
+  `SERIAL4`, or `SERIAL8`, is always modeled non-null, because PostgreSQL
+  defines those spellings as an integer type with a sequence default and
+  `NOT NULL`,
 - nullability never changes a generated Java type. It is carried into the
   analyzed model, but the generated type is resolved from the column type alone.
 
@@ -197,14 +199,6 @@ columns of the integration schema snapshot, which cover `SMALLINT`, `VARCHAR`,
 `TIMESTAMP WITH TIME ZONE`.
 
 ## Unsupported Types and DDL
-
-These spellings are rejected even though PostgreSQL accepts them:
-
-- `TIMESTAMPTZ`
-- `SERIAL4`
-- `SERIAL8`
-- `SMALLSERIAL`
-- `TIMESTAMP WITHOUT TIME ZONE`
 
 The following type families are not supported at all, because only the
 spellings listed in [Supported Column Types](#supported-column-types) are
@@ -235,7 +229,7 @@ The message names the schema source and the offending type or statement, or the
 syntax error with the line and column it was found at:
 
 ```text
-sqlcj: Invalid schema source /home/dev/project/schema.sql: Unsupported SQL column type: TIMESTAMPTZ
+sqlcj: Invalid schema source /home/dev/project/schema.sql: Unsupported SQL column type: JSONB
 sqlcj: Invalid schema source /home/dev/project/schema.sql: Unsupported schema statement: Alter
 sqlcj: Invalid schema source /home/dev/project/schema.sql: Encountered unexpected token: ";" <ST_SEMICOLON> at line 4, column 1
 ```
@@ -244,13 +238,16 @@ sqlcj: Invalid schema source /home/dev/project/schema.sql: Encountered unexpecte
 
 Type table:
 
-- `DefaultSchemaParserTest.shouldKeepParsingDeliveredColumnTypes` and
-  `DefaultSchemaParserTest.shouldParseAddedColumnTypes` cover the accepted
+- `DefaultSchemaParserTest.shouldKeepParsingDeliveredColumnTypes`,
+  `DefaultSchemaParserTest.shouldParseAddedColumnTypes`, and
+  `DefaultSchemaParserTest.shouldParsePostgresTypeSpellings` cover the accepted
   spellings, their case-insensitive forms, and the ignored type arguments.
 - `PostgresIntegrationTest.shouldExecuteGeneratedOneQueryAgainstPostgres`,
-  `PostgresIntegrationTest.shouldExecuteGeneratedWriteAgainstPostgres`, and
-  `PostgresIntegrationTest.shouldRoundTripSerialUuidAndTimestampWithTimeZoneValues`
-  execute the Java mappings against PostgreSQL 16.
+  `PostgresIntegrationTest.shouldExecuteGeneratedWriteAgainstPostgres`,
+  `PostgresIntegrationTest.shouldRoundTripSerialUuidAndTimestampWithTimeZoneValues`,
+  and `PostgresIntegrationTest.shouldRoundTripPostgresTypeSpellingValues`
+  execute the Java mappings, including the blank-padded `CHAR` values, against
+  PostgreSQL 16.
 - `DefaultSchemaParserTest.shouldRejectUnsupportedColumnType` covers the
   rejected spellings.
 
@@ -278,7 +275,8 @@ Nulls:
   proves that row absence is reported by `:optional` and `:one` rather than by a
   null result.
 - `DefaultSchemaParserTest.shouldParseColumns`,
-  `DefaultSchemaParserTest.shouldParseNullabilityOfAddedColumnTypes`, and
+  `DefaultSchemaParserTest.shouldParseNullabilityOfAddedColumnTypes`,
+  `DefaultSchemaParserTest.shouldParseNullabilityOfIntegerAliasColumns`, and
   `DefaultSchemaParserTest.shouldParseSerialColumnAsNotNullable` cover parsed
   nullability.
 
