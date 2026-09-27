@@ -2170,6 +2170,181 @@ class SqlcjCompilerIntegrationTest {
         );
     }
 
+    /**
+     * A migration directory and the single snapshot of the same tables describe
+     * one schema, so they generate the same repository source.
+     */
+    @Test
+    void shouldGenerateTheSameRepositoryFromAMigrationDirectoryAndASnapshot()
+        throws IOException {
+        String users = """
+            CREATE TABLE users
+            (
+                id   BIGINT NOT NULL,
+                name VARCHAR(255)
+            );
+            """;
+
+        String orders = """
+            CREATE TABLE orders
+            (
+                id      BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                total   DECIMAL(10, 2)
+            );
+            """;
+
+        Path migrations = Files.createDirectories(tempDir.resolve("migrations"));
+
+        Files.writeString(migrations.resolve("V2__orders.sql"), orders);
+        Files.writeString(migrations.resolve("V1__users.sql"), users);
+
+        Path snapshotFile = tempDir.resolve("schema.sql");
+
+        Files.writeString(snapshotFile, users + "\n" + orders);
+
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: ListUsers :many
+                SELECT id, name
+                FROM users;
+
+                -- name: ListOrders :many
+                SELECT *
+                FROM orders
+                WHERE user_id = $1;
+                """
+        );
+
+        Path fromDirectory = generateUsersRepository(
+            List.of(migrations.toString()),
+            queriesFile,
+            tempDir.resolve("generated-directory")
+        );
+
+        Path fromSnapshot = generateUsersRepository(
+            List.of(snapshotFile.toString()),
+            queriesFile,
+            tempDir.resolve("generated-snapshot")
+        );
+
+        assertArrayEquals(
+            Files.readAllBytes(fromSnapshot),
+            Files.readAllBytes(fromDirectory)
+        );
+
+        Path classesDirectory = tempDir.resolve("classes");
+
+        Files.createDirectories(classesDirectory);
+
+        JavaCompiler compilerApi = ToolProvider.getSystemJavaCompiler();
+
+        assertNotNull(compilerApi);
+
+        assertEquals(
+            0,
+            compilerApi.run(
+                null,
+                null,
+                null,
+                "-classpath",
+                System.getProperty("java.class.path"),
+                "-d",
+                classesDirectory.toString(),
+                fromDirectory.toString()
+            )
+        );
+    }
+
+    /** A schema failure names the migration file that contains it. */
+    @Test
+    void shouldReportTheMigrationFileThatFailsToParse() throws IOException {
+        Path migrations = Files.createDirectories(tempDir.resolve("migrations"));
+
+        Files.writeString(
+            migrations.resolve("V1__users.sql"),
+            """
+                CREATE TABLE users
+                (
+                    id BIGINT NOT NULL
+                );
+                """
+        );
+
+        Path broken = migrations.resolve("V2__orders.sql");
+
+        Files.writeString(
+            broken,
+            """
+                CREATE TABLE orders (
+                 id BIGINT NOT NULL,
+                 user_id BIGINT NOT NULL
+                ;
+                """
+        );
+
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: ListUsers :many
+                SELECT id
+                FROM users;
+                """
+        );
+
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> generateUsersRepository(
+                List.of(migrations.toString()),
+                queriesFile,
+                generatedDirectory
+            )
+        );
+
+        assertEquals(
+            "Invalid schema source %s: ".formatted(broken)
+                + "Encountered unexpected token: \";\" <ST_SEMICOLON> "
+                + "at line 4, column 1",
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    /** Generates the one repository of the {@code Users} group. */
+    private Path generateUsersRepository(
+        List<String> schema,
+        Path queriesFile,
+        Path generatedDirectory
+    ) {
+        Config config = new Config(
+            List.of(
+                new SqlConfig(
+                    "Users",
+                    schema,
+                    queriesFile.toString()
+                )
+            ),
+            new JavaConfig(
+                generatedDirectory.toString(),
+                "generated"
+            )
+        );
+
+        new SqlcjCompiler().compile(config);
+
+        return generatedDirectory
+            .resolve("generated")
+            .resolve("UsersRepository.java");
+    }
+
     /** Generates and compiles the one repository of the {@code Users} group. */
     private Path generateAndCompile(String schema, String queries) throws IOException {
         Path schemaFile = tempDir.resolve("schema.sql");

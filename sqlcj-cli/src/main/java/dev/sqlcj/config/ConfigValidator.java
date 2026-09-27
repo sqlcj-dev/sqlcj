@@ -72,8 +72,38 @@ final class ConfigValidator {
 
             validateName(entry.name(), i, configFile);
 
-            requireValue(entry.schema(), "sql[%d].schema".formatted(i), configFile);
+            validateSchema(entry.schema(), i, configFile);
             requireValue(entry.queries(), "sql[%d].queries".formatted(i), configFile);
+        }
+    }
+
+    /**
+     * Requires at least one schema path. A single configured path is reported
+     * as the field itself, so the single-path form keeps its diagnostics, while
+     * one path of a longer list is reported with its index.
+     */
+    private void validateSchema(List<String> schema, int index, Path configFile) {
+        String field = "sql[%d].schema".formatted(index);
+
+        if (schema == null) {
+            throw invalid(configFile, "'%s' is required".formatted(field));
+        }
+
+        if (schema.isEmpty()) {
+            throw invalid(
+                configFile,
+                "'%s' must contain at least one path".formatted(field)
+            );
+        }
+
+        if (schema.size() == 1) {
+            requireValue(schema.getFirst(), field, configFile);
+
+            return;
+        }
+
+        for (int i = 0; i < schema.size(); i++) {
+            requireValue(schema.get(i), "%s[%d]".formatted(field, i), configFile);
         }
     }
 

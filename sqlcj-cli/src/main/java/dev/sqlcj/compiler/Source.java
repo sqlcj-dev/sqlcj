@@ -10,11 +10,11 @@ import java.util.List;
  * identify a source in a compilation diagnostic.
  *
  * @param name the configured group identity that names the generated repository
+ * @param schemaFiles the schema files of the entry, in the order they apply
  */
 public record Source(
     String name,
-    Path schemaPath,
-    String schema,
+    List<SchemaFile> schemaFiles,
     Path queriesPath,
     List<Query> queries
 ) {
