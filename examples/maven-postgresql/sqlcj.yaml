@@ -1,7 +1,7 @@
 version: "1"
 sql:
   - name: Author
-    schema: sql/schema.sql
+    schema: sql/migrations
     queries: sql/queries.sql
 java:
   package: com.example.app.db
