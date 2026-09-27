@@ -11,7 +11,6 @@ import dev.sqlcj.io.GeneratedFileWriter;
 import dev.sqlcj.io.GeneratedOutputManifest;
 import dev.sqlcj.parser.Query;
 import dev.sqlcj.schema.Schema;
-import dev.sqlcj.schema.Table;
 import dev.sqlcj.schema.parser.DefaultSchemaParser;
 import dev.sqlcj.schema.parser.SchemaParser;
 import dev.sqlcj.sql.ParsedSql;
@@ -91,22 +90,23 @@ public final class SqlcjCompiler {
     }
 
     /**
-     * Parses the schema files of one entry in order into that entry's schema,
-     * so a table keeps the position of the file that declares it.
+     * Applies the schema files of one entry in order to that entry's schema, so
+     * a table keeps the position of the file that declares it and a later file
+     * alters what the earlier files left.
      */
     private Schema parseSchema(Source source) {
-        List<Table> tables = new ArrayList<>();
+        Schema schema = new Schema(List.of());
 
         for (SchemaFile schemaFile : source.schemaFiles()) {
-            tables.addAll(parseSchemaFile(schemaFile).tables());
+            schema = parseSchemaFile(schema, schemaFile);
         }
 
-        return new Schema(tables);
+        return schema;
     }
 
-    private Schema parseSchemaFile(SchemaFile schemaFile) {
+    private Schema parseSchemaFile(Schema schema, SchemaFile schemaFile) {
         try {
-            return schemaParser.parse(schemaFile.sql());
+            return schemaParser.parse(schema, schemaFile.sql());
         } catch (RuntimeException e) {
             throw new CompilationException(
                 "Invalid schema source %s: %s".formatted(schemaFile.path(), reason(e)),

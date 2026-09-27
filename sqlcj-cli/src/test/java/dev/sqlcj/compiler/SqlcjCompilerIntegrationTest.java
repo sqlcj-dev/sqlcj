@@ -2259,6 +2259,192 @@ class SqlcjCompilerIntegrationTest {
         );
     }
 
+    /**
+     * A later migration alters the tables the earlier ones created, so the
+     * migration directory and the snapshot of the altered tables describe one
+     * schema and generate the same repository source.
+     */
+    @Test
+    void shouldGenerateTheSameRepositoryFromAlteringMigrationsAndASnapshot()
+        throws IOException {
+        Path migrations = Files.createDirectories(tempDir.resolve("migrations"));
+
+        Files.writeString(
+            migrations.resolve("V1__users.sql"),
+            """
+                CREATE TABLE users
+                (
+                    id    BIGINT NOT NULL,
+                    email VARCHAR(255),
+                    name  VARCHAR(255) NOT NULL,
+                    note  TEXT
+                );
+                """
+        );
+
+        Files.writeString(
+            migrations.resolve("V2__orders.sql"),
+            """
+                CREATE TABLE orders
+                (
+                    id      BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    total   DECIMAL(10, 2)
+                );
+                """
+        );
+
+        Files.writeString(
+            migrations.resolve("V3__alter_users.sql"),
+            """
+                ALTER TABLE users RENAME COLUMN email TO email_address;
+                ALTER TABLE users ADD COLUMN active BOOLEAN NOT NULL;
+                ALTER TABLE users DROP COLUMN note;
+                ALTER TABLE users ALTER COLUMN id TYPE INT4;
+                ALTER TABLE users ALTER COLUMN name DROP NOT NULL;
+                ALTER TABLE orders ALTER COLUMN total SET NOT NULL;
+                """
+        );
+
+        Path snapshotFile = tempDir.resolve("schema.sql");
+
+        Files.writeString(
+            snapshotFile,
+            """
+                CREATE TABLE users
+                (
+                    id            INT4 NOT NULL,
+                    email_address VARCHAR(255),
+                    name          VARCHAR(255),
+                    active        BOOLEAN NOT NULL
+                );
+
+                CREATE TABLE orders
+                (
+                    id      BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    total   DECIMAL(10, 2) NOT NULL
+                );
+                """
+        );
+
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: ListUsers :many
+                SELECT *
+                FROM users;
+
+                -- name: FindOrder :optional
+                SELECT *
+                FROM orders
+                WHERE id = $1;
+
+                -- name: ListActiveUsers :many
+                SELECT id, email_address
+                FROM users
+                WHERE active = $1;
+                """
+        );
+
+        Path fromDirectory = generateUsersRepository(
+            List.of(migrations.toString()),
+            queriesFile,
+            tempDir.resolve("generated-directory")
+        );
+
+        Path fromSnapshot = generateUsersRepository(
+            List.of(snapshotFile.toString()),
+            queriesFile,
+            tempDir.resolve("generated-snapshot")
+        );
+
+        assertArrayEquals(
+            Files.readAllBytes(fromSnapshot),
+            Files.readAllBytes(fromDirectory)
+        );
+
+        Path classesDirectory = tempDir.resolve("classes");
+
+        Files.createDirectories(classesDirectory);
+
+        JavaCompiler compilerApi = ToolProvider.getSystemJavaCompiler();
+
+        assertNotNull(compilerApi);
+
+        assertEquals(
+            0,
+            compilerApi.run(
+                null,
+                null,
+                null,
+                "-classpath",
+                System.getProperty("java.class.path"),
+                "-d",
+                classesDirectory.toString(),
+                fromDirectory.toString()
+            )
+        );
+    }
+
+    /**
+     * A migration that alters a table no earlier migration created names the
+     * file that refers to it.
+     */
+    @Test
+    void shouldReportTheMigrationFileThatAltersAMissingTable() throws IOException {
+        Path migrations = Files.createDirectories(tempDir.resolve("migrations"));
+
+        Files.writeString(
+            migrations.resolve("V1__users.sql"),
+            """
+                CREATE TABLE users
+                (
+                    id BIGINT NOT NULL
+                );
+                """
+        );
+
+        Path missingReference = migrations.resolve("V2__payments.sql");
+
+        Files.writeString(
+            missingReference,
+            "ALTER TABLE payments ADD COLUMN total DECIMAL(10, 2);\n"
+        );
+
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: ListUsers :many
+                SELECT id
+                FROM users;
+                """
+        );
+
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> generateUsersRepository(
+                List.of(migrations.toString()),
+                queriesFile,
+                generatedDirectory
+            )
+        );
+
+        assertEquals(
+            "Invalid schema source %s: ".formatted(missingReference)
+                + "Table not found in schema: payments",
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
     /** A schema failure names the migration file that contains it. */
     @Test
     void shouldReportTheMigrationFileThatFailsToParse() throws IOException {
