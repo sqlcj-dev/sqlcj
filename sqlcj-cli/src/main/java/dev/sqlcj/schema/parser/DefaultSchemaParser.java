@@ -108,15 +108,15 @@ public class DefaultSchemaParser implements SchemaParser {
 
     private ColumnType columnType(String typeName) {
         return switch (typeName) {
-            case "INTEGER", "INT", "SERIAL" -> ColumnType.INTEGER;
-            case "BIGINT", "BIGSERIAL" -> ColumnType.BIGINT;
-            case "SMALLINT" -> ColumnType.SMALLINT;
+            case "INTEGER", "INT", "INT4", "SERIAL", "SERIAL4" -> ColumnType.INTEGER;
+            case "BIGINT", "INT8", "BIGSERIAL", "SERIAL8" -> ColumnType.BIGINT;
+            case "SMALLINT", "INT2", "SMALLSERIAL", "SERIAL2" -> ColumnType.SMALLINT;
             case "BOOLEAN", "BOOL" -> ColumnType.BOOLEAN;
-            case "VARCHAR" -> ColumnType.VARCHAR;
+            case "VARCHAR", "CHARACTER VARYING", "CHAR", "CHARACTER" -> ColumnType.VARCHAR;
             case "TEXT" -> ColumnType.TEXT;
             case "DATE" -> ColumnType.DATE;
-            case "TIMESTAMP" -> ColumnType.TIMESTAMP;
-            case "TIMESTAMP WITH TIME ZONE" -> ColumnType.TIMESTAMP_WITH_TIME_ZONE;
+            case "TIMESTAMP", "TIMESTAMP WITHOUT TIME ZONE" -> ColumnType.TIMESTAMP;
+            case "TIMESTAMP WITH TIME ZONE", "TIMESTAMPTZ" -> ColumnType.TIMESTAMP_WITH_TIME_ZONE;
             case "DECIMAL", "NUMERIC" -> ColumnType.DECIMAL;
             case "UUID" -> ColumnType.UUID;
             default -> throw new UnsupportedOperationException(
@@ -131,7 +131,10 @@ public class DefaultSchemaParser implements SchemaParser {
      * nullable.
      */
     private boolean isSerial(String typeName) {
-        return "SERIAL".equals(typeName) || "BIGSERIAL".equals(typeName);
+        return switch (typeName) {
+            case "SERIAL", "BIGSERIAL", "SMALLSERIAL", "SERIAL2", "SERIAL4", "SERIAL8" -> true;
+            default -> false;
+        };
     }
 
     private boolean isNullable(ColumnDefinition definition) {

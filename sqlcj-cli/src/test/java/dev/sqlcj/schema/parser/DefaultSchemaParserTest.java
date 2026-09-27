@@ -224,10 +224,63 @@ class DefaultSchemaParserTest {
     }
 
     @ParameterizedTest
+    @CsvSource(
+        {
+            "TIMESTAMPTZ, TIMESTAMP_WITH_TIME_ZONE",
+            "timestamptz, TIMESTAMP_WITH_TIME_ZONE",
+            "TIMESTAMPTZ(3), TIMESTAMP_WITH_TIME_ZONE",
+            "TIMESTAMP WITHOUT TIME ZONE, TIMESTAMP",
+            "timestamp without time zone, TIMESTAMP",
+            "TIMESTAMP(3) WITHOUT TIME ZONE, TIMESTAMP",
+            "INT2, SMALLINT",
+            "int2, SMALLINT",
+            "INT4, INTEGER",
+            "int4, INTEGER",
+            "INT8, BIGINT",
+            "int8, BIGINT",
+            "SMALLSERIAL, SMALLINT",
+            "smallserial, SMALLINT",
+            "SERIAL2, SMALLINT",
+            "serial2, SMALLINT",
+            "SERIAL4, INTEGER",
+            "serial4, INTEGER",
+            "SERIAL8, BIGINT",
+            "serial8, BIGINT",
+            "CHARACTER VARYING, VARCHAR",
+            "character varying, VARCHAR",
+            "CHARACTER VARYING(20), VARCHAR",
+            "CHAR, VARCHAR",
+            "char, VARCHAR",
+            "CHAR(2), VARCHAR",
+            "CHARACTER, VARCHAR",
+            "character(3), VARCHAR"
+        }
+    )
+    void shouldParsePostgresTypeSpellings(String sqlType, ColumnType expectedType) {
+        String sql = """
+            CREATE TABLE users (
+                value %s
+            );
+            """
+            .formatted(sqlType);
+
+        Schema schema = parser.parse(sql);
+
+        assertEquals(
+            expectedType,
+            schema.tables().getFirst().columns().getFirst().type()
+        );
+    }
+
+    @ParameterizedTest
     @ValueSource(
         strings = {
             "SERIAL",
-            "BIGSERIAL"
+            "BIGSERIAL",
+            "SMALLSERIAL",
+            "SERIAL2",
+            "SERIAL4",
+            "SERIAL8"
         }
     )
     void shouldParseSerialColumnAsNotNullable(String sqlType) {
@@ -267,14 +320,40 @@ class DefaultSchemaParserTest {
         );
     }
 
+    /**
+     * The integer aliases carry no implicit {@code NOT NULL}, unlike the serial
+     * spellings, so their nullability comes from {@code NOT NULL} only.
+     */
+    @Test
+    void shouldParseNullabilityOfIntegerAliasColumns() {
+        String sql = """
+            CREATE TABLE users (
+                score    INT2,
+                code     INT4,
+                revision INT8
+            );
+            """;
+
+        Schema schema = parser.parse(sql);
+
+        Table table = schema.tables().getFirst();
+
+        assertEquals(
+            List.of(
+                new Column("score", ColumnType.SMALLINT, true),
+                new Column("code", ColumnType.INTEGER, true),
+                new Column("revision", ColumnType.BIGINT, true)
+            ),
+            table.columns()
+        );
+    }
+
     @ParameterizedTest
     @ValueSource(
         strings = {
-            "TIMESTAMPTZ",
-            "SERIAL4",
-            "SERIAL8",
-            "SMALLSERIAL",
-            "TIMESTAMP WITHOUT TIME ZONE"
+            "JSONB",
+            "DOUBLE PRECISION",
+            "\"char\""
         }
     )
     void shouldRejectUnsupportedColumnType(String sqlType) {
