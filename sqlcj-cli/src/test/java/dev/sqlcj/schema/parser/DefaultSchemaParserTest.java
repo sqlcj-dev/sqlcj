@@ -546,9 +546,14 @@ class DefaultSchemaParserTest {
             CREATE VIEW active_users AS SELECT id FROM users;
             """;
 
-        assertThrows(
+        UnsupportedOperationException exception = assertThrows(
             UnsupportedOperationException.class,
             () -> parser.parse(sql)
+        );
+
+        assertEquals(
+            "Unsupported schema statement: CreateView at line 5",
+            exception.getMessage()
         );
     }
 
@@ -566,7 +571,7 @@ class DefaultSchemaParserTest {
         );
 
         assertEquals(
-            "Unsupported schema statement: Alter",
+            "Unsupported schema statement: Alter at line 1",
             exception.getMessage()
         );
     }
@@ -585,7 +590,7 @@ class DefaultSchemaParserTest {
         );
 
         assertEquals(
-            "Unsupported schema statement: Alter",
+            "Unsupported schema statement: Alter at line 1",
             exception.getMessage()
         );
     }
@@ -607,7 +612,224 @@ class DefaultSchemaParserTest {
         );
 
         assertEquals(
-            "Unsupported schema statement: Alter",
+            "Unsupported schema statement: Alter at line 1",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * Every statement of the documented ignored list is accepted and leaves the
+     * schema the statements before it left.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "CREATE INDEX users_email_idx ON users (email);",
+            "CREATE UNIQUE INDEX users_email_idx ON users (email);",
+            "ALTER INDEX users_email_idx RENAME TO users_mail_idx;",
+            "alter index users_email_idx rename to users_mail_idx;",
+            "DROP INDEX users_email_idx;",
+            "DROP INDEX IF EXISTS users_email_idx;",
+            "COMMENT ON TABLE users IS 'the users';",
+            "COMMENT ON COLUMN users.email IS 'the email';",
+            "COMMENT ON VIEW active_users IS 'the active users';",
+            "CREATE EXTENSION pgcrypto;",
+            "CREATE EXTENSION IF NOT EXISTS pgcrypto;",
+            "CREATE SEQUENCE users_id_seq;",
+            "ALTER SEQUENCE users_id_seq RESTART WITH 1;",
+            "DROP SEQUENCE users_id_seq;",
+            "GRANT SELECT ON users TO readonly;",
+            "REVOKE SELECT ON users FROM readonly;",
+            "CREATE OR REPLACE FUNCTION touch() RETURNS trigger AS $$ BEGIN RETURN NEW; END; $$ "
+                + "LANGUAGE plpgsql;",
+            "DROP FUNCTION touch();",
+            "DROP FUNCTION IF EXISTS touch();",
+            "CREATE TRIGGER users_touch BEFORE UPDATE ON users FOR EACH ROW "
+                + "EXECUTE FUNCTION touch();",
+            "DROP TRIGGER users_touch ON users;",
+            "INSERT INTO users (id) VALUES (1);",
+            "UPDATE users SET name = 'new';",
+            "DELETE FROM users;",
+            "CREATE TYPE status AS ENUM ('draft', 'sent');"
+        }
+    )
+    void shouldIgnoreDocumentedStatements(String statement) {
+        assertEquals(parser.parse(BASE_SCHEMA).tables(), applied(statement).tables());
+    }
+
+    /**
+     * An ignored statement is not resolved against the schema, so it names a
+     * table or a column the schema does not model without failing.
+     */
+    @Test
+    void shouldNotResolveAnIgnoredStatementAgainstTheSchema() {
+        Schema schema = applied("""
+            CREATE INDEX payments_total_idx ON payments (total);
+            COMMENT ON COLUMN users.nickname IS 'the nickname';
+            INSERT INTO payments (total) VALUES (1);
+            """);
+
+        assertEquals(parser.parse(BASE_SCHEMA).tables(), schema.tables());
+    }
+
+    /**
+     * An {@code ALTER TABLE} action that states a constraint is accepted and
+     * leaves the table unchanged, named or unnamed.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "ALTER TABLE users ADD CONSTRAINT users_pkey PRIMARY KEY (id);",
+            "ALTER TABLE users ADD PRIMARY KEY (id);",
+            "ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email);",
+            "ALTER TABLE users ADD UNIQUE (email);",
+            "ALTER TABLE orders ADD CONSTRAINT orders_user_fk FOREIGN KEY (user_id) "
+                + "REFERENCES users (id);",
+            "ALTER TABLE orders ADD FOREIGN KEY (user_id) REFERENCES users (id);",
+            "ALTER TABLE users ADD CONSTRAINT users_id_check CHECK (id > 0);",
+            "ALTER TABLE users DROP CONSTRAINT users_email_key;",
+            "ALTER TABLE users DROP CONSTRAINT IF EXISTS users_email_key;",
+            "ALTER TABLE users RENAME CONSTRAINT users_email_key TO users_mail_key;"
+        }
+    )
+    void shouldIgnoreConstraintAlterTableActions(String statement) {
+        assertEquals(parser.parse(BASE_SCHEMA).tables(), applied(statement).tables());
+    }
+
+    /**
+     * An ignored constraint action still resolves its table, so an
+     * {@code ALTER TABLE} of a table the schema does not model fails.
+     */
+    @Test
+    void shouldReportTheMissingTableOfAnIgnoredConstraintAction() {
+        assertEquals(
+            "Table not found in schema: payments",
+            failureMessage("ALTER TABLE payments ADD CONSTRAINT payments_pkey PRIMARY KEY (id);")
+        );
+    }
+
+    /**
+     * A modeled action beside an ignored constraint action of one
+     * {@code ALTER TABLE} is still applied.
+     */
+    @Test
+    void shouldApplyAModeledActionBesideAnIgnoredConstraintAction() {
+        Schema schema = applied(
+            "ALTER TABLE users ADD COLUMN age INTEGER, "
+                + "ADD CONSTRAINT users_age_check CHECK (age > 0);"
+        );
+
+        Table users = table(schema, "users");
+
+        assertEquals(
+            List.of(
+                new Column("id", ColumnType.BIGINT, false),
+                new Column("email", ColumnType.VARCHAR, true),
+                new Column("name", ColumnType.VARCHAR, true),
+                new Column("age", ColumnType.INTEGER, true)
+            ),
+            users.columns()
+        );
+
+        assertEquals(
+            List.of(new Constraint(ConstraintType.UNIQUE, List.of("email"))),
+            users.constraints()
+        );
+    }
+
+    /**
+     * A statement outside the ignored list is rejected naming its kind and the
+     * line it begins on.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "CREATE VIEW active_users AS SELECT id FROM users;|CreateView",
+            "CREATE TYPE address AS (street TEXT, city TEXT);|CreateType",
+            "ALTER TYPE status ADD VALUE 'archived';|AlterType",
+            "CREATE DOMAIN positive AS INTEGER CHECK (VALUE > 0);|CreateDomain",
+            "CREATE SCHEMA app;|CreateSchema",
+            "DROP VIEW active_users;|Drop",
+            "SELECT id FROM users;|PlainSelect",
+            "ALTER TABLE users ALTER COLUMN name SET DEFAULT 'new';|Alter",
+            "CREATE FUNCTION one() RETURNS integer AS 'SELECT 1' LANGUAGE sql;|CreateFunction",
+            "ALTER FUNCTION touch() RENAME TO touched;|UnsupportedStatement"
+        }
+    )
+    void shouldRejectStatementOutsideTheIgnoredList(String statement, String kind) {
+        Schema schema = parser.parse(BASE_SCHEMA);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> parser.parse(schema, statement)
+        );
+
+        assertEquals(
+            "Unsupported schema statement: %s at line 1".formatted(kind),
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A single-quoted function body captures the rest of the source, including a
+     * later dollar-quoted body, so the function is still rejected at the line it
+     * begins on and nothing after it is applied.
+     */
+    @Test
+    void shouldRejectASingleQuotedFunctionBodyThatCapturesALaterDollarQuotedBody() {
+        String sql = """
+            CREATE TABLE users (id BIGINT);
+            CREATE FUNCTION one() RETURNS integer AS 'SELECT 1' LANGUAGE sql;
+            CREATE TABLE later (id BIGINT);
+            DROP TABLE users;
+            CREATE FUNCTION touch() RETURNS trigger AS $$ BEGIN RETURN NEW; END; $$ LANGUAGE plpgsql;
+            """;
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> parser.parse(sql)
+        );
+
+        assertEquals(
+            "Unsupported schema statement: CreateFunction at line 2",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * The reported line is the line the rejected statement itself begins on,
+     * even after comments that contain a statement separator and after a
+     * multi-line dollar-quoted function body.
+     */
+    @Test
+    void shouldReportTheLineOfARejectedStatementAfterCommentsAndAFunctionBody() {
+        String sql = """
+            -- a line comment with a ; separator
+            /* a block comment
+               with a ; separator */
+            CREATE TABLE tags (
+                id BIGINT NOT NULL
+            );
+
+            CREATE OR REPLACE FUNCTION touch() RETURNS trigger AS $$
+            BEGIN
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+
+            -- another ; separator
+            CREATE VIEW active_tags AS SELECT id FROM tags;
+            """;
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> parser.parse(sql)
+        );
+
+        assertEquals(
+            "Unsupported schema statement: CreateView at line 15",
             exception.getMessage()
         );
     }

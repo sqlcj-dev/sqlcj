@@ -8,23 +8,43 @@ import dev.sqlcj.schema.Schema;
 import dev.sqlcj.schema.Table;
 import dev.sqlcj.sql.SqlParseReason;
 import net.sf.jsqlparser.JSQLParserException;
+import net.sf.jsqlparser.expression.StringValue;
+import net.sf.jsqlparser.parser.CCJSqlParser;
+import net.sf.jsqlparser.parser.CCJSqlParserConstants;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
+import net.sf.jsqlparser.parser.Token;
 import net.sf.jsqlparser.schema.MultiPartName;
 import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.Statements;
+import net.sf.jsqlparser.statement.UnsupportedStatement;
 import net.sf.jsqlparser.statement.alter.Alter;
 import net.sf.jsqlparser.statement.alter.AlterExpression;
 import net.sf.jsqlparser.statement.alter.AlterOperation;
+import net.sf.jsqlparser.statement.alter.sequence.AlterSequence;
+import net.sf.jsqlparser.statement.comment.Comment;
+import net.sf.jsqlparser.statement.create.extension.CreateExtension;
+import net.sf.jsqlparser.statement.create.function.CreateFunction;
+import net.sf.jsqlparser.statement.create.index.CreateIndex;
+import net.sf.jsqlparser.statement.create.sequence.CreateSequence;
 import net.sf.jsqlparser.statement.create.table.CheckConstraint;
 import net.sf.jsqlparser.statement.create.table.ColumnDefinition;
 import net.sf.jsqlparser.statement.create.table.CreateTable;
 import net.sf.jsqlparser.statement.create.table.ForeignKeyIndex;
 import net.sf.jsqlparser.statement.create.table.Index;
+import net.sf.jsqlparser.statement.create.trigger.CreateTrigger;
+import net.sf.jsqlparser.statement.create.type.CreateType;
+import net.sf.jsqlparser.statement.create.type.EnumTypeDefinition;
+import net.sf.jsqlparser.statement.delete.Delete;
 import net.sf.jsqlparser.statement.drop.Drop;
+import net.sf.jsqlparser.statement.grant.Grant;
+import net.sf.jsqlparser.statement.grant.Revoke;
+import net.sf.jsqlparser.statement.insert.Insert;
+import net.sf.jsqlparser.statement.update.Update;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 
 public class DefaultSchemaParser implements SchemaParser {
@@ -32,15 +52,30 @@ public class DefaultSchemaParser implements SchemaParser {
     /** One parenthesized type argument group, such as {@code (10, 2)}. */
     private static final Pattern TYPE_ARGUMENTS = Pattern.compile("\\([^)]*\\)");
 
+    /**
+     * The opening words of an {@code ALTER INDEX} statement, which the parser
+     * reports only as an opaque unsupported statement.
+     */
+    private static final Pattern ALTER_INDEX = Pattern.compile(
+        "^ALTER\\s+INDEX\\b",
+        Pattern.CASE_INSENSITIVE
+    );
+
     @Override
     public Schema parse(Schema schema, String sql) {
+        AtomicReference<CCJSqlParser> parser = new AtomicReference<>();
+
         try {
-            Statements statements = CCJSqlParserUtil.parseStatements(sql);
+            Statements statements = CCJSqlParserUtil.parseStatements(sql, parser::set);
 
             List<Table> tables = new ArrayList<>(schema.tables());
 
-            for (Statement statement : statements) {
-                apply(statement, tables);
+            if (!statements.isEmpty()) {
+                List<Integer> lines = statementLines(parser.get());
+
+                for (int i = 0; i < statements.size(); i++) {
+                    apply(statements.get(i), statementLine(lines, i), tables);
+                }
             }
 
             return new Schema(tables);
@@ -49,17 +84,123 @@ public class DefaultSchemaParser implements SchemaParser {
         }
     }
 
+    /**
+     * The line each statement of one parsed source begins on, in order.
+     *
+     * <p>The parser reports no position per statement, so the lines are read
+     * from the token chain of its parse tree: the first token, and the first
+     * token after each statement separator, begins a statement. A comment is a
+     * special token outside the chain and a dollar-quoted function body is one
+     * literal token, so neither contributes a separator.
+     */
+    private List<Integer> statementLines(CCJSqlParser parser) {
+        List<Integer> lines = new ArrayList<>();
+
+        Token token = parser.getASTRoot().jjtGetFirstToken();
+        boolean starting = true;
+
+        while (token != null && token.kind != CCJSqlParserConstants.EOF) {
+            if (token.kind == CCJSqlParserConstants.ST_SEMICOLON) {
+                starting = true;
+            } else {
+                if (starting) {
+                    lines.add(token.beginLine);
+                }
+
+                starting = false;
+            }
+
+            token = token.next;
+        }
+
+        return lines;
+    }
+
+    /**
+     * The line of the statement at {@code index}, clamped to the last line
+     * found. The clamp only covers a source whose statements are not separated
+     * by semicolons, which PostgreSQL itself rejects.
+     */
+    private int statementLine(List<Integer> lines, int index) {
+        return lines.get(Math.min(index, lines.size() - 1));
+    }
+
     /** Applies one statement to the tables the statements before it left. */
-    private void apply(Statement statement, List<Table> tables) {
+    private void apply(Statement statement, int line, List<Table> tables) {
         if (statement instanceof CreateTable createTable) {
             applyCreateTable(createTable, tables);
         } else if (statement instanceof Alter alter) {
-            applyAlterTable(alter, tables);
+            applyAlterTable(alter, line, tables);
         } else if (statement instanceof Drop drop && drop.getObjectType() == Drop.ObjectType.TABLE) {
             applyDropTable(drop, tables);
-        } else {
-            throw unsupportedStatement(statement);
+        } else if (!isIgnored(statement)) {
+            throw unsupportedStatement(statement, line);
         }
+    }
+
+    /**
+     * Reports whether a statement is one of the documented statements a schema
+     * source may state without changing the schema model. Such a statement is
+     * not resolved against the schema at all.
+     */
+    private boolean isIgnored(Statement statement) {
+        if (statement instanceof Drop drop) {
+            return isIgnoredDropObject(drop);
+        }
+
+        if (statement instanceof CreateFunction createFunction) {
+            return hasDollarQuotedBody(createFunction);
+        }
+
+        if (statement instanceof CreateType createType) {
+            return createType.getDefinition() instanceof EnumTypeDefinition;
+        }
+
+        if (statement instanceof UnsupportedStatement unsupported) {
+            return ALTER_INDEX.matcher(unsupported.toString()).find();
+        }
+
+        return statement instanceof CreateIndex
+            || statement instanceof Comment
+            || statement instanceof CreateExtension
+            || statement instanceof CreateSequence
+            || statement instanceof AlterSequence
+            || statement instanceof Grant
+            || statement instanceof Revoke
+            || statement instanceof CreateTrigger
+            || statement instanceof Insert
+            || statement instanceof Update
+            || statement instanceof Delete;
+    }
+
+    /**
+     * A dropped table is modeled and the listed dropped objects are ignored;
+     * any other dropped object, such as a view, is rejected.
+     */
+    private boolean isIgnoredDropObject(Drop drop) {
+        return switch (drop.getObjectType()) {
+            case INDEX, SEQUENCE, FUNCTION, TRIGGER -> true;
+            default -> false;
+        };
+    }
+
+    /**
+     * Reports whether a {@code CREATE FUNCTION} states a dollar-quoted body,
+     * which the parser lexes as one literal token. It captures a body written
+     * any other way through the end of the source, so such a function is
+     * rejected instead of ignored.
+     *
+     * <p>A captured statement separator and everything after it is part of a
+     * later statement rather than of this function, so only the parts before the
+     * first {@code ";"} part decide.
+     */
+    private boolean hasDollarQuotedBody(CreateFunction createFunction) {
+        List<String> parts = createFunction.getFunctionDeclarationParts();
+
+        return parts != null
+            && parts.stream()
+                .takeWhile(part -> !";".equals(part))
+                .anyMatch(part -> StringValue.getDollarQuoteDelimiter(part) != null);
     }
 
     /**
@@ -104,7 +245,7 @@ public class DefaultSchemaParser implements SchemaParser {
      * of the altered table. {@code ALTER TABLE IF EXISTS} covers only the table,
      * so a missing column of an existing table still fails.
      */
-    private void applyAlterTable(Alter alter, List<Table> tables) {
+    private void applyAlterTable(Alter alter, int line, List<Table> tables) {
         String tableName = alter.getTable().getUnquotedName();
 
         int index = indexOfTable(tables, tableName);
@@ -118,18 +259,19 @@ public class DefaultSchemaParser implements SchemaParser {
         }
 
         for (AlterExpression expression : alter.getAlterExpressions()) {
-            tables.set(index, applyAlterExpression(alter, expression, tables, index));
+            tables.set(index, applyAlterExpression(alter, line, expression, tables, index));
         }
     }
 
     /**
-     * Applies one {@code ALTER TABLE} action and returns the altered table. An
-     * action that cannot be recognized as one of the supported forms, such as
-     * {@code SET DEFAULT} or {@code ADD CONSTRAINT}, is rejected like any other
-     * unsupported statement.
+     * Applies one {@code ALTER TABLE} action and returns the altered table. A
+     * constraint action is accepted and leaves the table unchanged; an action
+     * that cannot be recognized as one of those forms, such as
+     * {@code SET DEFAULT}, is rejected like any other unsupported statement.
      */
     private Table applyAlterExpression(
         Alter alter,
+        int line,
         AlterExpression expression,
         List<Table> tables,
         int index
@@ -154,20 +296,58 @@ public class DefaultSchemaParser implements SchemaParser {
         }
 
         if (operation == AlterOperation.ALTER) {
-            return alterColumns(alter, expression, table);
+            return alterColumns(alter, line, expression, table);
         }
 
-        throw unsupportedStatement(alter);
+        if (isIgnoredConstraintAction(expression)) {
+            return table;
+        }
+
+        throw unsupportedStatement(alter, line);
+    }
+
+    /**
+     * Reports whether one {@code ALTER TABLE} action states a constraint sqlcj
+     * accepts without modeling it: adding a primary-key, unique, foreign-key, or
+     * check constraint, dropping a named constraint, or renaming one. The table
+     * itself is still resolved, so a missing table fails as it does for any
+     * other {@code ALTER TABLE}.
+     */
+    private boolean isIgnoredConstraintAction(AlterExpression expression) {
+        AlterOperation operation = expression.getOperation();
+
+        if (operation == AlterOperation.ADD) {
+            return !isNotEmpty(expression.getColDataTypeList())
+                && isIgnoredConstraintKind(expression.getIndex());
+        }
+
+        if (operation == AlterOperation.DROP) {
+            return expression.getColumnName() == null
+                && expression.getConstraintName() != null;
+        }
+
+        return operation == AlterOperation.RENAME_CONSTRAINT;
+    }
+
+    private boolean isIgnoredConstraintKind(Index index) {
+        if (index == null) {
+            return false;
+        }
+
+        return switch (index.getKind()) {
+            case PRIMARY_KEY, UNIQUE, FOREIGN_KEY, CHECK -> true;
+            default -> false;
+        };
     }
 
     /**
      * Applies one {@code ALTER COLUMN} action: a new type, which keeps the
      * column's position and nullability, or a nullability change.
      */
-    private Table alterColumns(Alter alter, AlterExpression expression, Table table) {
+    private Table alterColumns(Alter alter, int line, AlterExpression expression, Table table) {
         if (isNotEmpty(expression.getColDataTypeList())) {
             if (!statesNewTypes(expression.getColDataTypeList())) {
-                throw unsupportedStatement(alter);
+                throw unsupportedStatement(alter, line);
             }
 
             return changeColumnTypes(expression, table);
@@ -193,7 +373,7 @@ public class DefaultSchemaParser implements SchemaParser {
             );
         }
 
-        throw unsupportedStatement(alter);
+        throw unsupportedStatement(alter, line);
     }
 
     /**
@@ -437,9 +617,10 @@ public class DefaultSchemaParser implements SchemaParser {
         );
     }
 
-    private UnsupportedOperationException unsupportedStatement(Statement statement) {
+    private UnsupportedOperationException unsupportedStatement(Statement statement, int line) {
         return new UnsupportedOperationException(
-            "Unsupported schema statement: " + statement.getClass().getSimpleName()
+            "Unsupported schema statement: %s at line %d"
+                .formatted(statement.getClass().getSimpleName(), line)
         );
     }
 
