@@ -25,7 +25,7 @@
         <spotless.java.config>${project.basedir}/config/eclipse-java-formatter.xml</spotless.java.config>
         <picocli.version>4.7.7</picocli.version>
         <jackson.version>3.2.1</jackson.version>
-        <jsqlparser.version>5.3</jsqlparser.version>
+        <jsqlparser.version>5.4</jsqlparser.version>
         <junit.version>6.1.2</junit.version>
         <h2.version>2.4.240</h2.version>
         <testcontainers.version>1.21.4</testcontainers.version>

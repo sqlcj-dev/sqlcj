@@ -251,7 +251,7 @@ query, its source, its header line, and the offending column and recorded type:
 
 ```text
 sqlcj: Invalid schema source /home/dev/project/schema.sql: Unsupported schema statement: Alter
-sqlcj: Invalid schema source /home/dev/project/schema.sql: Encountered unexpected token: ";" <ST_SEMICOLON> at line 4, column 1
+sqlcj: Invalid schema source /home/dev/project/schema.sql: Encountered unexpected token: ";" at line 4, column 1
 sqlcj: Invalid query 'ListTags' in /home/dev/project/queries.sql at line 5: Column 'tags' has unsupported type VARCHAR[]
 ```
 

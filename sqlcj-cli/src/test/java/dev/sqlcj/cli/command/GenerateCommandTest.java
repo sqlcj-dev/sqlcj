@@ -205,7 +205,7 @@ class GenerateCommandTest {
             List.of(
                 "sqlcj: Invalid schema source %s: "
                     .formatted(workingDirectory.resolve("schema.sql"))
-                    + "Encountered unexpected token: \";\" <ST_SEMICOLON> "
+                    + "Encountered unexpected token: \";\" "
                     + "at line 4, column 1"
             ),
             result.error().lines().toList()
@@ -248,7 +248,7 @@ class GenerateCommandTest {
             List.of(
                 "sqlcj: Invalid query 'GetUser' in %s at line 1: "
                     .formatted(workingDirectory.resolve("queries.sql"))
-                    + "Encountered unexpected token: \"AND\" \"AND\""
+                    + "Encountered unexpected token: \"AND\""
             ),
             result.error().lines().toList()
         );

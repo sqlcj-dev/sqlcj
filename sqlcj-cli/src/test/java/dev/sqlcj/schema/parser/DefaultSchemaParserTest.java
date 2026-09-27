@@ -553,7 +553,30 @@ class DefaultSchemaParserTest {
         );
 
         assertEquals(
-            "Encountered unexpected token: \";\" <ST_SEMICOLON> at line 4, column 1",
+            "Encountered unexpected token: \";\" at line 4, column 1",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A syntax failure at the end of input has no token image to quote, so the
+     * reason states the end of input and where the input ended.
+     */
+    @Test
+    void shouldReportSyntaxFailureAtEndOfInputWithItsLocation() {
+        String sql = """
+            CREATE TABLE users (
+             id BIGINT NOT NULL,
+             name VARCHAR(255)
+            """;
+
+        SchemaParseException exception = assertThrows(
+            SchemaParseException.class,
+            () -> parser.parse(sql)
+        );
+
+        assertEquals(
+            "Encountered unexpected end of input at line 3, column 19",
             exception.getMessage()
         );
     }
@@ -578,7 +601,7 @@ class DefaultSchemaParserTest {
 
         assertEquals(
             "Lexical error at line 4, column 0."
-                + "  Encountered: <EOF> after prefix \"\\'x);\\n\"",
+                + "  Encountered: <EOF> after: \"\\'x);\\n\"",
             exception.getMessage()
         );
         assertFalse(exception.getMessage().contains("net.sf.jsqlparser"));

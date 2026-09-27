@@ -2,7 +2,6 @@ package dev.sqlcj.sql;
 
 import net.sf.jsqlparser.parser.CCJSqlParserConstants;
 import net.sf.jsqlparser.parser.Node;
-import net.sf.jsqlparser.parser.SimpleNode;
 import net.sf.jsqlparser.parser.Token;
 
 import java.util.ArrayList;
@@ -47,7 +46,7 @@ final class SqlParameterCompiler {
     private static final int SOURCE_OFFSET = 1;
 
     SqlParameters compile(String sql, Node astRoot) {
-        if (!(astRoot instanceof SimpleNode node)) {
+        if (!(astRoot instanceof Node node)) {
             throw new SqlParseException("SQL parse tree is unavailable.");
         }
 

@@ -1,17 +1,20 @@
 package dev.sqlcj.sql;
 
+import net.sf.jsqlparser.parser.CCJSqlParserConstants;
 import net.sf.jsqlparser.parser.ParseException;
 import net.sf.jsqlparser.parser.Token;
 
 /**
  * The corrective fact of a SQL syntax failure, such as {@code Encountered
- * unexpected token: ";" <ST_SEMICOLON>}.
+ * unexpected token: ";"}.
  *
  * <p>The SQL parser reports a syntax failure through a chain of wrapping
  * exceptions whose outer messages repeat the class name of the failure they
- * wrap, so the fact is taken from the {@link ParseException} that chain
- * carries, or from its innermost cause when it carries none, and never names an
- * exception class.
+ * wrap, and whose {@link ParseException} states the unexpected token with
+ * parser-internal token kinds and lexical states. The fact is therefore
+ * composed from the unexpected token that chain carries, or taken from the
+ * innermost cause when it carries no {@link ParseException}, and never names an
+ * exception class or a parser internal.
  */
 public final class SqlParseReason {
 
@@ -32,18 +35,39 @@ public final class SqlParseReason {
             return firstLine(innermostCause(failure));
         }
 
-        String reason = firstLine(parseFailure);
-
         Token token = parseFailure.currentToken == null
             ? null
             : parseFailure.currentToken.next;
 
-        if (!withLocation || token == null) {
+        if (token == null) {
+            return firstLine(parseFailure);
+        }
+
+        String reason = unexpected(token);
+
+        if (!withLocation) {
             return reason;
         }
 
         return "%s at line %d, column %d"
             .formatted(reason, token.beginLine, token.beginColumn);
+    }
+
+    /**
+     * States the token the parser did not expect. The end of input has no image
+     * to quote, and a token image that spans lines is quoted with its line
+     * breaks escaped so the reason stays one line.
+     */
+    private static String unexpected(Token token) {
+        if (token.kind == CCJSqlParserConstants.EOF) {
+            return "Encountered unexpected end of input";
+        }
+
+        return "Encountered unexpected token: \"%s\"".formatted(
+            token.image
+                .replace("\r", "\\r")
+                .replace("\n", "\\n")
+        );
     }
 
     /** The parse failure the exception chain carries, or {@code null}. */

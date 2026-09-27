@@ -128,17 +128,25 @@ class SqlParserTest {
         );
     }
 
+    /** Dollar-quoted text is a literal, so a {@code $N} inside it is text. */
     @Test
-    void shouldRejectDollarQuotedText() {
-        assertThrows(
-            SqlParseException.class,
-            () -> parser.parse("SELECT $$ $1 dollar quoted $$ FROM users WHERE id = $1")
+    void shouldPreserveParameterTextInsideDollarQuotedText() {
+        ParsedSql parsedSql = parser.parse(
+            "SELECT $$ $1 dollar quoted $$ FROM users WHERE id = $1"
         );
+
+        assertEquals(
+            "SELECT $$ $1 dollar quoted $$ FROM users WHERE id = ?",
+            parsedSql.parameters().executableSql()
+        );
+
+        assertEquals(List.of(1), parsedSql.parameters().indexes());
     }
 
     /**
      * The compiler names the failing query and its header line, so the reason
-     * carries the parser's own wording without an exception class name.
+     * states the unexpected token alone, without a location and without an
+     * exception class name.
      */
     @Test
     void shouldReportSyntaxFailureWithoutExceptionClassNames() {
@@ -152,7 +160,32 @@ class SqlParserTest {
         );
 
         assertEquals(
-            "Encountered unexpected token: \"AND\" \"AND\"",
+            "Encountered unexpected token: \"AND\"",
+            exception.getMessage()
+        );
+    }
+
+    /** A syntax failure at the end of input has no token image to quote. */
+    @Test
+    void shouldReportSyntaxFailureAtEndOfInput() {
+        SqlParseException exception = assertThrows(
+            SqlParseException.class,
+            () -> parser.parse("SELECT id FROM users WHERE id =")
+        );
+
+        assertEquals("Encountered unexpected end of input", exception.getMessage());
+    }
+
+    /** A reason stays one line, so a token image that spans lines is escaped. */
+    @Test
+    void shouldEscapeLineBreaksOfTheUnexpectedToken() {
+        SqlParseException exception = assertThrows(
+            SqlParseException.class,
+            () -> parser.parse("SELECT id FROM users WHERE id = 'x' 'a\nb'")
+        );
+
+        assertEquals(
+            "Encountered unexpected token: \"'a\\nb'\"",
             exception.getMessage()
         );
     }
@@ -171,21 +204,21 @@ class SqlParserTest {
 
         assertEquals(
             "Lexical error at line 1, column 46."
-                + "  Encountered: <EOF> after prefix \"\\'abc;\"",
+                + "  Encountered: <EOF> after: \"\\'abc;\"",
             exception.getMessage()
         );
         assertFalse(exception.getMessage().contains("net.sf.jsqlparser"));
     }
 
-    /** A block comment ends at its first delimiter and does not nest. */
+    /** A block comment nests as in PostgreSQL and ends at its last delimiter. */
     @Test
-    void shouldPreserveParameterTextInsideBlockCommentWithNestedDelimiter() {
+    void shouldPreserveParameterTextInsideNestedBlockComment() {
         ParsedSql parsedSql = parser.parse(
-            "SELECT id FROM users /* outer /* $8 inner */ WHERE id = $1"
+            "SELECT id FROM users /* outer /* $8 inner */ $9 still comment */ WHERE id = $1"
         );
 
         assertEquals(
-            "SELECT id FROM users /* outer /* $8 inner */ WHERE id = ?",
+            "SELECT id FROM users /* outer /* $8 inner */ $9 still comment */ WHERE id = ?",
             parsedSql.parameters().executableSql()
         );
 
