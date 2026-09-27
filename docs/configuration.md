@@ -133,11 +133,14 @@ The order never depends on how the filesystem lists the directory. sqlcj only
 reads the files, so a Flyway placeholder, a configured file-name prefix, and a
 repeatable migration have no meaning of their own.
 
-Each schema file is parsed on its own, and the tables of the entry follow file
-order, so a schema failure names the file that contains it:
+The statements of the files are applied in that order to one schema model, so a
+later migration alters the tables an earlier file created and a schema failure
+names the file that contains it. A statement that refers to a table or a column
+no earlier statement created is such a failure; see
+[Ordered Table DDL](postgresql.md#ordered-table-ddl):
 
 ```text
-sqlcj: Invalid schema source /home/dev/project/sql/orders/migrations/V2__add_orders.sql: Unsupported schema statement: Alter
+sqlcj: Invalid schema source /home/dev/project/sql/orders/migrations/V2__add_orders.sql: Table not found in schema: payments
 ```
 
 A directory that contributes no file, and two versioned files of one directory

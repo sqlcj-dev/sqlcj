@@ -92,10 +92,14 @@ file, a list of files, or a directory of `.sql` migration files; see
 [`sql[].schema`](configuration.md#sqlschema) for the accepted forms and the
 order the files are read in.
 
-- Only `CREATE TABLE` statements are accepted. Any other statement in a schema
-  file is rejected.
-- A file may contain several `CREATE TABLE` statements, and table order is
-  preserved across the schema files of one entry.
+- Only `CREATE TABLE`, `DROP TABLE`, and the `ALTER TABLE` forms listed in
+  [Ordered Table DDL](#ordered-table-ddl) are accepted. Any other statement in a
+  schema file is rejected.
+- The statements of the schema files of one entry are applied in order to one
+  schema model, so each of them sees the tables and columns the statements and
+  files before it left.
+- A file may contain several statements, and a table keeps the position of the
+  statement that created it.
 - SQL identifier delimiters are removed for the parsed model, so the table
   `"user data"` is modeled as `user data` and the column `"user id"` is modeled
   as `user id`.
@@ -148,7 +152,7 @@ selected-column list.
 | Column-level `CHECK (...)` | Accepted and ignored. |
 | Table-level `FOREIGN KEY (...) REFERENCES ...`, named or unnamed | Accepted and ignored. |
 | Table-level `CHECK (...)`, named or unnamed | Accepted and ignored. |
-| Any statement other than `CREATE TABLE`, such as `ALTER TABLE` | Rejected. |
+| Any statement outside [Ordered Table DDL](#ordered-table-ddl), such as `CREATE VIEW` | Rejected. |
 | Any other table-constraint kind | Rejected. |
 | Unparsable SQL | Rejected. |
 
@@ -157,6 +161,46 @@ constraint is kept in the parsed schema model, but no code in the compilation
 pipeline reads it, so it changes no generated type, method, parameter, or
 result component. "Ignored" means the construct is accepted as valid schema
 input and is not carried into the model at all.
+
+## Ordered Table DDL
+
+A schema of `CREATE TABLE` statements alone is modeled exactly as it was before
+ordered DDL existed. Beyond it, these statements update the schema the
+statements and files before them left:
+
+| Statement | Handling |
+| --- | --- |
+| `CREATE TABLE` | Adds the table after the tables already modeled. |
+| `CREATE TABLE IF NOT EXISTS` | Does nothing when the table already exists. |
+| `DROP TABLE`, with one or several names | Removes each named table. |
+| `DROP TABLE IF EXISTS` | Does nothing for a name that is not modeled. |
+| `ALTER TABLE ... ADD COLUMN` | Appends the column, typed exactly as a `CREATE TABLE` column of the same declaration, and records its column-level `PRIMARY KEY` or `UNIQUE`. |
+| `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` | Does nothing when the column already exists. |
+| `ALTER TABLE ... DROP COLUMN` | Removes the column and every recorded constraint that lists it. |
+| `ALTER TABLE ... DROP COLUMN IF EXISTS` | Does nothing when the column is not modeled. |
+| `ALTER TABLE ... RENAME COLUMN` | Renames the column in its position and in the constraints that list it. |
+| `ALTER TABLE ... RENAME TO` | Renames the table in its position, keeping its columns and constraints. |
+| `ALTER TABLE ... ALTER COLUMN ... TYPE` | Maps or records the new type as a `CREATE TABLE` column of that type is mapped or recorded, keeping the column's position and its nullability, which a type change does not state. |
+| `ALTER TABLE ... ALTER COLUMN ... SET NOT NULL` | Models the column non-null. |
+| `ALTER TABLE ... ALTER COLUMN ... DROP NOT NULL` | Models the column nullable. |
+| `ALTER TABLE IF EXISTS ...` | Does nothing when the table is not modeled. It covers only the table, so a missing column of a modeled table still fails. |
+| Any other `ALTER TABLE` action, such as `SET DEFAULT` or `ADD CONSTRAINT` | Rejected. |
+| `DROP` of anything other than a table | Rejected. |
+
+One `ALTER TABLE` may state several actions; they are applied in the written
+order. Table and column names are matched case-insensitively, as query analysis
+looks them up, after their SQL identifier delimiters are removed.
+
+Outside the `IF [NOT] EXISTS` forms above, a statement that refers to a table or
+a column that is not modeled is rejected, and so is a statement that would give
+two tables, or two columns of one table, the same name, as PostgreSQL rejects it:
+
+```text
+sqlcj: Invalid schema source /home/dev/project/sql/migrations/V2__orders.sql: Table not found in schema: payments
+sqlcj: Invalid schema source /home/dev/project/sql/migrations/V2__orders.sql: Column not found in table orders: total
+sqlcj: Invalid schema source /home/dev/project/sql/migrations/V2__orders.sql: Table already exists in schema: orders
+sqlcj: Invalid schema source /home/dev/project/sql/migrations/V2__orders.sql: Column already exists in table orders: total
+```
 
 ## Nulls
 
@@ -245,12 +289,13 @@ written by an earlier successful run is left unchanged. The writing step itself
 is sequential rather than atomic; see
 [Generated Output and Failures](configuration.md#generated-output-and-failures).
 
-A schema message names the schema source and the offending statement, or the
-syntax error with the line and column it was found at. A query message names the
+A schema message names the schema source and the offending statement, the table
+or column the statement refers to, or the syntax error with the line and column
+it was found at. A query message names the
 query, its source, its header line, and the offending column and recorded type:
 
 ```text
-sqlcj: Invalid schema source /home/dev/project/schema.sql: Unsupported schema statement: Alter
+sqlcj: Invalid schema source /home/dev/project/schema.sql: Unsupported schema statement: CreateView
 sqlcj: Invalid schema source /home/dev/project/schema.sql: Encountered unexpected token: ";" at line 4, column 1
 sqlcj: Invalid query 'ListTags' in /home/dev/project/queries.sql at line 5: Column 'tags' has unsupported type VARCHAR[]
 ```
@@ -297,6 +342,44 @@ Type table:
   the rejected input.
 - `PostgresIntegrationTest.shouldExecuteGeneratedQueryForSnapshotWithIgnoredTableConstraints`
   proves that such a snapshot is valid PostgreSQL DDL and compiles and executes.
+
+Ordered table DDL:
+
+- `DefaultSchemaParserTest.shouldComposeTheSchemaOfSeveralParsedSources`,
+  `DefaultSchemaParserTest.shouldAppendAddedColumnsTypedLikeCreateTableColumns`,
+  `DefaultSchemaParserTest.shouldRecordTheColumnConstraintsOfAnAddedColumn`,
+  `DefaultSchemaParserTest.shouldDropColumnAndTheConstraintsThatListIt`,
+  `DefaultSchemaParserTest.shouldRenameColumnInItsPositionAndInItsConstraints`,
+  `DefaultSchemaParserTest.shouldRenameTableInItsPosition`,
+  `DefaultSchemaParserTest.shouldChangeColumnTypeInItsPositionKeepingItsNullability`,
+  `DefaultSchemaParserTest.shouldChangeARecordedColumnTypeBackToAMappedType`,
+  `DefaultSchemaParserTest.shouldSetAndDropColumnNullability`,
+  `DefaultSchemaParserTest.shouldApplyTheActionsOfOneAlterTableInOrder`,
+  `DefaultSchemaParserTest.shouldDropEveryTableOfOneDropStatement`, and
+  `DefaultSchemaParserTest.shouldMatchTableAndColumnNamesCaseInsensitively`
+  cover the applied forms.
+- `DefaultSchemaParserTest.shouldIgnoreCreateTableIfNotExistsForAnExistingTable`,
+  `DefaultSchemaParserTest.shouldIgnoreAddColumnIfNotExistsForAnExistingColumn`,
+  `DefaultSchemaParserTest.shouldIgnoreDropTableIfExistsForAMissingTable`,
+  `DefaultSchemaParserTest.shouldIgnoreAlterTableIfExistsForAMissingTable`,
+  `DefaultSchemaParserTest.shouldIgnoreDropColumnIfExistsForAMissingColumn`, and
+  `DefaultSchemaParserTest.shouldReportTheMissingColumnOfAnAlterTableIfExists`
+  cover the `IF [NOT] EXISTS` variants.
+- `DefaultSchemaParserTest.shouldReportTheMissingTableOfAStatement`,
+  `DefaultSchemaParserTest.shouldReportTheMissingColumnOfAnAlterTableAction`,
+  `DefaultSchemaParserTest.shouldReportAStatementThatRepeatsATableName`,
+  `DefaultSchemaParserTest.shouldReportAStatementThatRepeatsAColumnName`,
+  `DefaultSchemaParserTest.shouldRejectUnsupportedAlterTableAction`,
+  `DefaultSchemaParserTest.shouldRejectAlterColumnSetStatistics`, and
+  `DefaultSchemaParserTest.shouldRejectAlterColumnAddIdentity` cover the
+  rejected statements and their messages.
+- `SqlcjCompilerIntegrationTest.shouldGenerateTheSameRepositoryFromAlteringMigrationsAndASnapshot`
+  generates one compilable repository from migrations that rename, add, drop, and
+  alter columns, byte-identical to the one generated from the equivalent
+  snapshot, and
+  `SqlcjCompilerIntegrationTest.shouldReportTheMigrationFileThatAltersAMissingTable`
+  covers the file-naming diagnostic of a missing reference and that no file is
+  written.
 
 Nulls:
 
