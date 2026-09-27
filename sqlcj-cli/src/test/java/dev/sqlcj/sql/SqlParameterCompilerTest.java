@@ -1,7 +1,7 @@
 package dev.sqlcj.sql;
 
 import net.sf.jsqlparser.parser.CCJSqlParserConstants;
-import net.sf.jsqlparser.parser.SimpleNode;
+import net.sf.jsqlparser.parser.Node;
 import net.sf.jsqlparser.parser.Token;
 import org.junit.jupiter.api.Test;
 
@@ -107,7 +107,7 @@ class SqlParameterCompilerTest {
             tokens[index].next = tokens[index + 1];
         }
 
-        SimpleNode node = new SimpleNode(0);
+        Node node = new Node(0);
         node.jjtSetFirstToken(tokens[0]);
         node.jjtSetLastToken(tokens[tokens.length - 1]);
 

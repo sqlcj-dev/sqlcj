@@ -2310,7 +2310,7 @@ class SqlcjCompilerIntegrationTest {
 
         assertEquals(
             "Invalid schema source %s: ".formatted(broken)
-                + "Encountered unexpected token: \";\" <ST_SEMICOLON> "
+                + "Encountered unexpected token: \";\" "
                 + "at line 4, column 1",
             exception.getMessage()
         );
