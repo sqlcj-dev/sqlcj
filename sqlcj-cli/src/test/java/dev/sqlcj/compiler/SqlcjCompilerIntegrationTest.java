@@ -2445,6 +2445,68 @@ class SqlcjCompilerIntegrationTest {
         assertFalse(Files.exists(generatedDirectory));
     }
 
+    /**
+     * A migration whose ignored statements load names the file and the line of
+     * the first statement sqlcj does not accept.
+     */
+    @Test
+    void shouldReportTheMigrationFileAndLineOfAnUnsupportedStatement() throws IOException {
+        Path migrations = Files.createDirectories(tempDir.resolve("migrations"));
+
+        Files.writeString(
+            migrations.resolve("V1__users.sql"),
+            """
+                CREATE TABLE users
+                (
+                    id BIGINT NOT NULL
+                );
+                """
+        );
+
+        Path unsupported = migrations.resolve("V2__views.sql");
+
+        Files.writeString(
+            unsupported,
+            """
+                CREATE INDEX users_id_idx ON users (id);
+
+                CREATE VIEW active_users AS
+                SELECT id
+                FROM users;
+                """
+        );
+
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: ListUsers :many
+                SELECT id
+                FROM users;
+                """
+        );
+
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> generateUsersRepository(
+                List.of(migrations.toString()),
+                queriesFile,
+                generatedDirectory
+            )
+        );
+
+        assertEquals(
+            "Invalid schema source %s: ".formatted(unsupported)
+                + "Unsupported schema statement: CreateView at line 3",
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
     /** A schema failure names the migration file that contains it. */
     @Test
     void shouldReportTheMigrationFileThatFailsToParse() throws IOException {

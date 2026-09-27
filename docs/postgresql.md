@@ -93,8 +93,9 @@ file, a list of files, or a directory of `.sql` migration files; see
 order the files are read in.
 
 - Only `CREATE TABLE`, `DROP TABLE`, and the `ALTER TABLE` forms listed in
-  [Ordered Table DDL](#ordered-table-ddl) are accepted. Any other statement in a
-  schema file is rejected.
+  [Ordered Table DDL](#ordered-table-ddl) update the schema model. The
+  statements listed in [Ignored Statements](#ignored-statements) are accepted
+  and leave it unchanged. Any other statement in a schema file is rejected.
 - The statements of the schema files of one entry are applied in order to one
   schema model, so each of them sees the tables and columns the statements and
   files before it left.
@@ -152,7 +153,7 @@ selected-column list.
 | Column-level `CHECK (...)` | Accepted and ignored. |
 | Table-level `FOREIGN KEY (...) REFERENCES ...`, named or unnamed | Accepted and ignored. |
 | Table-level `CHECK (...)`, named or unnamed | Accepted and ignored. |
-| Any statement outside [Ordered Table DDL](#ordered-table-ddl), such as `CREATE VIEW` | Rejected. |
+| Any statement outside [Ordered Table DDL](#ordered-table-ddl) and [Ignored Statements](#ignored-statements), such as `CREATE VIEW` | Rejected. |
 | Any other table-constraint kind | Rejected. |
 | Unparsable SQL | Rejected. |
 
@@ -184,8 +185,8 @@ statements and files before them left:
 | `ALTER TABLE ... ALTER COLUMN ... SET NOT NULL` | Models the column non-null. |
 | `ALTER TABLE ... ALTER COLUMN ... DROP NOT NULL` | Models the column nullable. |
 | `ALTER TABLE IF EXISTS ...` | Does nothing when the table is not modeled. It covers only the table, so a missing column of a modeled table still fails. |
-| Any other `ALTER TABLE` action, such as `SET DEFAULT` or `ADD CONSTRAINT` | Rejected. |
-| `DROP` of anything other than a table | Rejected. |
+| Any other `ALTER TABLE` action outside [Ignored Statements](#ignored-statements), such as `SET DEFAULT` | Rejected. |
+| `DROP` of an object that is neither a table nor listed in [Ignored Statements](#ignored-statements), such as `DROP VIEW` | Rejected. |
 
 One `ALTER TABLE` may state several actions; they are applied in the written
 order. Table and column names are matched case-insensitively, as query analysis
@@ -201,6 +202,64 @@ sqlcj: Invalid schema source /home/dev/project/sql/migrations/V2__orders.sql: Co
 sqlcj: Invalid schema source /home/dev/project/sql/migrations/V2__orders.sql: Table already exists in schema: orders
 sqlcj: Invalid schema source /home/dev/project/sql/migrations/V2__orders.sql: Column already exists in table orders: total
 ```
+
+## Ignored Statements
+
+A schema file records the whole history of a database, not only its tables, so
+these statements are accepted and leave the schema model exactly as the
+statements and files before them left it:
+
+| Statement | Notes |
+| --- | --- |
+| `CREATE INDEX`, `CREATE UNIQUE INDEX` | |
+| `ALTER INDEX` | |
+| `DROP INDEX`, `DROP INDEX IF EXISTS` | |
+| `COMMENT ON TABLE`, `COMMENT ON COLUMN`, `COMMENT ON VIEW` | These are the only `COMMENT ON` targets sqlcj's parser reads; see below. |
+| `CREATE EXTENSION`, `CREATE EXTENSION IF NOT EXISTS` | |
+| `CREATE SEQUENCE`, `ALTER SEQUENCE`, `DROP SEQUENCE` | |
+| `GRANT`, `REVOKE` | |
+| `CREATE FUNCTION`, `CREATE OR REPLACE FUNCTION` | Only with a body delimited by the untagged `$$ ... $$`, such as `AS $$ ... $$`; see below. |
+| `DROP FUNCTION`, `DROP FUNCTION IF EXISTS` | |
+| `CREATE TRIGGER`, `DROP TRIGGER` | |
+| `INSERT`, `UPDATE`, `DELETE` | A migration's data statements do not change the modeled tables. |
+| `CREATE TYPE ... AS ENUM` | The type is not modeled, so a column of it is recorded as an unsupported type. |
+| `ALTER TABLE ... ADD [CONSTRAINT name] PRIMARY KEY (...)` | Named or unnamed. |
+| `ALTER TABLE ... ADD [CONSTRAINT name] UNIQUE (...)` | Named or unnamed. |
+| `ALTER TABLE ... ADD [CONSTRAINT name] FOREIGN KEY (...) REFERENCES ...` | Named or unnamed. |
+| `ALTER TABLE ... ADD CONSTRAINT name CHECK (...)` | The unnamed `ADD CHECK (...)` spelling is a syntax error for sqlcj's parser; see below. |
+| `ALTER TABLE ... DROP CONSTRAINT [IF EXISTS] name` | |
+| `ALTER TABLE ... RENAME CONSTRAINT` | |
+
+A constraint an `ALTER TABLE` adds is not recorded, so it is not carried into
+the schema model the way a `CREATE TABLE` constraint is.
+
+An ignored statement is not resolved against the schema at all, so it may name
+a table or a column the snapshot does not model. An ignored `ALTER TABLE`
+action is the one exception: the statement still resolves its table, so
+`ALTER TABLE payments ADD CONSTRAINT payments_pkey PRIMARY KEY (id)` fails when
+`payments` is not modeled, exactly as any other `ALTER TABLE` of a missing
+table does. An ignored action may stand alone or beside modeled actions of one
+`ALTER TABLE`, so
+`ALTER TABLE users ADD COLUMN age INTEGER, ADD CONSTRAINT users_age_check CHECK (age > 0)`
+appends `age` and records nothing for the constraint.
+
+Three limitations follow from what sqlcj's SQL parser reads, and sqlcj does not
+split or pre-process the SQL to work around them:
+
+- A `CREATE FUNCTION` is ignored only when its body is delimited by the untagged
+  `$$ ... $$`, which is the only dollar-quote delimiter sqlcj's parser reads. A
+  tagged delimiter such as `$body$ ... $body$` is not read at all: it is a
+  syntax error, reported for the closing delimiter, as in
+  `Encountered unexpected token: "$body$" at line 1, column 74`. A body written
+  any other way, such as `AS 'SELECT 1' LANGUAGE sql`, is captured through the
+  end of the file, so such a function is rejected at the line it begins on and
+  nothing after it is applied.
+- `COMMENT ON` is read only for the `TABLE`, `COLUMN`, and `VIEW` targets. Any
+  other target, such as `COMMENT ON TYPE`, is a syntax error rather than an
+  ignored statement.
+- `ALTER TABLE ... ADD CHECK (...)` without a constraint name is a syntax
+  error. The named `ADD CONSTRAINT name CHECK (...)` spelling is ignored as
+  listed above.
 
 ## Nulls
 
@@ -289,13 +348,13 @@ written by an earlier successful run is left unchanged. The writing step itself
 is sequential rather than atomic; see
 [Generated Output and Failures](configuration.md#generated-output-and-failures).
 
-A schema message names the schema source and the offending statement, the table
-or column the statement refers to, or the syntax error with the line and column
-it was found at. A query message names the
+A schema message names the schema source and the offending statement with the
+line it begins on, the table or column the statement refers to, or the syntax
+error with the line and column it was found at. A query message names the
 query, its source, its header line, and the offending column and recorded type:
 
 ```text
-sqlcj: Invalid schema source /home/dev/project/schema.sql: Unsupported schema statement: CreateView
+sqlcj: Invalid schema source /home/dev/project/schema.sql: Unsupported schema statement: CreateView at line 12
 sqlcj: Invalid schema source /home/dev/project/schema.sql: Encountered unexpected token: ";" at line 4, column 1
 sqlcj: Invalid query 'ListTags' in /home/dev/project/queries.sql at line 5: Column 'tags' has unsupported type VARCHAR[]
 ```
@@ -380,6 +439,33 @@ Ordered table DDL:
   `SqlcjCompilerIntegrationTest.shouldReportTheMigrationFileThatAltersAMissingTable`
   covers the file-naming diagnostic of a missing reference and that no file is
   written.
+
+Ignored statements:
+
+- `DefaultSchemaParserTest.shouldIgnoreDocumentedStatements` covers one spelling
+  per listed statement, including the lower-case `ALTER INDEX` form and
+  `CREATE OR REPLACE FUNCTION ... $$ ... $$ LANGUAGE plpgsql`, and
+  `DefaultSchemaParserTest.shouldIgnoreConstraintAlterTableActions` covers the
+  named and unnamed constraint actions.
+- `DefaultSchemaParserTest.shouldNotResolveAnIgnoredStatementAgainstTheSchema`
+  covers that an ignored statement may name an unmodeled table or column, and
+  `DefaultSchemaParserTest.shouldReportTheMissingTableOfAnIgnoredConstraintAction`
+  covers that an ignored `ALTER TABLE` action still resolves its table.
+- `DefaultSchemaParserTest.shouldApplyAModeledActionBesideAnIgnoredConstraintAction`
+  covers an ignored action beside a modeled one.
+- `DefaultSchemaParserTest.shouldRejectStatementOutsideTheIgnoredList` covers the
+  kind and the line of each rejected statement, including the single-quoted
+  function body, and
+  `DefaultSchemaParserTest.shouldRejectUnsupportedSchemaStatement` and
+  `DefaultSchemaParserTest.shouldReportTheLineOfARejectedStatementAfterCommentsAndAFunctionBody`
+  cover the reported line after comments that contain a statement separator and
+  after a multi-line dollar-quoted body.
+- `DefaultSchemaParserTest.shouldRejectASingleQuotedFunctionBodyThatCapturesALaterDollarQuotedBody`
+  covers that a single-quoted body is rejected at its own line even when it
+  captures a later dollar-quoted body.
+- `SqlcjCompilerIntegrationTest.shouldReportTheMigrationFileAndLineOfAnUnsupportedStatement`
+  covers the migration file and line of a rejected statement that follows an
+  ignored one, and that no file is written.
 
 Nulls:
 
