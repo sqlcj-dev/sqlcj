@@ -54,14 +54,16 @@ my-app/
 ├── pom.xml
 ├── sqlcj.yaml
 ├── sql/
-│   ├── queries.sql
-│   └── schema.sql
+│   ├── migrations/
+│   │   ├── V1__create_authors_and_books.sql
+│   │   └── V2__add_author_created_at_and_book_index.sql
+│   └── queries.sql
 ├── src/main/java/com/example/app/App.java
 └── tools/sqlcj-cli-0.1.0-SNAPSHOT.jar
 ```
 
 ```bash
-mkdir -p sql src/main/java/com/example/app
+mkdir -p sql/migrations src/main/java/com/example/app
 ```
 
 ## 4. `pom.xml`
@@ -140,7 +142,7 @@ Two details matter:
 version: "1"
 sql:
   - name: Author
-    schema: sql/schema.sql
+    schema: sql/migrations
     queries: sql/queries.sql
 java:
   package: com.example.app.db
@@ -157,18 +159,19 @@ relative paths above are resolved against the directory that contains the file.
 Generated output therefore belongs in the build directory, where `mvn clean`
 removes it. See [Configuration](configuration.md) for the full file format.
 
-## 6. `sql/schema.sql`
+## 6. `sql/migrations`
 
-The schema file is a snapshot of the tables the queries use. sqlcj reads it; it
-never runs it.
+The configured schema is a migration directory rather than one snapshot file.
+sqlcj reads its files; it never runs them.
+
+`sql/migrations/V1__create_authors_and_books.sql`:
 
 ```sql
 CREATE TABLE authors
 (
-    id         BIGSERIAL PRIMARY KEY,
-    name       VARCHAR(255) NOT NULL,
-    bio        TEXT,
-    created_at TIMESTAMP
+    id   BIGSERIAL PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    bio  TEXT
 );
 
 CREATE TABLE books
@@ -179,7 +182,29 @@ CREATE TABLE books
 );
 ```
 
-The accepted column types and `CREATE TABLE` constructs are listed in
+`sql/migrations/V2__add_author_created_at_and_book_index.sql`:
+
+```sql
+ALTER TABLE authors ADD COLUMN created_at TIMESTAMP;
+
+CREATE INDEX books_author_id_idx ON books (author_id);
+```
+
+A directory named by `sql[].schema` is read in Flyway version order, so `V1`
+comes before `V2` no matter how the filesystem lists the two files. The
+statements of both files build one schema model: `V2` applies its
+`ALTER TABLE ... ADD COLUMN` to the `authors` table `V1` created, appending
+`created_at` after `bio`, and its `CREATE INDEX` is accepted and ignored,
+because an index changes no column the queries can read. The modeled tables are
+therefore exactly the two tables the queries use, with `authors` carrying `id`,
+`name`, `bio`, and `created_at` in that order.
+
+See [`sql[].schema`](configuration.md#sqlschema) for the directory and ordering
+rules, [Ordered Table DDL](postgresql.md#ordered-table-ddl) for the statements
+that update an already modeled table, and
+[Ignored Statements](postgresql.md#ignored-statements) for the statements that
+are accepted without changing the model. The accepted column types and
+`CREATE TABLE` constructs are listed in
 [PostgreSQL Support](postgresql.md).
 
 ## 7. `sql/queries.sql`
@@ -381,7 +406,7 @@ One repository instance serves the whole `DataSource`-backed execution context,
 and each transaction constructs another repository over its caller-owned
 connection. No code constructs a type per query.
 
-## 9. Start PostgreSQL and apply the schema
+## 9. Start PostgreSQL and apply the migrations
 
 ```bash
 docker run --rm -d --name sqlcj-quickstart \
@@ -391,13 +416,17 @@ docker run --rm -d --name sqlcj-quickstart \
   -p 5432:5432 \
   postgres:16-alpine
 
-docker exec -i sqlcj-quickstart psql -U quickstart -d quickstart < sql/schema.sql
+docker exec -i sqlcj-quickstart psql -U quickstart -d quickstart \
+  < sql/migrations/V1__create_authors_and_books.sql
+docker exec -i sqlcj-quickstart psql -U quickstart -d quickstart \
+  < sql/migrations/V2__add_author_created_at_and_book_index.sql
 ```
 
-sqlcj does not create or migrate tables. Applying the same snapshot text that
-the compiler reads initializes the walkthrough database consistently with the
-compiler's input. sqlcj never inspects the live database, so keeping the
-snapshot synchronized with later database changes is your responsibility.
+sqlcj reads the migration files and never runs them. Applying them is the job of
+the application's migration tool, which is `psql` in the two commands above, run
+in the same version order sqlcj reads them in. sqlcj never inspects the live
+database, so keeping the migration directory the compiler reads and the database
+the application connects to in step is your responsibility.
 
 ## 10. Generate, compile, and run
 
@@ -493,7 +522,8 @@ That output is the whole MVP contract in one run:
 
 ## 11. Re-running after a SQL change
 
-After editing `sql/schema.sql` or `sql/queries.sql`, repeat the same order:
+After adding a migration under `sql/migrations` or editing `sql/queries.sql`,
+repeat the same order:
 
 ```bash
 mvn clean

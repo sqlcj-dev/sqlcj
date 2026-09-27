@@ -41,8 +41,9 @@ import java.util.Optional;
  * <p>Every step is checked, so the process exits non-zero as soon as one
  * generated operation returns an unexpected result.
  *
- * <p>The verification harness applies {@code sql/schema.sql} to empty
- * {@code authors} and {@code books} tables before this application runs.
+ * <p>The verification harness applies the {@code sql/migrations} files in
+ * version order to empty {@code authors} and {@code books} tables before this
+ * application runs.
  */
 public final class App {
 

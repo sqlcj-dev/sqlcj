@@ -59,7 +59,7 @@ sample_mvn() {
         "$@"
 }
 
-command -v psql >/dev/null 2>&1 || fail "psql is required to apply the sample schema"
+command -v psql >/dev/null 2>&1 || fail "psql is required to apply the sample migrations"
 
 log "Staging the reactor into ${local_repo}"
 
@@ -160,10 +160,10 @@ cat > "${regeneration_dir}/author-and-library.yaml" <<'YAML'
 version: "1"
 sql:
   - name: Author
-    schema: ../sample/sql/schema.sql
+    schema: ../sample/sql/migrations
     queries: ../sample/sql/queries.sql
   - name: Library
-    schema: ../sample/sql/schema.sql
+    schema: ../sample/sql/migrations
     queries: ../sample/sql/queries.sql
 java:
   package: com.example.app.db
@@ -174,7 +174,7 @@ cat > "${regeneration_dir}/writer.yaml" <<'YAML'
 version: "1"
 sql:
   - name: Writer
-    schema: ../sample/sql/schema.sql
+    schema: ../sample/sql/migrations
     queries: ../sample/sql/queries.sql
 java:
   package: com.example.app.db
@@ -230,6 +230,9 @@ for method in createAuthor getAuthor findAuthor listAuthors updateAuthorBio dele
         || fail "the generated repository is missing the ${method} method"
 done
 
+grep -q "LocalDateTime createdAt" "${generated_package}/AuthorRepository.java" \
+    || fail "the generated row is missing the column the second migration adds"
+
 diff -r "${first_generation}" "${generated_root}" \
     || fail "generating from the sample directory did not restore its first generated output"
 
@@ -251,16 +254,17 @@ fi
 
 tr ':' '\n' < "${classpath_file}"
 
-log "Applying the sample schema to ${jdbc_url}"
+log "Applying the sample migrations to ${jdbc_url}"
 
 # psql accepts the JDBC URL as a connection URI once the 'jdbc:' prefix is
-# removed, so the sample and the schema reset share one setting.
+# removed, so the sample and the migration reset share one setting.
 PGPASSWORD="${db_password}" psql \
     --set=ON_ERROR_STOP=1 \
     --quiet \
     --username "${db_user}" \
     --command 'DROP TABLE IF EXISTS books, authors;' \
-    --file "${sample_dir}/sql/schema.sql" \
+    --file "${sample_dir}/sql/migrations/V1__create_authors_and_books.sql" \
+    --file "${sample_dir}/sql/migrations/V2__add_author_created_at_and_book_index.sql" \
     "${jdbc_url#jdbc:}"
 
 log "Compiling the sample against the staged runtime"
