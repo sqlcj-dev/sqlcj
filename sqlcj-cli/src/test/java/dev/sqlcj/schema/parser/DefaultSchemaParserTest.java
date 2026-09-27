@@ -348,25 +348,65 @@ class DefaultSchemaParserTest {
         );
     }
 
+    /**
+     * A column of a type sqlcj cannot map, including every array column, is
+     * recorded with its declared type text instead of failing the schema, so
+     * only a query that uses the column fails. The recorded text is the
+     * canonical spelling of the declared type, followed by {@code []} per
+     * declared array dimension.
+     */
     @ParameterizedTest
-    @ValueSource(
-        strings = {
-            "JSONB",
-            "DOUBLE PRECISION",
-            "\"char\""
+    @CsvSource(
+        {
+            "JSONB, JSONB",
+            "DOUBLE PRECISION, DOUBLE PRECISION",
+            "\"char\", \"CHAR\"",
+            "varchar(20)[], VARCHAR[]",
+            "integer[][], INTEGER[][]",
+            "'numeric(10, 2)[3]', NUMERIC[]"
         }
     )
-    void shouldRejectUnsupportedColumnType(String sqlType) {
+    void shouldRecordUnsupportedColumnType(String sqlType, String recordedType) {
         String sql = """
             CREATE TABLE users (
+                id    BIGINT NOT NULL,
                 value %s
             );
             """
             .formatted(sqlType);
 
-        assertThrows(
-            UnsupportedOperationException.class,
-            () -> parser.parse(sql)
+        Table table = parser.parse(sql).tables().getFirst();
+
+        assertEquals(
+            List.of(
+                new Column("id", ColumnType.BIGINT, false),
+                new Column("value", null, true, recordedType)
+            ),
+            table.columns()
+        );
+    }
+
+    /**
+     * A recorded column's nullability is parsed from {@code NOT NULL} like any
+     * other column's.
+     */
+    @Test
+    void shouldParseNullabilityOfUnsupportedColumnTypes() {
+        String sql = """
+            CREATE TABLE users (
+                tags     INT[] NOT NULL,
+                metadata JSONB
+            );
+            """;
+
+        Table table = parser.parse(sql).tables().getFirst();
+
+        assertEquals(
+            List.of(
+                new Column("tags", null, false, "INT[]"),
+                new Column("metadata", null, true, "JSONB")
+            ),
+            table.columns()
         );
     }
 

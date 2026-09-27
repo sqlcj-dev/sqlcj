@@ -336,7 +336,7 @@ public final class QueryAnalyzer {
             return List.of(
                 new QueryColumn(
                     schemaColumn.name(),
-                    schemaColumn.type(),
+                    requireSupportedType(schemaColumn),
                     schemaColumn.nullable()
                 )
             );
@@ -1029,9 +1029,13 @@ public final class QueryAnalyzer {
             return;
         }
 
+        dev.sqlcj.schema.Column schemaColumn = resolveColumn(column, sources).column();
+
+        requireSupportedType(schemaColumn);
+
         addParameter(
             parameter,
-            requireTextColumn(resolveColumn(column, sources).column()),
+            requireTextColumn(schemaColumn),
             parameters
         );
     }
@@ -1182,7 +1186,7 @@ public final class QueryAnalyzer {
         addParameter(
             parameter,
             column.name(),
-            column.type(),
+            requireSupportedType(column),
             parameters
         );
     }
@@ -1272,7 +1276,7 @@ public final class QueryAnalyzer {
                 columns.add(
                     new QueryColumn(
                         selectedColumnName(selectItem.getAlias(), schemaColumn),
-                        schemaColumn.type(),
+                        requireSupportedType(schemaColumn),
                         schemaColumn.nullable() || resolved.source().leftJoined()
                     )
                 );
@@ -1457,11 +1461,27 @@ public final class QueryAnalyzer {
             .map(
                 column -> new QueryColumn(
                     column.name(),
-                    column.type(),
+                    requireSupportedType(column),
                     column.nullable() || source.leftJoined()
                 )
             )
             .toList();
+    }
+
+    /**
+     * Reports the analyzed type of a schema column. A column the schema
+     * recorded without a mapped type fails here, in the query that reads,
+     * binds, or expands it, rather than when the schema is parsed.
+     */
+    private ColumnType requireSupportedType(dev.sqlcj.schema.Column column) {
+        if (column.type() == null) {
+            throw new UnsupportedOperationException(
+                "Column '%s' has unsupported type %s"
+                    .formatted(column.name(), column.unsupportedType())
+            );
+        }
+
+        return column.type();
     }
 
     private dev.sqlcj.schema.Column findColumn(dev.sqlcj.schema.Table table, String columnName) {
