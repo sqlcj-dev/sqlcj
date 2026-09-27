@@ -123,7 +123,10 @@ accepted and map exactly like their unparameterized spellings.
 | `DECIMAL`, `NUMERIC` | `java.math.BigDecimal` | |
 | `UUID` | `java.util.UUID` | |
 
-Any spelling that is not listed above is rejected.
+Any spelling that is not listed above, and any array of any element type, has no
+Java mapping. Such a column is recorded with its declared type instead of
+failing the schema, and fails only a query that uses it; see
+[Unsupported Types and DDL](#unsupported-types-and-ddl).
 
 The generated repository imports `java.time.LocalDate`, `java.time.LocalDateTime`,
 `java.time.OffsetDateTime`, `java.math.BigDecimal`, and `java.util.UUID` as
@@ -200,9 +203,8 @@ columns of the integration schema snapshot, which cover `SMALLINT`, `VARCHAR`,
 
 ## Unsupported Types and DDL
 
-The following type families are not supported at all, because only the
-spellings listed in [Supported Column Types](#supported-column-types) are
-accepted:
+The following type families have no Java mapping, because only the spellings
+listed in [Supported Column Types](#supported-column-types) are mapped:
 
 - floating point, such as `REAL` and `DOUBLE PRECISION`,
 - binary, such as `BYTEA`,
@@ -214,10 +216,28 @@ accepted:
 - composite types,
 - spatial types.
 
+A column of such a type does not fail the schema. It is recorded with its
+declared type, written as the canonical spelling of that type — upper case, with
+parenthesized type arguments removed — followed by `[]` for each declared array
+dimension, so `jsonb` is recorded as `JSONB`, `varchar(20)[]` as `VARCHAR[]`,
+and `integer[][]` as `INTEGER[][]`.
+
+A recorded column fails only the analysis of a query that
+
+- reads it, as a `SELECT` item or a `RETURNING` item,
+- binds it, meaning a placeholder takes its type in a comparison, an `IN` list,
+  a range bound, a `LIKE`/`ILIKE` pattern, an `INSERT` column, or an `UPDATE`
+  assignment, or
+- expands it, through `SELECT *`, `SELECT qualifier.*`, or `RETURNING *`.
+
+Every other query over the same table compiles, including one that references
+the column without using its type, such as `WHERE tags IS NULL`.
+
 ### Failure Behavior
 
-An unsupported type, an unsupported statement, or a schema sqlcj cannot parse
-stops compilation. `sqlcj generate` prints a single message on standard error
+An unsupported statement, a schema sqlcj cannot parse, or a query that uses a
+column of an unmapped type stops compilation. `sqlcj generate` prints a single
+message on standard error
 and exits with status `1`. Because every configured source is analyzed and
 generated before the run writes its first file, such a failure writes no
 generated file, and output
@@ -225,13 +245,14 @@ written by an earlier successful run is left unchanged. The writing step itself
 is sequential rather than atomic; see
 [Generated Output and Failures](configuration.md#generated-output-and-failures).
 
-The message names the schema source and the offending type or statement, or the
-syntax error with the line and column it was found at:
+A schema message names the schema source and the offending statement, or the
+syntax error with the line and column it was found at. A query message names the
+query, its source, its header line, and the offending column and recorded type:
 
 ```text
-sqlcj: Invalid schema source /home/dev/project/schema.sql: Unsupported SQL column type: JSONB
 sqlcj: Invalid schema source /home/dev/project/schema.sql: Unsupported schema statement: Alter
 sqlcj: Invalid schema source /home/dev/project/schema.sql: Encountered unexpected token: ";" <ST_SEMICOLON> at line 4, column 1
+sqlcj: Invalid query 'ListTags' in /home/dev/project/queries.sql at line 5: Column 'tags' has unsupported type VARCHAR[]
 ```
 
 ## Verified by
@@ -248,8 +269,19 @@ Type table:
   and `PostgresIntegrationTest.shouldRoundTripPostgresTypeSpellingValues`
   execute the Java mappings, including the blank-padded `CHAR` values, against
   PostgreSQL 16.
-- `DefaultSchemaParserTest.shouldRejectUnsupportedColumnType` covers the
-  rejected spellings.
+- `DefaultSchemaParserTest.shouldRecordUnsupportedColumnType` and
+  `DefaultSchemaParserTest.shouldParseNullabilityOfUnsupportedColumnTypes` cover
+  the recorded type of an unmapped spelling and of an array, beside the mapped
+  columns of the same table.
+- `QueryAnalyzerTest.shouldRejectQueryThatUsesAnUnsupportedTypeColumn` covers
+  each reading, binding, and expanding query, and
+  `QueryAnalyzerTest.shouldAnalyzeQueryBesideAnUnsupportedTypeColumn` and
+  `QueryAnalyzerTest.shouldAnalyzeIsNullOnAnUnsupportedTypeColumn` cover the
+  queries over the same table that still compile.
+- `SqlcjCompilerIntegrationTest.shouldReportTheQueryThatReadsAnUnsupportedTypeColumn`
+  covers the query diagnostic and that no file is written, and
+  `SqlcjCompilerIntegrationTest.shouldGenerateCompilableRepositoryBesideUnsupportedTypeColumns`
+  compiles a repository generated beside an array and a `JSONB` column.
 
 `CREATE TABLE` table:
 
