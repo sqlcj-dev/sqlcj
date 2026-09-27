@@ -2318,6 +2318,91 @@ class SqlcjCompilerIntegrationTest {
         assertFalse(Files.exists(generatedDirectory));
     }
 
+    /**
+     * A column of a type sqlcj cannot map loads with the schema, so only the
+     * query that reads it fails, naming the query, its file and line, the
+     * column, and the recorded type.
+     */
+    @Test
+    void shouldReportTheQueryThatReadsAnUnsupportedTypeColumn() throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE users
+                (
+                    id   BIGINT NOT NULL,
+                    tags VARCHAR(20)[]
+                );
+                """
+        );
+
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: ListUsers :many
+                SELECT id
+                FROM users;
+
+                -- name: ListTags :many
+                SELECT tags
+                FROM users;
+                """
+        );
+
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> generateUsersRepository(
+                List.of(schemaFile.toString()),
+                queriesFile,
+                generatedDirectory
+            )
+        );
+
+        assertEquals(
+            "Invalid query 'ListTags' in %s at line 5: ".formatted(queriesFile)
+                + "Column 'tags' has unsupported type VARCHAR[]",
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    /**
+     * A query that uses none of the recorded columns of its table generates a
+     * repository that compiles.
+     */
+    @Test
+    void shouldGenerateCompilableRepositoryBesideUnsupportedTypeColumns() throws IOException {
+        generateAndCompile(
+            """
+                CREATE TABLE users
+                (
+                    id       BIGINT NOT NULL,
+                    name     VARCHAR(255),
+                    tags     VARCHAR(20)[],
+                    metadata JSONB
+                );
+                """,
+            """
+                -- name: ListUsers :many
+                SELECT id, name
+                FROM users
+                WHERE name = $1;
+
+                -- name: UpdateUserName :exec
+                UPDATE users
+                SET name = $1
+                WHERE id = $2;
+                """
+        );
+    }
+
     /** Generates the one repository of the {@code Users} group. */
     private Path generateUsersRepository(
         List<String> schema,

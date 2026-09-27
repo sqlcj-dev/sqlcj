@@ -51,6 +51,24 @@ class QueryAnalyzerTest {
         )
     );
 
+    /**
+     * A schema whose {@code tags} column the parser recorded without a mapped
+     * type, beside the supported columns of the same table.
+     */
+    private static final Schema unsupportedTypeSchema = new Schema(
+        List.of(
+            new Table(
+                "users",
+                List.of(
+                    new Column("id", ColumnType.BIGINT, false),
+                    new Column("name", ColumnType.VARCHAR, true),
+                    new Column("tags", null, true, "VARCHAR[]")
+                ),
+                List.of()
+            )
+        )
+    );
+
     private static final Schema joinSchema = new Schema(
         List.of(
             new Table(
@@ -2835,6 +2853,90 @@ class QueryAnalyzerTest {
         assertEquals(
             List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
             model.parameters()
+        );
+    }
+
+    /**
+     * A column the schema recorded without a mapped type fails the query that
+     * reads, binds, or expands it, naming the column and the recorded type.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        value = {
+            "SELECT tags FROM users|MANY",
+            "SELECT * FROM users|MANY",
+            "SELECT b.* FROM users b|MANY",
+            "SELECT id FROM users WHERE tags = $1|MANY",
+            "SELECT id FROM users WHERE tags IN ($1)|MANY",
+            "SELECT id FROM users WHERE tags LIKE $1|MANY",
+            "INSERT INTO users (tags) VALUES ($1)|EXEC",
+            "UPDATE users SET tags = $1|EXEC",
+            "DELETE FROM users WHERE id = $1 RETURNING tags|MANY",
+            "DELETE FROM users WHERE id = $1 RETURNING *|MANY"
+        }
+    )
+    void shouldRejectQueryThatUsesAnUnsupportedTypeColumn(String sql, QueryType type) {
+        Query query = new Query("UseTags", type, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, unsupportedTypeSchema)
+        );
+
+        assertEquals(
+            "Column 'tags' has unsupported type VARCHAR[]",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A query that neither reads, binds, nor expands the recorded column is
+     * analyzed exactly as it is over a table without that column. Both schemas
+     * declare the same {@code id} and {@code name} columns, and neither query
+     * references any other column.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "SELECT id, name FROM users WHERE id = $1",
+            "SELECT COUNT(*) AS total FROM users"
+        }
+    )
+    void shouldAnalyzeQueryBesideAnUnsupportedTypeColumn(String sql) {
+        Query query = new Query("ReadUsers", QueryType.MANY, sql);
+
+        assertEquals(
+            analyzer.analyze(query, parser.parse(sql), schema),
+            analyzer.analyze(query, parser.parse(sql), unsupportedTypeSchema)
+        );
+    }
+
+    /**
+     * {@code IS NULL} consumes no column type, so it resolves the recorded
+     * column without failing.
+     */
+    @Test
+    void shouldAnalyzeIsNullOnAnUnsupportedTypeColumn() {
+        String sql = "SELECT id FROM users WHERE tags IS NULL";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUntagged", QueryType.MANY, sql),
+            parser.parse(sql),
+            unsupportedTypeSchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            model.columns()
+        );
+
+        assertTrue(model.parameters().isEmpty());
+
+        assertEquals(
+            "SELECT id FROM users WHERE tags IS NULL",
+            model.executableSql()
         );
     }
 }

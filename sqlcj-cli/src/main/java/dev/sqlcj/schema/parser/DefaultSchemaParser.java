@@ -72,14 +72,43 @@ public class DefaultSchemaParser implements SchemaParser {
         );
     }
 
+    /**
+     * Parses one column, recording a column sqlcj cannot map with its declared
+     * type text instead of failing the schema. An array column is such a column
+     * regardless of its element type, because the mapped types are all scalar.
+     */
     private Column parseColumn(ColumnDefinition definition) {
         String typeName = typeName(definition);
+        int arrayDimensions = arrayDimensions(definition);
+        boolean nullable = !isSerial(typeName) && isNullable(definition);
+
+        ColumnType type = arrayDimensions == 0
+            ? columnType(typeName)
+            : null;
+
+        if (type != null) {
+            return new Column(columnName(definition), type, nullable);
+        }
 
         return new Column(
             columnName(definition),
-            columnType(typeName),
-            !isSerial(typeName) && isNullable(definition)
+            null,
+            nullable,
+            typeName + "[]".repeat(arrayDimensions)
         );
+    }
+
+    /**
+     * Reports how many array dimensions a column declares. The parser reports
+     * an array's dimensions separately from its element type, so a column with
+     * any dimension is an array of the reported type.
+     */
+    private int arrayDimensions(ColumnDefinition definition) {
+        List<Integer> arrayData = definition.getColDataType().getArrayData();
+
+        return arrayData == null
+            ? 0
+            : arrayData.size();
     }
 
     /**
@@ -106,6 +135,7 @@ public class DefaultSchemaParser implements SchemaParser {
             .trim();
     }
 
+    /** The mapped type of declared spelling, or {@code null} if unmapped. */
     private ColumnType columnType(String typeName) {
         return switch (typeName) {
             case "INTEGER", "INT", "INT4", "SERIAL", "SERIAL4" -> ColumnType.INTEGER;
@@ -119,9 +149,7 @@ public class DefaultSchemaParser implements SchemaParser {
             case "TIMESTAMP WITH TIME ZONE", "TIMESTAMPTZ" -> ColumnType.TIMESTAMP_WITH_TIME_ZONE;
             case "DECIMAL", "NUMERIC" -> ColumnType.DECIMAL;
             case "UUID" -> ColumnType.UUID;
-            default -> throw new UnsupportedOperationException(
-                "Unsupported SQL column type: " + typeName
-            );
+            default -> null;
         };
     }
 
