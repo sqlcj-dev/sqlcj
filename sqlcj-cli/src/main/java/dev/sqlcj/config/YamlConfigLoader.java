@@ -246,7 +246,7 @@ public class YamlConfigLoader implements ConfigLoader {
             .map(
                 entry -> new SqlConfig(
                     entry.name(),
-                    resolvePath(entry.schema(), baseDirectory),
+                    resolvePaths(entry.schema(), baseDirectory),
                     resolvePath(entry.queries(), baseDirectory)
                 )
             )
@@ -258,6 +258,12 @@ public class YamlConfigLoader implements ConfigLoader {
         );
 
         return new Config(config.version(), sql, java);
+    }
+
+    private List<String> resolvePaths(List<String> values, Path baseDirectory) {
+        return values.stream()
+            .map(value -> resolvePath(value, baseDirectory))
+            .toList();
     }
 
     private String resolvePath(String value, Path baseDirectory) {

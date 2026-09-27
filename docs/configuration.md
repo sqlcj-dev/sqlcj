@@ -56,7 +56,7 @@ java:
 | `version` | string | Configuration contract version. Must be `"1"`. |
 | `sql` | list | Non-empty, ordered list of source entries. |
 | `sql[].name` | string | Identity of the query group. Names the generated repository. |
-| `sql[].schema` | string | Path to a file containing `CREATE TABLE` statements. |
+| `sql[].schema` | string or list | One path, or a non-empty ordered list of paths, to a file containing `CREATE TABLE` statements or to a directory of `.sql` migration files. |
 | `sql[].queries` | string | Path to a file containing named queries. |
 | `java` | mapping | Java generation settings. |
 | `java.package` | string | Package of the generated Java classes. |
@@ -70,7 +70,7 @@ against that entry's own schema, and query order inside a query file is
 preserved.
 
 Schemas are not shared or merged between entries. A query can only use tables
-declared in the schema file of its own entry.
+declared in the schema sources of its own entry.
 
 One entry generates exactly one repository containing every query of its query
 source, in declared query order. Query names are therefore scoped to their
@@ -97,6 +97,64 @@ sqlcj: Invalid configuration in /home/dev/project/sqlcj.yaml: 'sql[0].name' valu
 sqlcj does not derive the name from a table or a file name. A query file may
 join or write several tables, so the group boundary is declared, not guessed.
 
+### `sql[].schema`
+
+`sql[].schema` is either one path or a non-empty ordered list of paths:
+
+```yaml
+sql:
+  - name: Author
+    schema: sql/authors/schema.sql
+    queries: sql/authors/queries.sql
+  - name: Order
+    schema:
+      - sql/orders/baseline.sql
+      - sql/orders/migrations
+    queries: sql/orders/queries.sql
+```
+
+A listed path is either a file, which contributes itself, or a directory, which
+contributes the regular files in it whose name ends in `.sql`. A directory is
+read non-recursively, and the name match is case-sensitive: a subdirectory and a
+file named anything else, including `schema.SQL`, are ignored. The listed paths
+keep their declared order and each directory is expanded in place.
+
+A directory is ordered like a Flyway migration directory:
+
+1. A versioned migration file, named `V<version>__<description>.sql` with
+   version parts separated by `.` or `_`, comes first. Two versions are compared
+   part by part as numbers, counting a missing trailing part as zero, so
+   `V1__init.sql`, `V1_1__add_index.sql`, `V2__add_orders.sql`, and
+   `V10__add_totals.sql` are ordered exactly that way.
+2. Every other `.sql` file follows, ordered by file name.
+3. An undo file, named `U<version>__<description>.sql`, is ignored.
+
+The order never depends on how the filesystem lists the directory. sqlcj only
+reads the files, so a Flyway placeholder, a configured file-name prefix, and a
+repeatable migration have no meaning of their own.
+
+Each schema file is parsed on its own, and the tables of the entry follow file
+order, so a schema failure names the file that contains it:
+
+```text
+sqlcj: Invalid schema source /home/dev/project/sql/orders/migrations/V2__add_orders.sql: Unsupported schema statement: Alter
+```
+
+A directory that contributes no file, and two versioned files of one directory
+that declare the same version, are invalid schema input:
+
+```text
+sqlcj: Invalid schema source /home/dev/project/sql/orders/migrations: directory contains no .sql files
+sqlcj: Invalid schema source /home/dev/project/sql/orders/migrations: duplicate migration version in V1_0__add_index.sql and V1__init.sql
+```
+
+A configured path that cannot be read, whether it is a file or a directory,
+ends the run the same way:
+
+```text
+sqlcj: Cannot read schema source: /home/dev/project/sql/orders/migrations: Permission denied
+```
+
 ### `java.package`
 
 `java.package` must be a dot-separated sequence of valid, non-keyword Java
@@ -115,14 +173,14 @@ generated/dev/example/generated/AuthorRepository.java
 - String values must not be blank.
 - Unknown fields are rejected.
 - Wrong-typed fields are rejected, including an unquoted numeric `version`.
-- A missing or unsupported `version`, a missing section, an empty `sql` list, a
-  null `sql` entry, a blank value, an invalid `sql[].name`, and an invalid
-  `java.package` are all invalid configuration.
+- A missing or unsupported `version`, a missing section, an empty `sql` list, an
+  empty `sql[].schema` list, a null `sql` entry, a blank value, an invalid
+  `sql[].name`, and an invalid `java.package` are all invalid configuration.
 
 ## Path Resolution
 
-A relative `schema`, `queries`, or `java.out` path is resolved against the
-directory that contains the configuration file, whether that file is the
+A relative `queries`, `java.out`, or listed `schema` path is resolved against
+the directory that contains the configuration file, whether that file is the
 default `sqlcj.yaml` or one named by `--config`, and not against the process
 working directory at a later point in time. An absolute path is used as-is.
 

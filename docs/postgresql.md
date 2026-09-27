@@ -87,12 +87,15 @@ test-scoped dependencies of the build.
 
 ## Schema Snapshot Input
 
-A `sql[].schema` file is an explicit snapshot of the tables a query may use.
+`sql[].schema` is an explicit snapshot of the tables a query may use. It is one
+file, a list of files, or a directory of `.sql` migration files; see
+[`sql[].schema`](configuration.md#sqlschema) for the accepted forms and the
+order the files are read in.
 
-- Only `CREATE TABLE` statements are accepted. Any other statement in the file
-  is rejected.
+- Only `CREATE TABLE` statements are accepted. Any other statement in a schema
+  file is rejected.
 - A file may contain several `CREATE TABLE` statements, and table order is
-  preserved.
+  preserved across the schema files of one entry.
 - SQL identifier delimiters are removed for the parsed model, so the table
   `"user data"` is modeled as `user data` and the column `"user id"` is modeled
   as `user id`.

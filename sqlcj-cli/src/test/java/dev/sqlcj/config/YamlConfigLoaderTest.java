@@ -39,7 +39,7 @@ class YamlConfigLoaderTest {
         assertEquals(1, config.sql().size());
         assertEquals("Users", config.sql().getFirst().name());
         assertEquals(
-            tempDir.resolve("schema.sql").toString(),
+            List.of(tempDir.resolve("schema.sql").toString()),
             config.sql().getFirst().schema()
         );
         assertEquals(
@@ -53,6 +53,104 @@ class YamlConfigLoaderTest {
         assertEquals(
             tempDir.resolve("generated").toString(),
             config.java().out()
+        );
+    }
+
+    @Test
+    void shouldResolveEveryListedSchemaPath() throws IOException {
+        Path configFile = write("""
+            version: "1"
+            sql:
+              - name: Users
+                schema:
+                  - sql/baseline.sql
+                  - sql/migrations
+                queries: queries.sql
+            java:
+              package: dev.example.generated
+              out: generated
+            """);
+
+        Config config = configLoader.load(configFile);
+
+        assertEquals(
+            List.of(
+                tempDir.resolve("sql/baseline.sql").toString(),
+                tempDir.resolve("sql/migrations").toString()
+            ),
+            config.sql().getFirst().schema()
+        );
+    }
+
+    @Test
+    void shouldRejectBlankSchemaValue() throws IOException {
+        Path configFile = write("""
+            version: "1"
+            sql:
+              - name: Users
+                schema: "  "
+                queries: queries.sql
+            java:
+              package: dev.example.generated
+              out: generated
+            """);
+
+        assertInvalid(configFile, "'sql[0].schema' must not be blank");
+    }
+
+    @Test
+    void shouldRejectEmptySchemaList() throws IOException {
+        Path configFile = write("""
+            version: "1"
+            sql:
+              - name: Users
+                schema: []
+                queries: queries.sql
+            java:
+              package: dev.example.generated
+              out: generated
+            """);
+
+        assertInvalid(configFile, "'sql[0].schema' must contain at least one path");
+    }
+
+    @Test
+    void shouldRejectBlankListedSchemaPath() throws IOException {
+        Path configFile = write("""
+            version: "1"
+            sql:
+              - name: Users
+                schema:
+                  - schema.sql
+                  - "  "
+                queries: queries.sql
+            java:
+              package: dev.example.generated
+              out: generated
+            """);
+
+        assertInvalid(configFile, "'sql[0].schema[1]' must not be blank");
+    }
+
+    @Test
+    void shouldRejectWrongTypedListedSchemaPath() throws IOException {
+        Path configFile = write("""
+            version: "1"
+            sql:
+              - name: Users
+                schema:
+                  - schema.sql
+                  - 42
+                queries: queries.sql
+            java:
+              package: dev.example.generated
+              out: generated
+            """);
+
+        assertInvalid(
+            configFile,
+            "invalid 'sql[0].schema[1]' value '42' of type number, "
+                + "expected a string"
         );
     }
 
@@ -79,7 +177,7 @@ class YamlConfigLoaderTest {
                 tempDir.resolve("users.sql").toString(),
                 tempDir.resolve("orders.sql").toString()
             ),
-            config.sql().stream().map(SqlConfig::schema).toList()
+            config.sql().stream().flatMap(entry -> entry.schema().stream()).toList()
         );
 
         assertEquals(
@@ -115,7 +213,7 @@ class YamlConfigLoaderTest {
         );
 
         assertEquals(
-            tempDir.resolve("project/sql/schema.sql").toString(),
+            List.of(tempDir.resolve("project/sql/schema.sql").toString()),
             config.sql().getFirst().schema()
         );
 
@@ -153,7 +251,7 @@ class YamlConfigLoaderTest {
         Config config = configLoader.load(configFile);
 
         assertEquals(
-            schemaFile.toString(),
+            List.of(schemaFile.toString()),
             config.sql().getFirst().schema()
         );
 
@@ -490,7 +588,7 @@ class YamlConfigLoaderTest {
         assertEquals("Author", config.sql().getFirst().name());
 
         assertEquals(
-            tempDir.resolve("sql/schema.sql").toString(),
+            List.of(tempDir.resolve("sql/schema.sql").toString()),
             config.sql().getFirst().schema()
         );
     }
