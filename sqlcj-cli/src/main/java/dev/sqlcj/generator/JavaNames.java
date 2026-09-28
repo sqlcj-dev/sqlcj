@@ -143,6 +143,64 @@ final class JavaNames {
         );
     }
 
+    /**
+     * The Java type generated for one enum type, which is the upper camel form
+     * of its PostgreSQL name, as in {@code stage_setting} to
+     * {@code StageSetting}.
+     */
+    static String enumTypeName(String enumName) {
+        return upperCamelCase(enumName, null);
+    }
+
+    /**
+     * The constants generated for the labels of one enum type, in label order.
+     * A constant is the label's words, upper-cased and joined with {@code _},
+     * so {@code in progress} and {@code in-progress} both become
+     * {@code IN_PROGRESS}, and {@code InProgress}, which is one word, becomes
+     * {@code INPROGRESS}.
+     *
+     * <p>A label with no letter and no digit generates no constant, and two
+     * labels that generate one constant are rejected, because a generated
+     * constant is a name the application reads.
+     */
+    static List<String> enumConstantNames(String enumName, List<String> labels) {
+        Map<String, String> labelsByConstant = new LinkedHashMap<>();
+        List<String> constants = new ArrayList<>(labels.size());
+
+        for (String label : labels) {
+            String constant = enumConstantName(enumName, label);
+            String previous = labelsByConstant.putIfAbsent(constant, label);
+
+            if (previous != null) {
+                throw new IllegalArgumentException(
+                    "Labels '%s' and '%s' of enum type '%s' generate the same constant %s"
+                        .formatted(previous, label, enumName, constant)
+                );
+            }
+
+            constants.add(constant);
+        }
+
+        return List.copyOf(constants);
+    }
+
+    private static String enumConstantName(String enumName, String label) {
+        List<String> words = splitWords(label);
+
+        if (words.isEmpty()) {
+            throw new IllegalArgumentException(
+                "Label '%s' of enum type '%s' has no letter or digit to generate a Java constant from"
+                    .formatted(label, enumName)
+            );
+        }
+
+        return startIdentifier(
+            words.stream()
+                .map(word -> word.toUpperCase(Locale.ROOT))
+                .collect(Collectors.joining("_"))
+        );
+    }
+
     String repositoryClassName() {
         return repositoryClassName;
     }
@@ -524,6 +582,26 @@ final class JavaNames {
      * such as {@code ID} or {@code URL} becomes one ordinary word.
      */
     private static List<String> words(String sqlName, String queryName) {
+        List<String> words = splitWords(sqlName);
+
+        if (words.isEmpty()) {
+            throw new IllegalArgumentException(
+                queryName == null
+                    ? "SQL name '%s' has no letter or digit to generate a Java name from"
+                        .formatted(sqlName)
+                    : "SQL name '%s' of query '%s' has no letter or digit to generate a Java name from"
+                        .formatted(sqlName, queryName)
+            );
+        }
+
+        return words;
+    }
+
+    /**
+     * Splits a SQL name into its words, which is empty for a name with no
+     * letter and no digit at all.
+     */
+    private static List<String> splitWords(String sqlName) {
         List<String> words = new ArrayList<>();
         StringBuilder word = new StringBuilder();
         int index = 0;
@@ -541,16 +619,6 @@ final class JavaNames {
         }
 
         addWord(words, word);
-
-        if (words.isEmpty()) {
-            throw new IllegalArgumentException(
-                queryName == null
-                    ? "SQL name '%s' has no letter or digit to generate a Java name from"
-                        .formatted(sqlName)
-                    : "SQL name '%s' of query '%s' has no letter or digit to generate a Java name from"
-                        .formatted(sqlName, queryName)
-            );
-        }
 
         return words;
     }

@@ -17,5 +17,11 @@ public enum ColumnType {
     UUID,
     BYTEA,
     JSON,
-    JSONB
+    JSONB,
+
+    /**
+     * A column of a declared enum type, whose Java type is the enum generated
+     * for the type named by the column.
+     */
+    ENUM
 }

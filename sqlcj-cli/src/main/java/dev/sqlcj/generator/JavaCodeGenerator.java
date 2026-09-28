@@ -6,6 +6,7 @@ import dev.sqlcj.analysis.QueryModel;
 import dev.sqlcj.analysis.QueryParameter;
 import dev.sqlcj.parser.QueryType;
 import dev.sqlcj.schema.ColumnType;
+import dev.sqlcj.schema.EnumType;
 import dev.sqlcj.type.DefaultTypeResolver;
 import dev.sqlcj.type.TypeResolver;
 
@@ -40,6 +41,22 @@ public final class JavaCodeGenerator implements CodeGenerator {
     /** The rows of the package, keyed by the lower-case row type name. */
     private final Map<String, SharedRow> rowsByPortabilityKey = new LinkedHashMap<>();
 
+    /**
+     * The enum types the package generates, keyed by enum identity and ordered
+     * by the group that first used them.
+     */
+    private final Map<String, SharedEnum> enums = new LinkedHashMap<>();
+
+    /** The enum types of the package, keyed by the lower-case enum type name. */
+    private final Map<String, SharedEnum> enumsByPortabilityKey = new LinkedHashMap<>();
+
+    /**
+     * Every other type the package generates — repositories, row records, and
+     * nested result records — keyed by its lower-case name, so that an enum
+     * type cannot take a name one of them already generated.
+     */
+    private final Map<String, String> generatedTypesByPortabilityKey = new LinkedHashMap<>();
+
     public JavaCodeGenerator() {
         this(DEFAULT_PACKAGE);
     }
@@ -58,6 +75,8 @@ public final class JavaCodeGenerator implements CodeGenerator {
         JavaNames names = JavaNames.of(group);
 
         recordRows(group, names);
+        recordGeneratedTypes(group, names);
+        recordEnums(group);
 
         return new GeneratedFile(
             buildPath(names),
@@ -69,6 +88,13 @@ public final class JavaCodeGenerator implements CodeGenerator {
     public List<GeneratedFile> generateRows() {
         return rows.values().stream()
             .map(this::generateRowFile)
+            .toList();
+    }
+
+    @Override
+    public List<GeneratedFile> generateEnums() {
+        return enums.values().stream()
+            .map(this::generateEnumFile)
             .toList();
     }
 
@@ -159,6 +185,169 @@ public final class JavaCodeGenerator implements CodeGenerator {
         }
     }
 
+    /**
+     * Records the types one group generates beside its enums: its repository,
+     * the row records it returns, and the nested result records of its other
+     * queries.
+     */
+    private void recordGeneratedTypes(QueryGroupModel group, JavaNames names) {
+        recordGeneratedType(names.repositoryClassName());
+
+        for (JavaNames.RowNames row : names.rows()) {
+            recordGeneratedType(row.typeName());
+        }
+
+        for (int index = 0; index < group.queries().size(); index++) {
+            QueryModel query = group.queries().get(index);
+
+            if (hasResultType(query) && !returnsSharedRow(query)) {
+                recordGeneratedType(names.queries().get(index).resultTypeName());
+            }
+        }
+    }
+
+    /**
+     * Records one generated type of the package, rejecting a type whose name is
+     * equal ignoring case to an enum type an earlier group already generated,
+     * because the compiled class files of those types are one path on a
+     * case-insensitive filesystem.
+     */
+    private void recordGeneratedType(String typeName) {
+        String portabilityKey = typeName.toLowerCase(Locale.ROOT);
+        SharedEnum generatedEnum = enumsByPortabilityKey.get(portabilityKey);
+
+        if (generatedEnum != null) {
+            throw enumTypeCollision(generatedEnum, typeName);
+        }
+
+        generatedTypesByPortabilityKey.putIfAbsent(portabilityKey, typeName);
+    }
+
+    /**
+     * Records the enum types one group uses, in the order its columns and
+     * parameters first name them.
+     */
+    private void recordEnums(QueryGroupModel group) {
+        for (QueryModel query : group.queries()) {
+            for (QueryColumn column : query.columns()) {
+                if (column.type() == ColumnType.ENUM) {
+                    recordEnum(group, column.enumType());
+                }
+            }
+
+            for (QueryParameter parameter : query.parameters()) {
+                if (parameter.type() == ColumnType.ENUM) {
+                    recordEnum(group, parameter.enumType());
+                }
+            }
+        }
+    }
+
+    private void recordEnum(QueryGroupModel group, String enumName) {
+        EnumType declared = group.enums().stream()
+            .filter(candidate -> candidate.name().equalsIgnoreCase(enumName))
+            .findFirst()
+            .orElseThrow(
+                () -> new IllegalStateException("Enum type not found in schema: " + enumName)
+            );
+
+        recordEnum(
+            new SharedEnum(
+                group.name(),
+                declared.name(),
+                JavaNames.enumTypeName(declared.name()),
+                declared.labels(),
+                JavaNames.enumConstantNames(declared.name(), declared.labels())
+            )
+        );
+    }
+
+    /**
+     * Records one enum type of the package. An enum already recorded under the
+     * same enum type is the same Java enum, so its labels must be the ones the
+     * earlier group defined; an enum type equal ignoring case to another enum
+     * or to another generated type is rejected, because the compiled class
+     * files of those types are one path on a case-insensitive filesystem.
+     */
+    private void recordEnum(SharedEnum sharedEnum) {
+        SharedEnum recorded = enums.get(sharedEnum.identity());
+
+        if (recorded != null) {
+            if (!recorded.labels().equals(sharedEnum.labels())) {
+                throw new IllegalArgumentException(
+                    "Enum type '%s' differs from its definition in query group '%s', which generates the same enum type %s"
+                        .formatted(
+                            sharedEnum.enumName(),
+                            recorded.groupName(),
+                            sharedEnum.typeName()
+                        )
+                );
+            }
+
+            return;
+        }
+
+        SharedEnum previous = enumsByPortabilityKey.get(sharedEnum.portabilityKey());
+
+        if (previous != null) {
+            throw new IllegalArgumentException(
+                "Enum types '%s' and '%s' generate enum types that are equal ignoring case: %s and %s"
+                    .formatted(
+                        previous.enumName(),
+                        sharedEnum.enumName(),
+                        previous.typeName(),
+                        sharedEnum.typeName()
+                    )
+            );
+        }
+
+        String generatedType = generatedTypesByPortabilityKey.get(sharedEnum.portabilityKey());
+
+        if (generatedType != null) {
+            throw enumTypeCollision(sharedEnum, generatedType);
+        }
+
+        enums.put(sharedEnum.identity(), sharedEnum);
+        enumsByPortabilityKey.put(sharedEnum.portabilityKey(), sharedEnum);
+    }
+
+    private IllegalArgumentException enumTypeCollision(SharedEnum sharedEnum, String typeName) {
+        return new IllegalArgumentException(
+            "Enum type '%s' generates %s, which is equal ignoring case to the generated type %s"
+                .formatted(
+                    sharedEnum.enumName(),
+                    sharedEnum.typeName(),
+                    typeName
+                )
+        );
+    }
+
+    /**
+     * One Java enum of the package, generated once from the group that first
+     * used the enum type it is generated from.
+     */
+    private record SharedEnum(
+        String groupName,
+        String enumName,
+        String typeName,
+        List<String> labels,
+        List<String> constantNames
+    ) {
+
+        /**
+         * Two uses are the same Java enum when they generate the same enum type
+         * from the same enum type name, compared as a case-insensitive
+         * filesystem compares the type's generated file.
+         */
+        String identity() {
+            return typeName + "\n" + enumName.toLowerCase(Locale.ROOT);
+        }
+
+        String portabilityKey() {
+            return typeName.toLowerCase(Locale.ROOT);
+        }
+    }
+
     private Path buildPath(JavaNames names) {
         return packageDirectory().resolve(names.repositoryClassName() + ".java");
     }
@@ -224,6 +413,124 @@ public final class JavaCodeGenerator implements CodeGenerator {
         );
 
         return String.join("\n\n", sections);
+    }
+
+    /** Generates the file of one Java enum of the package. */
+    private GeneratedFile generateEnumFile(SharedEnum sharedEnum) {
+        return new GeneratedFile(
+            packageDirectory().resolve(sharedEnum.typeName() + ".java"),
+            generateEnumSource(sharedEnum)
+        );
+    }
+
+    private String generateEnumSource(SharedEnum sharedEnum) {
+        return String.join(
+            "\n\n",
+            GENERATED_NOTICE,
+            generatePackage(),
+            generateEnumJavaDoc(sharedEnum).stripTrailing(),
+            generateEnum(sharedEnum)
+        );
+    }
+
+    private String generateEnumJavaDoc(SharedEnum sharedEnum) {
+        return """
+            /**
+             * Generated by sqlcj.
+             *
+             * Enum: %s
+             */
+            """
+            .formatted(escapeJavadoc(sharedEnum.enumName()));
+    }
+
+    /**
+     * Generates one Java enum, holding one constant per label in label order,
+     * each carrying the label PostgreSQL stores. The constant list ends with
+     * {@code ;} even when the enum type declares no label, so the generated
+     * source compiles either way.
+     */
+    private String generateEnum(SharedEnum sharedEnum) {
+        List<String> members = List.of(
+            generateEnumConstants(sharedEnum),
+            "private final String label;",
+            generateEnumConstructor(sharedEnum),
+            generateEnumLabelMethod(),
+            generateFromLabelMethod(sharedEnum)
+        );
+
+        return """
+            public enum %s {
+
+            %s
+            }
+            """
+            .formatted(
+                sharedEnum.typeName(),
+                members.stream()
+                    .map(this::indentEnumMember)
+                    .collect(Collectors.joining("\n\n"))
+            );
+    }
+
+    private String generateEnumConstants(SharedEnum sharedEnum) {
+        return IntStream.range(0, sharedEnum.labels().size())
+            .mapToObj(
+                index -> sharedEnum.constantNames().get(index)
+                    + "("
+                    + generateStringLiteral(sharedEnum.labels().get(index))
+                    + ")"
+            )
+            .collect(Collectors.joining(",\n"))
+            + ";";
+    }
+
+    private String generateEnumConstructor(SharedEnum sharedEnum) {
+        return """
+            %s(String label) {
+                this.label = label;
+            }
+            """
+            .formatted(sharedEnum.typeName());
+    }
+
+    private String generateEnumLabelMethod() {
+        return """
+            public String label() {
+                return label;
+            }
+            """;
+    }
+
+    /**
+     * Generates the reverse lookup a generated read uses: {@code null} for a
+     * SQL {@code NULL}, and a failure for a label the generated enum does not
+     * hold, which means the database has a label the schema source does not
+     * declare.
+     */
+    private String generateFromLabelMethod(SharedEnum sharedEnum) {
+        return """
+            public static %s fromLabel(String label) {
+                if (label == null) {
+                    return null;
+                }
+
+                for (%s value : values()) {
+                    if (value.label.equals(label)) {
+                        return value;
+                    }
+                }
+
+                throw new IllegalArgumentException(%s + label);
+            }
+            """
+            .formatted(
+                sharedEnum.typeName(),
+                sharedEnum.typeName(),
+                generateStringLiteral(
+                    "Unknown label for enum type " + sharedEnum.enumName() + ": "
+                )
+            );
     }
 
     /** A row record depends on the JDK types of its components alone. */
@@ -418,6 +725,18 @@ public final class JavaCodeGenerator implements CodeGenerator {
         return text.indent(4).stripTrailing();
     }
 
+    /**
+     * Indents one member of a generated enum, leaving a blank line inside it
+     * blank rather than indented, so the generated enum carries no trailing
+     * whitespace. Only these members are written with blank lines inside them.
+     */
+    private String indentEnumMember(String text) {
+        return indent(text)
+            .lines()
+            .map(String::stripTrailing)
+            .collect(Collectors.joining("\n"));
+    }
+
     /** Generates one result or row record in selected-column order. */
     private String generateRecord(
         String typeName,
@@ -450,11 +769,23 @@ public final class JavaCodeGenerator implements CodeGenerator {
     private String generateResultComponent(QueryColumn column, String name) {
         return "%s %s"
             .formatted(
-                typeResolver.resolve(column.type()),
+                javaType(column.type(), column.enumType()),
                 name
             )
             .indent(4)
             .stripTrailing();
+    }
+
+    /**
+     * The Java type of one column or parameter, which is the generated enum of
+     * its enum type for an enum and the mapped type of its column type
+     * otherwise. A generated enum belongs to the generated package, so it is
+     * referenced by its simple name and needs no import.
+     */
+    private String javaType(ColumnType type, String enumType) {
+        return type == ColumnType.ENUM
+            ? JavaNames.enumTypeName(enumType)
+            : typeResolver.resolve(type);
     }
 
     private String generateMethodParameters(QueryModel query, JavaNames.QueryNames names) {
@@ -462,7 +793,7 @@ public final class JavaCodeGenerator implements CodeGenerator {
             .mapToObj(index -> {
                 QueryParameter parameter = query.parameters().get(index);
 
-                return typeResolver.resolve(parameter.type())
+                return javaType(parameter.type(), parameter.enumType())
                     + " "
                     + names.parameterNames().get(index);
             })
@@ -671,10 +1002,17 @@ public final class JavaCodeGenerator implements CodeGenerator {
      * Renders one executor argument. A JSON parameter is wrapped in
      * {@code dev.sqlcj.runtime.UntypedText} so that the runtime binds its text
      * without a declared SQL type and the database types it from the context of
-     * its placeholder. The wrapper is written out in full, so the generated
-     * imports are the same as without it.
+     * its placeholder. An enum parameter is wrapped the same way, around the
+     * label of the generated constant, because PostgreSQL rejects a label bound
+     * as {@code varchar} where an enum is expected. The wrapper is written out
+     * in full, so the generated imports are the same as without it.
      */
     private String generateArgument(QueryParameter parameter, String name) {
+        if (parameter.type() == ColumnType.ENUM) {
+            return "new dev.sqlcj.runtime.UntypedText(%s == null ? null : %s.label())"
+                .formatted(name, name);
+        }
+
         if (isUntypedText(parameter.type())) {
             return "new dev.sqlcj.runtime.UntypedText(" + name + ")";
         }
@@ -736,9 +1074,18 @@ public final class JavaCodeGenerator implements CodeGenerator {
     /**
      * A JSON column is read with {@code getString}, because a driver reports it
      * as a type of its own for which {@code getObject(position, String.class)}
-     * is not defined; every other column is read as its mapped Java type.
+     * is not defined. An enum column reads its label the same way and resolves
+     * it to the generated constant; every other column is read as its mapped
+     * Java type.
      */
     private String generateResultMapping(QueryColumn column, int position) {
+        if (column.type() == ColumnType.ENUM) {
+            return "%s.fromLabel(resultSet.getString(%d))"
+                .formatted(JavaNames.enumTypeName(column.enumType()), position)
+                .indent(8)
+                .stripTrailing();
+        }
+
         if (isUntypedText(column.type())) {
             return "resultSet.getString(%d)"
                 .formatted(position)

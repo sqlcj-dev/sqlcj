@@ -6,6 +6,7 @@ import dev.sqlcj.analysis.QueryModel;
 import dev.sqlcj.analysis.QueryParameter;
 import dev.sqlcj.parser.QueryType;
 import dev.sqlcj.schema.ColumnType;
+import dev.sqlcj.schema.EnumType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -14,14 +15,21 @@ import org.junit.jupiter.params.provider.CsvSource;
 import javax.tools.JavaCompiler;
 import javax.tools.ToolProvider;
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.net.URL;
+import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -2594,6 +2602,383 @@ class JavaCodeGeneratorTest {
             List.of(),
             parameters,
             null
+        );
+    }
+
+    /**
+     * An enum column and an enum parameter use the Java enum the package
+     * generates for their enum type, by its simple name and without an import:
+     * the parameter is bound as the label of its constant, wrapped so that
+     * PostgreSQL types it from the context of its placeholder, and the column
+     * is read from its label at every binding position of its index.
+     */
+    @Test
+    void shouldBindEnumLabelsAndReadEnumColumnsByLabel() throws IOException {
+        QueryModel query = new QueryModel(
+            "FindStage",
+            QueryType.ONE,
+            "stages",
+            """
+                SELECT id, setting, handle
+                FROM stages
+                WHERE handle = ?
+                  AND (setting = ? OR setting = ?)
+                """,
+            List.of(2, 1, 1),
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("setting", ColumnType.ENUM, true, "stage_setting"),
+                new QueryColumn("handle", ColumnType.VARCHAR, true)
+            ),
+            List.of(
+                new QueryParameter(1, "setting", ColumnType.ENUM, "stage_setting"),
+                new QueryParameter(2, "handle", ColumnType.VARCHAR)
+            ),
+            null
+        );
+
+        GeneratedFile repository = generate(
+            enumGroup(
+                GROUP,
+                query,
+                new EnumType("stage_setting", List.of("indoor", "outdoor"))
+            )
+        );
+
+        String source = repository.content();
+
+        assertTrue(
+            source.contains("public FindStageResult findStage(StageSetting setting, String handle)")
+        );
+
+        assertTrue(
+            source.contains(
+                "java.util.Arrays.asList("
+                    + "handle, "
+                    + "new dev.sqlcj.runtime.UntypedText(setting == null ? null : setting.label()), "
+                    + "new dev.sqlcj.runtime.UntypedText(setting == null ? null : setting.label()))"
+            )
+        );
+
+        assertTrue(source.contains("StageSetting setting"));
+        assertTrue(source.contains("StageSetting.fromLabel(resultSet.getString(2))"));
+        assertTrue(source.contains("resultSet.getObject(1, Long.class)"));
+        assertTrue(source.contains("resultSet.getObject(3, String.class)"));
+
+        assertFalse(source.contains("import generated.StageSetting;"));
+
+        assertCompiles(repository, codeGenerator.generateEnums().getFirst());
+    }
+
+    /**
+     * The generated enum names one constant per label, in label order, holds
+     * the exact labels, and resolves a label back to its constant. A null label
+     * reads back as {@code null}, and a label the enum does not hold, which
+     * means the database declares one the schema source does not, fails naming
+     * the enum type and the label.
+     */
+    @Test
+    void shouldGenerateCompilableEnumWithLabelLookups() throws Exception {
+        GeneratedFile repository = generate(
+            enumGroup(
+                GROUP,
+                enumQuery("GetStage"),
+                new EnumType("stage_setting", List.of("indoor", "out door"))
+            )
+        );
+
+        List<GeneratedFile> enums = codeGenerator.generateEnums();
+
+        assertEquals(1, enums.size());
+        assertEquals(Path.of("generated", "StageSetting.java"), enums.getFirst().path());
+
+        assertCompiles(repository, enums.getFirst());
+
+        try (URLClassLoader classLoader = classLoader()) {
+            Class<?> type = Class.forName("generated.StageSetting", true, classLoader);
+
+            assertTrue(type.isEnum());
+
+            Object[] constants = type.getEnumConstants();
+
+            assertEquals(
+                List.of("INDOOR", "OUT_DOOR"),
+                Arrays.stream(constants).map(Object::toString).toList()
+            );
+
+            Method label = type.getMethod("label");
+
+            assertEquals("indoor", label.invoke(constants[0]));
+            assertEquals("out door", label.invoke(constants[1]));
+
+            Method fromLabel = type.getMethod("fromLabel", String.class);
+
+            assertEquals(constants[1], fromLabel.invoke(null, "out door"));
+            assertNull(fromLabel.invoke(null, new Object[] { null }));
+
+            InvocationTargetException failure = assertThrows(
+                InvocationTargetException.class,
+                () -> fromLabel.invoke(null, "covered")
+            );
+
+            assertInstanceOf(IllegalArgumentException.class, failure.getCause());
+
+            assertEquals(
+                "Unknown label for enum type stage_setting: covered",
+                failure.getCause().getMessage()
+            );
+        }
+    }
+
+    /** An enum type no column and no parameter uses generates no file. */
+    @Test
+    void shouldGenerateOnlyTheEnumTypesTheQueriesUse() {
+        codeGenerator.generate(
+            new QueryGroupModel(
+                GROUP,
+                List.of(enumQuery("GetStage")),
+                List.of(
+                    new EnumType("stage_setting", List.of("indoor")),
+                    new EnumType("shelf_state", List.of("stocked"))
+                )
+            )
+        );
+
+        assertEquals(
+            List.of(Path.of("generated", "StageSetting.java")),
+            codeGenerator.generateEnums().stream()
+                .map(GeneratedFile::path)
+                .toList()
+        );
+    }
+
+    /**
+     * An enum type name is the upper camel form of its PostgreSQL name, and a
+     * constant is the label's words, upper-cased and joined with {@code _},
+     * with a leading {@code _} for a constant that would start with a digit.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "stage_setting|indoor|StageSetting|INDOOR",
+            "HTTP_state|in progress|HttpState|IN_PROGRESS",
+            "stage_setting|in-progress|StageSetting|IN_PROGRESS",
+            "stage_setting|InProgress|StageSetting|INPROGRESS",
+            "stage_setting|ID|StageSetting|ID",
+            "stage_setting|2fast|StageSetting|_2FAST"
+        }
+    )
+    void shouldNameTheGeneratedEnumAndItsConstants(
+        String enumName,
+        String label,
+        String typeName,
+        String constant
+    ) {
+        codeGenerator.generate(
+            enumGroup(
+                GROUP,
+                enumQuery("GetStage", enumName),
+                new EnumType(enumName, List.of(label))
+            )
+        );
+
+        GeneratedFile file = codeGenerator.generateEnums().getFirst();
+
+        assertEquals(Path.of("generated", typeName + ".java"), file.path());
+        assertTrue(file.content().contains("public enum " + typeName + " {"));
+        assertTrue(file.content().contains(constant + "(\"" + label + "\");"));
+    }
+
+    /** A label with no letter and no digit generates no Java constant. */
+    @Test
+    void shouldRejectALabelWithoutALetterOrDigit() {
+        QueryGroupModel group = enumGroup(
+            GROUP,
+            enumQuery("GetStage"),
+            new EnumType("stage_setting", List.of("indoor", "***"))
+        );
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> codeGenerator.generate(group)
+        );
+
+        assertEquals(
+            "Label '***' of enum type 'stage_setting' has no letter or digit to generate a Java constant from",
+            exception.getMessage()
+        );
+    }
+
+    /** Two labels of one enum type must generate two constants. */
+    @Test
+    void shouldRejectTwoLabelsThatGenerateOneConstant() {
+        QueryGroupModel group = enumGroup(
+            GROUP,
+            enumQuery("GetStage"),
+            new EnumType("stage_setting", List.of("in progress", "in-progress"))
+        );
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> codeGenerator.generate(group)
+        );
+
+        assertEquals(
+            "Labels 'in progress' and 'in-progress' of enum type 'stage_setting' generate the same constant IN_PROGRESS",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * Two groups that use one enum type generate one Java enum, so they must
+     * define its labels alike.
+     */
+    @Test
+    void shouldRejectTwoGroupsThatDefineOneEnumTypeDifferently() {
+        codeGenerator.generate(
+            enumGroup(
+                "Stages",
+                enumQuery("GetStage"),
+                new EnumType("stage_setting", List.of("indoor", "outdoor"))
+            )
+        );
+
+        QueryGroupModel group = enumGroup(
+            "Venues",
+            enumQuery("GetVenue"),
+            new EnumType("stage_setting", List.of("indoor"))
+        );
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> codeGenerator.generate(group)
+        );
+
+        assertEquals(
+            "Enum type 'stage_setting' differs from its definition in query group 'Stages', "
+                + "which generates the same enum type StageSetting",
+            exception.getMessage()
+        );
+
+        assertEquals(1, codeGenerator.generateEnums().size());
+    }
+
+    /**
+     * Two enum types whose Java enums are equal ignoring case are rejected,
+     * because the compiled class files of those types are one path on a
+     * case-insensitive filesystem.
+     */
+    @Test
+    void shouldRejectEnumTypesThatAreEqualIgnoringCase() {
+        codeGenerator.generate(
+            enumGroup(
+                "Stages",
+                enumQuery("GetStage"),
+                new EnumType("stage_setting", List.of("indoor"))
+            )
+        );
+
+        QueryGroupModel group = enumGroup(
+            "Venues",
+            enumQuery("GetVenue", "stagesetting"),
+            new EnumType("stagesetting", List.of("indoor"))
+        );
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> codeGenerator.generate(group)
+        );
+
+        assertEquals(
+            "Enum types 'stage_setting' and 'stagesetting' generate enum types that are equal ignoring case: "
+                + "StageSetting and Stagesetting",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A Java enum must not take the name of another generated type of the
+     * package, in either generation order.
+     */
+    @Test
+    void shouldRejectAnEnumTypeThatCollidesWithAnEarlierGeneratedType() {
+        codeGenerator.generate(
+            new QueryGroupModel("Users", List.of(getUsersRow("GetUser")))
+        );
+
+        QueryGroupModel group = enumGroup(
+            "Stages",
+            enumQuery("GetStage", "users_row"),
+            new EnumType("users_row", List.of("indoor"))
+        );
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> codeGenerator.generate(group)
+        );
+
+        assertEquals(
+            "Enum type 'users_row' generates UsersRow, which is equal ignoring case to the generated type UsersRow",
+            exception.getMessage()
+        );
+    }
+
+    @Test
+    void shouldRejectAGeneratedTypeThatCollidesWithAnEarlierEnumType() {
+        codeGenerator.generate(
+            enumGroup(
+                "Stages",
+                enumQuery("GetStage", "usersrow"),
+                new EnumType("usersrow", List.of("indoor"))
+            )
+        );
+
+        QueryGroupModel group = new QueryGroupModel("Users", List.of(getUsersRow("GetUser")));
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> codeGenerator.generate(group)
+        );
+
+        assertEquals(
+            "Enum type 'usersrow' generates Usersrow, which is equal ignoring case to the generated type UsersRow",
+            exception.getMessage()
+        );
+    }
+
+    /** A {@code :one} query reading and binding one enum column. */
+    private QueryModel enumQuery(String queryName) {
+        return enumQuery(queryName, "stage_setting");
+    }
+
+    private QueryModel enumQuery(String queryName, String enumName) {
+        return new QueryModel(
+            queryName,
+            QueryType.ONE,
+            "stages",
+            "SELECT setting FROM stages WHERE setting = ?",
+            List.of(1),
+            List.of(new QueryColumn("setting", ColumnType.ENUM, true, enumName)),
+            List.of(new QueryParameter(1, "setting", ColumnType.ENUM, enumName)),
+            null
+        );
+    }
+
+    private QueryGroupModel enumGroup(String groupName, QueryModel query, EnumType enumType) {
+        return new QueryGroupModel(groupName, List.of(query), List.of(enumType));
+    }
+
+    private GeneratedFile generate(QueryGroupModel group) {
+        return codeGenerator.generate(group);
+    }
+
+    /** Loads the classes the compiled generated files left. */
+    private URLClassLoader classLoader() throws IOException {
+        return new URLClassLoader(
+            new URL[] { tempDir.resolve("classes").toUri().toURL() },
+            getClass().getClassLoader()
         );
     }
 }

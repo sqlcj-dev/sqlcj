@@ -218,9 +218,10 @@ target/generated-sources/sqlcj/dev/example/generated/OrderRepository.java
 Both repositories may contain a query named `GetById`, because each name is
 resolved inside its own repository.
 
-The entries share one generated package, so they also share its row records: a
-table whose complete row both entries return generates one `<TableName>Row`
-file that both repositories return.
+The entries share one generated package, so they also share its row records and
+its enums: a table whose complete row both entries return generates one
+`<TableName>Row` file that both repositories return, and an enum type both
+entries use generates one Java enum file that both repositories use.
 
 ## Generated Java Names
 
@@ -261,6 +262,14 @@ uses no locale-dependent case mapping and no configuration:
    sqlcj: Invalid query group 'User' in /home/dev/project/sql/queries.sql: SQL name '***' of query 'ListUsers' has no letter or digit to generate a Java name from
    ```
 
+   An enum label is rejected the same way, and so are two labels of one enum
+   type that generate one constant:
+
+   ```text
+   sqlcj: Invalid query group 'Stage' in /home/dev/project/sql/queries.sql: Label '***' of enum type 'stage_setting' has no letter or digit to generate a Java constant from
+   sqlcj: Invalid query group 'Stage' in /home/dev/project/sql/queries.sql: Labels 'in progress' and 'in-progress' of enum type 'stage_setting' generate the same constant IN_PROGRESS
+   ```
+
 The rules are applied as follows:
 
 - the repository type is the upper camel form of `sql[].name` followed by
@@ -272,6 +281,14 @@ The rules are applied as follows:
   singularized. A row record is a top-level type of `java.package`, generated
   once per table into its own file and shared by every repository of the package
   that returns that row,
+- an enum type is the upper camel form of its PostgreSQL name, so
+  `stage_setting` generates `StageSetting`. It is a top-level type of
+  `java.package`, generated once per enum type into its own file, and only for
+  an enum type a query reads or binds,
+- an enum constant is the label's words, upper-cased and joined with `_`, so the
+  labels `in progress` and `in-progress` both generate `IN_PROGRESS`, the label
+  `InProgress`, which is one word, generates `INPROGRESS`, and the label `2fast`
+  generates `_2FAST`,
 - a method is the lower camel form of the query name, so `get_author` generates
   `getAuthor`,
 - a row-mapper field is the method name followed by `RowMapper`, and the mapper
@@ -340,6 +357,16 @@ the package, the two tables may come from one entry or from two:
 sqlcj: Invalid query group 'User' in /home/dev/project/sql/queries.sql: Tables 'user_data' and 'userdata' generate row types that are equal ignoring case: UserDataRow and UserdataRow
 ```
 
+Two enum types whose Java enums are equal ignoring case, and an enum type whose
+Java enum is equal ignoring case to a repository, row record, or nested result
+record of the package, are rejected on the same grounds, in either generation
+order:
+
+```text
+sqlcj: Invalid query group 'Stage' in /home/dev/project/sql/queries.sql: Enum types 'stage_setting' and 'stagesetting' generate enum types that are equal ignoring case: StageSetting and Stagesetting
+sqlcj: Invalid query group 'Stage' in /home/dev/project/sql/queries.sql: Enum type 'users_row' generates UsersRow, which is equal ignoring case to the generated type UsersRow
+```
+
 ### Row record collisions
 
 Two entries of one package that return the complete row of one table generate
@@ -349,6 +376,13 @@ the run ends, naming the entry that defined the table first:
 
 ```text
 sqlcj: Invalid query group 'Library' in /home/dev/project/sql/library.sql: Table 'authors' differs from its definition in query group 'Author', which generates the same row type AuthorsRow
+```
+
+Two entries that use one enum type must define its labels alike for the same
+reason, because the package generates one Java enum for it:
+
+```text
+sqlcj: Invalid query group 'Library' in /home/dev/project/sql/library.sql: Enum type 'stage_setting' differs from its definition in query group 'Author', which generates the same enum type StageSetting
 ```
 
 A cross-entry failure is reported against the later entry in configuration
@@ -408,11 +442,13 @@ files the run had already written stay in place.
 
 A successful run records what it generated in `sqlcj-manifest.txt` inside
 `java.out`. The manifest is a UTF-8 text file listing every generated file,
-repositories and row records alike, as a path relative to `java.out`, with `/`
+repositories, row records, and enums alike, as a path relative to `java.out`,
+with `/`
 between its name elements, sorted, one per line. The next successful run deletes
 the files the previous manifest listed that it did not generate itself, so a
 renamed or removed configuration entry leaves no stale repository behind, and a
-row record no entry returns any more is deleted too.
+row record no entry returns any more, and an enum no entry uses any more, are
+deleted too.
 
 Cleanup is deliberately narrow:
 

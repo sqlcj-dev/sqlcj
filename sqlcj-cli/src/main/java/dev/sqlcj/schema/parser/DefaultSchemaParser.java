@@ -4,6 +4,7 @@ import dev.sqlcj.schema.Column;
 import dev.sqlcj.schema.ColumnType;
 import dev.sqlcj.schema.Constraint;
 import dev.sqlcj.schema.ConstraintType;
+import dev.sqlcj.schema.EnumType;
 import dev.sqlcj.schema.Schema;
 import dev.sqlcj.schema.Table;
 import dev.sqlcj.sql.SqlParseReason;
@@ -20,6 +21,7 @@ import net.sf.jsqlparser.statement.UnsupportedStatement;
 import net.sf.jsqlparser.statement.alter.Alter;
 import net.sf.jsqlparser.statement.alter.AlterExpression;
 import net.sf.jsqlparser.statement.alter.AlterOperation;
+import net.sf.jsqlparser.statement.alter.AlterType;
 import net.sf.jsqlparser.statement.alter.sequence.AlterSequence;
 import net.sf.jsqlparser.statement.comment.Comment;
 import net.sf.jsqlparser.statement.create.extension.CreateExtension;
@@ -69,16 +71,17 @@ public class DefaultSchemaParser implements SchemaParser {
             Statements statements = CCJSqlParserUtil.parseStatements(sql, parser::set);
 
             List<Table> tables = new ArrayList<>(schema.tables());
+            List<EnumType> enums = new ArrayList<>(schema.enums());
 
             if (!statements.isEmpty()) {
                 List<Integer> lines = statementLines(parser.get());
 
                 for (int i = 0; i < statements.size(); i++) {
-                    apply(statements.get(i), statementLine(lines, i), tables);
+                    apply(statements.get(i), statementLine(lines, i), tables, enums);
                 }
             }
 
-            return new Schema(tables);
+            return new Schema(tables, enums);
         } catch (JSQLParserException e) {
             throw new SchemaParseException(SqlParseReason.of(e, true), e);
         }
@@ -125,17 +128,119 @@ public class DefaultSchemaParser implements SchemaParser {
         return lines.get(Math.min(index, lines.size() - 1));
     }
 
-    /** Applies one statement to the tables the statements before it left. */
-    private void apply(Statement statement, int line, List<Table> tables) {
+    /**
+     * Applies one statement to the tables and enum types the statements before
+     * it left.
+     */
+    private void apply(Statement statement, int line, List<Table> tables, List<EnumType> enums) {
         if (statement instanceof CreateTable createTable) {
-            applyCreateTable(createTable, tables);
+            applyCreateTable(createTable, enums, tables);
         } else if (statement instanceof Alter alter) {
-            applyAlterTable(alter, line, tables);
+            applyAlterTable(alter, line, enums, tables);
         } else if (statement instanceof Drop drop && drop.getObjectType() == Drop.ObjectType.TABLE) {
             applyDropTable(drop, tables);
+        } else if (
+            statement instanceof CreateType createType
+                && createType.getDefinition() instanceof EnumTypeDefinition definition
+        ) {
+            applyCreateEnumType(createType, definition, enums);
+        } else if (
+            statement instanceof AlterType alterType
+                && alterType.getAction() == AlterType.Action.ADD_VALUE
+        ) {
+            applyAddEnumValue(alterType, enums);
         } else if (!isIgnored(statement)) {
             throw unsupportedStatement(statement, line);
         }
+    }
+
+    /**
+     * Appends one enum type with its declared labels. A repeated type name
+     * fails, as PostgreSQL rejects it, and so does a repeated label. An enum is
+     * the only type sqlcj models; every other {@code CREATE TYPE} is rejected.
+     */
+    private void applyCreateEnumType(
+        CreateType createType,
+        EnumTypeDefinition definition,
+        List<EnumType> enums
+    ) {
+        String typeName = MultiPartName.unquote(createType.getName());
+
+        if (indexOfEnum(enums, typeName) >= 0) {
+            throw typeAlreadyExists(typeName);
+        }
+
+        List<String> labels = new ArrayList<>();
+
+        for (StringValue declaredLabel : definition.getLabels()) {
+            String label = declaredLabel.getNotExcapedValue();
+
+            if (labels.contains(label)) {
+                throw labelAlreadyExists(typeName, label);
+            }
+
+            labels.add(label);
+        }
+
+        enums.add(new EnumType(typeName, labels));
+    }
+
+    /**
+     * Inserts one label into an enum type: after the last label by default, and
+     * otherwise directly before or after the stated neighbor, so the modeled
+     * labels stay in PostgreSQL's sort order. Adding a value is the only
+     * {@code ALTER TYPE} action sqlcj models; every other action is rejected.
+     *
+     * <p>As PostgreSQL does, {@code IF NOT EXISTS} is decided by the label
+     * alone: a label the type already has is a no-op even when the stated
+     * neighbor is not one of its labels.
+     */
+    private void applyAddEnumValue(AlterType alterType, List<EnumType> enums) {
+        String typeName = MultiPartName.unquote(alterType.getName());
+
+        int index = indexOfEnum(enums, typeName);
+
+        if (index < 0) {
+            throw typeNotFound(typeName);
+        }
+
+        EnumType enumType = enums.get(index);
+        String label = alterType.getValue().getNotExcapedValue();
+
+        if (enumType.labels().contains(label)) {
+            if (alterType.isIfNotExists()) {
+                return;
+            }
+
+            throw labelAlreadyExists(typeName, label);
+        }
+
+        List<String> labels = new ArrayList<>(enumType.labels());
+
+        labels.add(labelPosition(alterType, enumType), label);
+
+        enums.set(index, new EnumType(enumType.name(), labels));
+    }
+
+    /** The position an added label takes among the type's existing labels. */
+    private int labelPosition(AlterType alterType, EnumType enumType) {
+        AlterType.Position position = alterType.getPosition();
+
+        if (position == null) {
+            return enumType.labels().size();
+        }
+
+        String neighbor = alterType.getNeighborValue().getNotExcapedValue();
+
+        int index = enumType.labels().indexOf(neighbor);
+
+        if (index < 0) {
+            throw labelNotFound(enumType.name(), neighbor);
+        }
+
+        return position == AlterType.Position.BEFORE
+            ? index
+            : index + 1;
     }
 
     /**
@@ -150,10 +255,6 @@ public class DefaultSchemaParser implements SchemaParser {
 
         if (statement instanceof CreateFunction createFunction) {
             return hasDollarQuotedBody(createFunction);
-        }
-
-        if (statement instanceof CreateType createType) {
-            return createType.getDefinition() instanceof EnumTypeDefinition;
         }
 
         if (statement instanceof UnsupportedStatement unsupported) {
@@ -207,7 +308,11 @@ public class DefaultSchemaParser implements SchemaParser {
      * Appends one table. A repeated table name fails, as PostgreSQL rejects it,
      * unless the statement declares {@code IF NOT EXISTS}.
      */
-    private void applyCreateTable(CreateTable createTable, List<Table> tables) {
+    private void applyCreateTable(
+        CreateTable createTable,
+        List<EnumType> enums,
+        List<Table> tables
+    ) {
         String tableName = createTable.getTable().getUnquotedName();
 
         if (indexOfTable(tables, tableName) >= 0) {
@@ -218,7 +323,7 @@ public class DefaultSchemaParser implements SchemaParser {
             throw tableAlreadyExists(tableName);
         }
 
-        tables.add(parseTable(createTable));
+        tables.add(parseTable(createTable, enums));
     }
 
     /** Removes every named table, keeping the order of the remaining ones. */
@@ -245,7 +350,7 @@ public class DefaultSchemaParser implements SchemaParser {
      * of the altered table. {@code ALTER TABLE IF EXISTS} covers only the table,
      * so a missing column of an existing table still fails.
      */
-    private void applyAlterTable(Alter alter, int line, List<Table> tables) {
+    private void applyAlterTable(Alter alter, int line, List<EnumType> enums, List<Table> tables) {
         String tableName = alter.getTable().getUnquotedName();
 
         int index = indexOfTable(tables, tableName);
@@ -259,7 +364,7 @@ public class DefaultSchemaParser implements SchemaParser {
         }
 
         for (AlterExpression expression : alter.getAlterExpressions()) {
-            tables.set(index, applyAlterExpression(alter, line, expression, tables, index));
+            tables.set(index, applyAlterExpression(alter, line, expression, enums, tables, index));
         }
     }
 
@@ -273,6 +378,7 @@ public class DefaultSchemaParser implements SchemaParser {
         Alter alter,
         int line,
         AlterExpression expression,
+        List<EnumType> enums,
         List<Table> tables,
         int index
     ) {
@@ -280,7 +386,7 @@ public class DefaultSchemaParser implements SchemaParser {
         AlterOperation operation = expression.getOperation();
 
         if (operation == AlterOperation.ADD && isNotEmpty(expression.getColDataTypeList())) {
-            return addColumns(expression, table);
+            return addColumns(expression, enums, table);
         }
 
         if (operation == AlterOperation.DROP && expression.getColumnName() != null) {
@@ -296,7 +402,7 @@ public class DefaultSchemaParser implements SchemaParser {
         }
 
         if (operation == AlterOperation.ALTER) {
-            return alterColumns(alter, line, expression, table);
+            return alterColumns(alter, line, expression, enums, table);
         }
 
         if (isIgnoredConstraintAction(expression)) {
@@ -344,13 +450,19 @@ public class DefaultSchemaParser implements SchemaParser {
      * Applies one {@code ALTER COLUMN} action: a new type, which keeps the
      * column's position and nullability, or a nullability change.
      */
-    private Table alterColumns(Alter alter, int line, AlterExpression expression, Table table) {
+    private Table alterColumns(
+        Alter alter,
+        int line,
+        AlterExpression expression,
+        List<EnumType> enums,
+        Table table
+    ) {
         if (isNotEmpty(expression.getColDataTypeList())) {
             if (!statesNewTypes(expression.getColDataTypeList())) {
                 throw unsupportedStatement(alter, line);
             }
 
-            return changeColumnTypes(expression, table);
+            return changeColumnTypes(expression, enums, table);
         }
 
         if (isNotEmpty(expression.getColumnSetNotNullList())) {
@@ -393,12 +505,12 @@ public class DefaultSchemaParser implements SchemaParser {
      * Appends each added column, typed exactly as a {@code CREATE TABLE} column
      * of the same declaration, and records its column-level constraints.
      */
-    private Table addColumns(AlterExpression expression, Table table) {
+    private Table addColumns(AlterExpression expression, List<EnumType> enums, Table table) {
         List<Column> columns = new ArrayList<>(table.columns());
         List<Constraint> constraints = new ArrayList<>(table.constraints());
 
         for (AlterExpression.ColumnDataType definition : expression.getColDataTypeList()) {
-            Column column = parseColumn(definition);
+            Column column = parseColumn(definition, enums);
 
             if (indexOfColumn(columns, column.name()) >= 0) {
                 if (expression.isUseIfNotExists()) {
@@ -464,7 +576,13 @@ public class DefaultSchemaParser implements SchemaParser {
 
         columns.set(
             index,
-            new Column(newName, column.type(), column.nullable(), column.unsupportedType())
+            new Column(
+                newName,
+                column.type(),
+                column.nullable(),
+                column.unsupportedType(),
+                column.enumType()
+            )
         );
 
         List<Constraint> constraints = table.constraints().stream()
@@ -494,7 +612,11 @@ public class DefaultSchemaParser implements SchemaParser {
      * type as a {@code CREATE TABLE} column of the same type would be, and
      * keeping the column's nullability, which a type change does not state.
      */
-    private Table changeColumnTypes(AlterExpression expression, Table table) {
+    private Table changeColumnTypes(
+        AlterExpression expression,
+        List<EnumType> enums,
+        Table table
+    ) {
         List<Column> columns = new ArrayList<>(table.columns());
 
         for (AlterExpression.ColumnDataType definition : expression.getColDataTypeList()) {
@@ -507,7 +629,7 @@ public class DefaultSchemaParser implements SchemaParser {
             }
 
             Column column = columns.get(index);
-            Column retyped = parseColumn(definition);
+            Column retyped = parseColumn(definition, enums);
 
             columns.set(
                 index,
@@ -515,7 +637,8 @@ public class DefaultSchemaParser implements SchemaParser {
                     column.name(),
                     retyped.type(),
                     column.nullable(),
-                    retyped.unsupportedType()
+                    retyped.unsupportedType(),
+                    retyped.enumType()
                 )
             );
         }
@@ -544,7 +667,13 @@ public class DefaultSchemaParser implements SchemaParser {
 
             columns.set(
                 index,
-                new Column(column.name(), column.type(), nullable, column.unsupportedType())
+                new Column(
+                    column.name(),
+                    column.type(),
+                    nullable,
+                    column.unsupportedType(),
+                    column.enumType()
+                )
             );
         }
 
@@ -576,6 +705,17 @@ public class DefaultSchemaParser implements SchemaParser {
     private int indexOfTable(List<Table> tables, String tableName) {
         for (int i = 0; i < tables.size(); i++) {
             if (tables.get(i).name().equalsIgnoreCase(tableName)) {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    /** Enum type names are matched case-insensitively, as a column names them. */
+    private int indexOfEnum(List<EnumType> enums, String typeName) {
+        for (int i = 0; i < enums.size(); i++) {
+            if (enums.get(i).name().equalsIgnoreCase(typeName)) {
                 return i;
             }
         }
@@ -617,6 +757,26 @@ public class DefaultSchemaParser implements SchemaParser {
         );
     }
 
+    private IllegalArgumentException typeNotFound(String typeName) {
+        return new IllegalArgumentException("Type not found in schema: " + typeName);
+    }
+
+    private IllegalArgumentException typeAlreadyExists(String typeName) {
+        return new IllegalArgumentException("Type already exists in schema: " + typeName);
+    }
+
+    private IllegalArgumentException labelNotFound(String typeName, String label) {
+        return new IllegalArgumentException(
+            "Label not found in type %s: %s".formatted(typeName, label)
+        );
+    }
+
+    private IllegalArgumentException labelAlreadyExists(String typeName, String label) {
+        return new IllegalArgumentException(
+            "Label already exists in type %s: %s".formatted(typeName, label)
+        );
+    }
+
     private UnsupportedOperationException unsupportedStatement(Statement statement, int line) {
         return new UnsupportedOperationException(
             "Unsupported schema statement: %s at line %d"
@@ -624,14 +784,14 @@ public class DefaultSchemaParser implements SchemaParser {
         );
     }
 
-    private Table parseTable(CreateTable createTable) {
+    private Table parseTable(CreateTable createTable, List<EnumType> enums) {
         String tableName = createTable.getTable().getUnquotedName();
 
         List<Column> columns = new ArrayList<>();
         List<Constraint> constraints = new ArrayList<>();
 
         for (ColumnDefinition definition : createTable.getColumnDefinitions()) {
-            Column column = parseColumn(definition);
+            Column column = parseColumn(definition, enums);
 
             if (indexOfColumn(columns, column.name()) >= 0) {
                 throw columnAlreadyExists(tableName, column.name());
@@ -653,9 +813,10 @@ public class DefaultSchemaParser implements SchemaParser {
     /**
      * Parses one column, recording a column sqlcj cannot map with its declared
      * type text instead of failing the schema. An array column is such a column
-     * regardless of its element type, because the mapped types are all scalar.
+     * regardless of its element type, because the mapped types and the modeled
+     * enum types are all scalar.
      */
-    private Column parseColumn(ColumnDefinition definition) {
+    private Column parseColumn(ColumnDefinition definition, List<EnumType> enums) {
         String typeName = typeName(definition);
         int arrayDimensions = arrayDimensions(definition);
         boolean nullable = !isSerial(typeName) && isNullable(definition);
@@ -668,12 +829,44 @@ public class DefaultSchemaParser implements SchemaParser {
             return new Column(columnName(definition), type, nullable);
         }
 
+        EnumType enumType = arrayDimensions == 0
+            ? declaredEnum(definition, enums)
+            : null;
+
+        if (enumType != null) {
+            return new Column(
+                columnName(definition),
+                ColumnType.ENUM,
+                nullable,
+                null,
+                enumType.name()
+            );
+        }
+
         return new Column(
             columnName(definition),
             null,
             nullable,
             typeName + "[]".repeat(arrayDimensions)
         );
+    }
+
+    /**
+     * The enum type a column of an unmapped type names, or {@code null} when
+     * the schema declares no such type. The declared type is matched without
+     * its SQL identifier delimiters and case-insensitively, as PostgreSQL
+     * resolves an unquoted type name.
+     */
+    private EnumType declaredEnum(ColumnDefinition definition, List<EnumType> enums) {
+        String declaredType = MultiPartName.unquote(
+            definition.getColDataType().getDataType()
+        );
+
+        int index = indexOfEnum(enums, declaredType);
+
+        return index < 0
+            ? null
+            : enums.get(index);
     }
 
     /**

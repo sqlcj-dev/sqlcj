@@ -10,7 +10,8 @@ import java.util.List;
  *
  * <p>A generator is used for one package: every group of the package is
  * generated through the same generator, in configuration order, and
- * {@link #generateRows()} then yields the row records those groups share.
+ * {@link #generateRows()} and {@link #generateEnums()} then yield the row
+ * records and enum types those groups share.
  */
 public interface CodeGenerator {
 
@@ -26,4 +27,10 @@ public interface CodeGenerator {
      * returns, in the order the groups first returned them.
      */
     List<GeneratedFile> generateRows();
+
+    /**
+     * Generates one Java enum per enum type a column or parameter of a
+     * generated group uses, in the order the groups first used them.
+     */
+    List<GeneratedFile> generateEnums();
 }

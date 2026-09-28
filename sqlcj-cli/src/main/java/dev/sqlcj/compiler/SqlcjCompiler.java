@@ -69,7 +69,7 @@ public final class SqlcjCompiler {
 
     /**
      * Generates one repository per configured query group, followed by the row
-     * records those groups share.
+     * records and the enum types those groups share.
      */
     private List<GeneratedFile> generate(List<Source> sources, CodeGenerator codeGenerator) {
         List<GeneratedFile> files = new ArrayList<>();
@@ -90,6 +90,7 @@ public final class SqlcjCompiler {
         }
 
         files.addAll(codeGenerator.generateRows());
+        files.addAll(codeGenerator.generateEnums());
 
         return files;
     }
@@ -128,7 +129,7 @@ public final class SqlcjCompiler {
             queries.add(analyzeQuery(source, query, schema));
         }
 
-        return new QueryGroupModel(source.name(), List.copyOf(queries));
+        return new QueryGroupModel(source.name(), List.copyOf(queries), schema.enums());
     }
 
     /**

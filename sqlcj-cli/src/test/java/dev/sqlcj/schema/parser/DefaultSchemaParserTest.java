@@ -4,6 +4,7 @@ import dev.sqlcj.schema.Column;
 import dev.sqlcj.schema.ColumnType;
 import dev.sqlcj.schema.Constraint;
 import dev.sqlcj.schema.ConstraintType;
+import dev.sqlcj.schema.EnumType;
 import dev.sqlcj.schema.Schema;
 import dev.sqlcj.schema.Table;
 import org.junit.jupiter.api.Test;
@@ -755,8 +756,7 @@ class DefaultSchemaParserTest {
             "DROP TRIGGER users_touch ON users;",
             "INSERT INTO users (id) VALUES (1);",
             "UPDATE users SET name = 'new';",
-            "DELETE FROM users;",
-            "CREATE TYPE status AS ENUM ('draft', 'sent');"
+            "DELETE FROM users;"
         }
     )
     void shouldIgnoreDocumentedStatements(String statement) {
@@ -854,7 +854,8 @@ class DefaultSchemaParserTest {
         value = {
             "CREATE VIEW active_users AS SELECT id FROM users;|CreateView",
             "CREATE TYPE address AS (street TEXT, city TEXT);|CreateType",
-            "ALTER TYPE status ADD VALUE 'archived';|AlterType",
+            "ALTER TYPE status RENAME TO state;|AlterType",
+            "ALTER TYPE status RENAME VALUE 'draft' TO 'new';|AlterType",
             "CREATE DOMAIN positive AS INTEGER CHECK (VALUE > 0);|CreateDomain",
             "CREATE SCHEMA app;|CreateSchema",
             "DROP VIEW active_users;|Drop",
@@ -1398,14 +1399,25 @@ class DefaultSchemaParserTest {
 
     /**
      * A single-file schema of the kind published sqlc examples use loads whole:
-     * its enum type, indexes, and dollar-quoted function are accepted and
-     * ignored, and its enum and array columns are recorded as unsupported.
+     * its indexes and dollar-quoted function are accepted and ignored, its enum
+     * type is modeled together with the column that names it, and its array
+     * column is recorded as unsupported.
      */
     @Test
     void shouldLoadASingleFileSchemaWithEnumArrayIndexAndFunctionStatements() {
         Schema schema = parser.parse(SINGLE_FILE_SCHEMA);
 
         assertEquals(List.of("shelves", "records"), tableNames(schema));
+
+        assertEquals(
+            List.of(
+                new EnumType(
+                    "shelf_state",
+                    List.of("stocked", "reserved", "retired")
+                )
+            ),
+            schema.enums()
+        );
 
         Table shelves = table(schema, "shelves");
 
@@ -1434,7 +1446,7 @@ class DefaultSchemaParserTest {
                 new Column("record_id", ColumnType.INTEGER, false),
                 new Column("shelf_id", ColumnType.INTEGER, false),
                 new Column("catalog_no", ColumnType.TEXT, false),
-                new Column("state", null, false, "SHELF_STATE"),
+                new Column("state", ColumnType.ENUM, false, null, "shelf_state"),
                 new Column(
                     "released_on",
                     ColumnType.TIMESTAMP_WITH_TIME_ZONE,
@@ -1483,8 +1495,9 @@ class DefaultSchemaParserTest {
     /**
      * Without that one statement the same migration files load in order: the
      * remaining {@code COMMENT ON} targets, the enum type, and the reshaping
-     * statements are applied, and the enum, enum-array, and text-array columns
-     * are recorded as unsupported.
+     * statements are applied, the enum column is modeled from the declared
+     * type, and the enum-array and text-array columns are recorded as
+     * unsupported.
      */
     @Test
     void shouldLoadTheMigrationFilesInOrderWithoutTheCommentOnTypeStatement() {
@@ -1531,7 +1544,7 @@ class DefaultSchemaParserTest {
             List.of(
                 new Column("id", ColumnType.INTEGER, false),
                 new Column("handle", ColumnType.TEXT, false),
-                new Column("setting", null, false, "STAGE_SETTING"),
+                new Column("setting", ColumnType.ENUM, false, null, "stage_setting"),
                 new Column("past_settings", null, true, "STAGE_SETTING[]"),
                 new Column("title", ColumnType.VARCHAR, false),
                 new Column("region", ColumnType.TEXT, false),
@@ -1550,6 +1563,243 @@ class DefaultSchemaParserTest {
             ),
             stage.constraints()
         );
+    }
+
+    /**
+     * {@code CREATE TYPE ... AS ENUM} adds the type with its labels in declared
+     * order, and a later source sees it.
+     */
+    @Test
+    void shouldAddEnumTypeWithItsDeclaredLabels() {
+        Schema schema = parser.parse(
+            parser.parse("CREATE TYPE stage_setting AS ENUM ('indoor', 'outdoor');"),
+            "CREATE TYPE shelf_state AS ENUM ('stocked');"
+        );
+
+        assertEquals(
+            List.of(
+                new EnumType("stage_setting", List.of("indoor", "outdoor")),
+                new EnumType("shelf_state", List.of("stocked"))
+            ),
+            schema.enums()
+        );
+    }
+
+    /**
+     * {@code ALTER TYPE ... ADD VALUE} inserts the label at the end by default
+     * and directly before or after the stated neighbor otherwise, so the
+     * modeled labels keep PostgreSQL's sort order.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "ALTER TYPE stage_setting ADD VALUE 'hybrid';|indoor,outdoor,hybrid",
+            "ALTER TYPE stage_setting ADD VALUE 'hybrid' BEFORE 'indoor';|hybrid,indoor,outdoor",
+            "ALTER TYPE stage_setting ADD VALUE 'hybrid' AFTER 'indoor';|indoor,hybrid,outdoor",
+            "ALTER TYPE stage_setting ADD VALUE IF NOT EXISTS 'hybrid';|indoor,outdoor,hybrid"
+        }
+    )
+    void shouldAddEnumLabelInItsStatedPosition(String statement, String labels) {
+        Schema schema = parser.parse(enumSchema(), statement);
+
+        assertEquals(
+            List.of(new EnumType("stage_setting", List.of(labels.split(",")))),
+            schema.enums()
+        );
+    }
+
+    /**
+     * {@code ADD VALUE IF NOT EXISTS} of a label the type already has changes
+     * nothing. As PostgreSQL does, the existing label is decided before the
+     * neighbor, so a neighbor the type does not have is not resolved at all.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "ALTER TYPE stage_setting ADD VALUE IF NOT EXISTS 'indoor';",
+            "ALTER TYPE stage_setting ADD VALUE IF NOT EXISTS 'indoor' BEFORE 'missing';"
+        }
+    )
+    void shouldIgnoreAddValueIfNotExistsForAnExistingLabel(String statement) {
+        Schema schema = parser.parse(enumSchema(), statement);
+
+        assertEquals(
+            List.of(new EnumType("stage_setting", List.of("indoor", "outdoor"))),
+            schema.enums()
+        );
+    }
+
+    /** Each enum diagnostic names the type and, where it applies, the label. */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "CREATE TYPE stage_setting AS ENUM ('covered');|Type already exists in schema: stage_setting",
+            "CREATE TYPE shelf_state AS ENUM ('new', 'new');|Label already exists in type shelf_state: new",
+            "ALTER TYPE shelf_state ADD VALUE 'stocked';|Type not found in schema: shelf_state",
+            "ALTER TYPE stage_setting ADD VALUE 'indoor';|Label already exists in type stage_setting: indoor",
+            "ALTER TYPE stage_setting ADD VALUE 'hybrid' AFTER 'missing';|Label not found in type stage_setting: missing"
+        }
+    )
+    void shouldReportTheEnumStatementItCannotApply(String statement, String message) {
+        Schema schema = enumSchema();
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> parser.parse(schema, statement)
+        );
+
+        assertEquals(message, exception.getMessage());
+    }
+
+    /**
+     * A column of a declared enum type is modeled as an enum column carrying
+     * the type's declared name, through every path that types a column: a
+     * {@code CREATE TABLE} column, an added column, and a changed column type.
+     * The type name is matched case-insensitively and without its SQL
+     * identifier delimiters, as PostgreSQL resolves it.
+     */
+    @Test
+    void shouldModelColumnsOfADeclaredEnumType() {
+        Schema schema = parser.parse(
+            enumSchema(),
+            """
+                CREATE TABLE stages (
+                    id      SERIAL PRIMARY KEY,
+                    setting STAGE_SETTING NOT NULL,
+                    title   text
+                );
+
+                ALTER TABLE stages ADD COLUMN backstage "stage_setting";
+                ALTER TABLE stages ALTER COLUMN title TYPE stage_setting;
+                """
+        );
+
+        assertEquals(
+            List.of(
+                new Column("id", ColumnType.INTEGER, false),
+                new Column("setting", ColumnType.ENUM, false, null, "stage_setting"),
+                new Column("title", ColumnType.ENUM, true, null, "stage_setting"),
+                new Column("backstage", ColumnType.ENUM, true, null, "stage_setting")
+            ),
+            table(schema, "stages").columns()
+        );
+    }
+
+    /**
+     * An enum column keeps its type through a rename and through a nullability
+     * change, which state no type of their own.
+     */
+    @Test
+    void shouldKeepTheEnumTypeOfARenamedAndRetypedColumn() {
+        Schema schema = parser.parse(
+            enumSchema(),
+            """
+                CREATE TABLE stages (
+                    setting stage_setting
+                );
+
+                ALTER TABLE stages RENAME COLUMN setting TO stage_setting;
+                ALTER TABLE stages ALTER COLUMN stage_setting SET NOT NULL;
+                """
+        );
+
+        assertEquals(
+            List.of(new Column("stage_setting", ColumnType.ENUM, false, null, "stage_setting")),
+            table(schema, "stages").columns()
+        );
+
+        Schema nullable = parser.parse(
+            schema,
+            "ALTER TABLE stages ALTER COLUMN stage_setting DROP NOT NULL;"
+        );
+
+        assertEquals(
+            List.of(new Column("stage_setting", ColumnType.ENUM, true, null, "stage_setting")),
+            table(nullable, "stages").columns()
+        );
+    }
+
+    /**
+     * A label added after a table is created belongs to the one modeled type,
+     * so the column declared earlier reads the added label too.
+     */
+    @Test
+    void shouldApplyAnAddedLabelToAnEarlierEnumColumn() {
+        Schema schema = parser.parse(
+            enumSchema(),
+            """
+                CREATE TABLE stages (
+                    setting stage_setting NOT NULL
+                );
+
+                ALTER TYPE stage_setting ADD VALUE 'hybrid' AFTER 'indoor';
+                """
+        );
+
+        assertEquals(
+            List.of(new Column("setting", ColumnType.ENUM, false, null, "stage_setting")),
+            table(schema, "stages").columns()
+        );
+
+        assertEquals(
+            List.of(new EnumType("stage_setting", List.of("indoor", "hybrid", "outdoor"))),
+            schema.enums()
+        );
+    }
+
+    /**
+     * An array of a declared enum type and a type the schema does not declare
+     * are recorded with their declared type as before, because only a scalar
+     * column of a declared enum type is modeled as an enum.
+     */
+    @Test
+    void shouldRecordEnumArraysAndUndeclaredTypesAsUnsupported() {
+        Schema schema = parser.parse(
+            enumSchema(),
+            """
+                CREATE TABLE stages (
+                    past_settings stage_setting[],
+                    state         shelf_state
+                );
+                """
+        );
+
+        assertEquals(
+            List.of(
+                new Column("past_settings", null, true, "STAGE_SETTING[]"),
+                new Column("state", null, true, "SHELF_STATE")
+            ),
+            table(schema, "stages").columns()
+        );
+    }
+
+    /**
+     * {@code DROP TYPE} removes an enum type sqlcj models, so it stays
+     * rejected. sqlcj's parser does not read the statement at all, so it is
+     * reported as a syntax error rather than as an unsupported statement.
+     */
+    @Test
+    void shouldRejectDropType() {
+        Schema schema = enumSchema();
+
+        SchemaParseException exception = assertThrows(
+            SchemaParseException.class,
+            () -> parser.parse(schema, "DROP TYPE stage_setting;")
+        );
+
+        assertEquals(
+            "Encountered unexpected token: \"TYPE\" at line 1, column 6",
+            exception.getMessage()
+        );
+    }
+
+    /** A schema declaring the enum type the enum tests apply statements to. */
+    private Schema enumSchema() {
+        return parser.parse("CREATE TYPE stage_setting AS ENUM ('indoor', 'outdoor');");
     }
 
     /** The schema {@code statements} leave when applied to the base schema. */
