@@ -318,6 +318,7 @@ public final class JavaCodeGenerator implements CodeGenerator {
     private String resolveImport(ColumnType type) {
         return switch (type) {
             case DATE -> "java.time.LocalDate";
+            case TIME -> "java.time.LocalTime";
             case TIMESTAMP -> "java.time.LocalDateTime";
             case TIMESTAMP_WITH_TIME_ZONE -> "java.time.OffsetDateTime";
             case DECIMAL -> "java.math.BigDecimal";
