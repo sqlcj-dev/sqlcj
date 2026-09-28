@@ -15,6 +15,7 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -30,6 +31,15 @@ public final class JavaCodeGenerator implements CodeGenerator {
     private final TypeResolver typeResolver = new DefaultTypeResolver();
     private final String packageName;
 
+    /**
+     * The row records of the package, keyed by row identity and ordered by the
+     * group that first returned them.
+     */
+    private final Map<String, SharedRow> rows = new LinkedHashMap<>();
+
+    /** The rows of the package, keyed by the lower-case row type name. */
+    private final Map<String, SharedRow> rowsByPortabilityKey = new LinkedHashMap<>();
+
     public JavaCodeGenerator() {
         this(DEFAULT_PACKAGE);
     }
@@ -40,16 +50,113 @@ public final class JavaCodeGenerator implements CodeGenerator {
 
     /**
      * Generates one repository holding every method of the group, in query
-     * order, with one executor field and one constructor.
+     * order, with one executor field and one constructor, and records the row
+     * records the group returns.
      */
     @Override
     public GeneratedFile generate(QueryGroupModel group) {
         JavaNames names = JavaNames.of(group);
 
+        recordRows(group, names);
+
         return new GeneratedFile(
             buildPath(names),
             generateSource(group, names)
         );
+    }
+
+    @Override
+    public List<GeneratedFile> generateRows() {
+        return rows.values().stream()
+            .map(this::generateRowFile)
+            .toList();
+    }
+
+    /**
+     * Records the row records of one group, rejecting a row that conflicts with
+     * a row an earlier group of the package already generated.
+     */
+    private void recordRows(QueryGroupModel group, JavaNames names) {
+        for (JavaNames.RowNames row : names.rows()) {
+            recordRow(
+                new SharedRow(
+                    group.name(),
+                    row.tableName(),
+                    row.typeName(),
+                    group.queries().get(row.queryIndex()).columns(),
+                    row.componentNames()
+                )
+            );
+        }
+    }
+
+    /**
+     * Records one row record of the package. A row of a table already recorded
+     * under the same row type is the same record, so its columns must be the
+     * ones the earlier group defined; a row type equal ignoring case to the row
+     * type of another table is rejected, because the compiled class files of
+     * those types are one path on a case-insensitive filesystem.
+     */
+    private void recordRow(SharedRow row) {
+        SharedRow recorded = rows.get(row.identity());
+
+        if (recorded != null) {
+            if (!recorded.columns().equals(row.columns())) {
+                throw new IllegalArgumentException(
+                    "Table '%s' differs from its definition in query group '%s', which generates the same row type %s"
+                        .formatted(
+                            row.tableName(),
+                            recorded.groupName(),
+                            row.typeName()
+                        )
+                );
+            }
+
+            return;
+        }
+
+        SharedRow previous = rowsByPortabilityKey.get(row.portabilityKey());
+
+        if (previous != null) {
+            throw new IllegalArgumentException(
+                "Tables '%s' and '%s' generate row types that are equal ignoring case: %s and %s"
+                    .formatted(
+                        previous.tableName(),
+                        row.tableName(),
+                        previous.typeName(),
+                        row.typeName()
+                    )
+            );
+        }
+
+        rows.put(row.identity(), row);
+        rowsByPortabilityKey.put(row.portabilityKey(), row);
+    }
+
+    /**
+     * One row record of the package, generated once from the group that first
+     * returned it.
+     */
+    private record SharedRow(
+        String groupName,
+        String tableName,
+        String typeName,
+        List<QueryColumn> columns,
+        List<String> componentNames
+    ) {
+
+        /**
+         * Two rows are the same record when they generate the same row type for
+         * the same table, compared as a case-insensitive filesystem compares
+         * the table's generated file.
+         */
+        String identity() {
+            return typeName + "\n" + tableName.toLowerCase(Locale.ROOT);
+        }
+
+        String portabilityKey() {
+            return typeName.toLowerCase(Locale.ROOT);
+        }
     }
 
     private Path buildPath(JavaNames names) {
@@ -84,6 +191,61 @@ public final class JavaCodeGenerator implements CodeGenerator {
                 generateRepositoryJavaDoc(group).stripTrailing(),
                 generateClass(group, names)
             );
+    }
+
+    /** Generates the file of one row record of the package. */
+    private GeneratedFile generateRowFile(SharedRow row) {
+        return new GeneratedFile(
+            packageDirectory().resolve(row.typeName() + ".java"),
+            generateRowSource(row)
+        );
+    }
+
+    private String generateRowSource(SharedRow row) {
+        List<String> sections = new ArrayList<>();
+
+        sections.add(GENERATED_NOTICE);
+        sections.add(generatePackage());
+
+        String imports = generateRowImports(row);
+
+        if (!imports.isEmpty()) {
+            sections.add(imports);
+        }
+
+        sections.add(generateRowJavaDoc(row).stripTrailing());
+
+        sections.add(
+            generateRecord(
+                row.typeName(),
+                row.columns(),
+                row.componentNames()
+            )
+        );
+
+        return String.join("\n\n", sections);
+    }
+
+    /** A row record depends on the JDK types of its components alone. */
+    private String generateRowImports(SharedRow row) {
+        return row.columns().stream()
+            .map(QueryColumn::type)
+            .map(this::resolveImport)
+            .filter(Objects::nonNull)
+            .distinct()
+            .map(type -> "import " + type + ";")
+            .collect(Collectors.joining("\n"));
+    }
+
+    private String generateRowJavaDoc(SharedRow row) {
+        return """
+            /**
+             * Generated by sqlcj.
+             *
+             * Table: %s
+             */
+            """
+            .formatted(escapeJavadoc(row.tableName()));
     }
 
     private String generatePackage() {
@@ -146,8 +308,8 @@ public final class JavaCodeGenerator implements CodeGenerator {
     }
 
     /**
-     * A query that returns one complete table row uses the repository's shared
-     * row record and row mapper instead of generating its own.
+     * A query that returns one complete table row uses the package's row record
+     * and the repository's row mapper instead of generating its own.
      */
     private boolean returnsSharedRow(QueryModel query) {
         return query.rowTable() != null;
@@ -197,10 +359,13 @@ public final class JavaCodeGenerator implements CodeGenerator {
         members.add(generateConstructor(names));
 
         for (JavaNames.RowNames row : names.rows()) {
-            List<QueryColumn> columns = group.queries().get(row.queryIndex()).columns();
-
-            members.add(generateRecord(row.typeName(), columns, row.componentNames()));
-            members.add(generateRowMapper(row.typeName(), row.mapperName(), columns));
+            members.add(
+                generateRowMapper(
+                    row.typeName(),
+                    row.mapperName(),
+                    group.queries().get(row.queryIndex()).columns()
+                )
+            );
         }
 
         for (int index = 0; index < group.queries().size(); index++) {
@@ -252,7 +417,7 @@ public final class JavaCodeGenerator implements CodeGenerator {
         return text.indent(4).stripTrailing();
     }
 
-    /** Generates one nested result or row record in selected-column order. */
+    /** Generates one result or row record in selected-column order. */
     private String generateRecord(
         String typeName,
         List<QueryColumn> columns,

@@ -16,6 +16,7 @@ import java.io.IOException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.lang.reflect.RecordComponent;
 import java.math.BigDecimal;
 import java.net.URL;
 import java.net.URLClassLoader;
@@ -25,14 +26,17 @@ import java.sql.Connection;
 import java.sql.Statement;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -162,6 +166,17 @@ class SqlcjCompilerIntegrationTest {
         assertTrue(repository.contains("LocalDateTime createdAt"));
         assertTrue(repository.contains("BigDecimal balance"));
 
+        Path rowFile = generatedDirectory.resolve("generated/UsersRow.java");
+
+        assertTrue(Files.exists(rowFile));
+
+        String row = Files.readString(rowFile);
+
+        assertTrue(row.contains("package generated;"));
+        assertTrue(row.contains("Table: users"));
+        assertTrue(row.contains("public record UsersRow("));
+        assertFalse(repository.contains("public record UsersRow("));
+
         assertEquals(
             List.of(
                 "Long id",
@@ -171,7 +186,7 @@ class SqlcjCompilerIntegrationTest {
                 "LocalDateTime createdAt",
                 "BigDecimal balance"
             ),
-            recordComponents(repository, "UsersRow")
+            recordComponents(row, "UsersRow")
         );
 
         assertTrue(repository.contains("private static final RowMapper<UsersRow> usersRowMapper"));
@@ -212,30 +227,17 @@ class SqlcjCompilerIntegrationTest {
                 .indexOf("public List<FindUsersResult> findUsers(")
         );
 
-        Files.createDirectories(classesDirectory);
-
-        JavaCompiler compilerApi = ToolProvider.getSystemJavaCompiler();
-
-        assertNotNull(compilerApi);
-
-        String classpath = System.getProperty("java.class.path");
-
-        int result = compilerApi.run(
-            null,
-            null,
-            null,
-            "-classpath",
-            classpath,
-            "-d",
-            classesDirectory.toString(),
-            repositoryFile.toString()
-        );
-
-        assertEquals(0, result);
+        assertCompiles(generatedDirectory, classesDirectory);
 
         assertTrue(
             Files.exists(
                 classesDirectory.resolve("generated/UsersRepository.class")
+            )
+        );
+
+        assertTrue(
+            Files.exists(
+                classesDirectory.resolve("generated/UsersRow.class")
             )
         );
     }
@@ -294,26 +296,7 @@ class SqlcjCompilerIntegrationTest {
 
         assertTrue(Files.exists(repositoryFile));
 
-        Files.createDirectories(classesDirectory);
-
-        JavaCompiler compilerApi = ToolProvider.getSystemJavaCompiler();
-
-        assertNotNull(compilerApi);
-
-        String classpath = System.getProperty("java.class.path");
-
-        int compilationResult = compilerApi.run(
-            null,
-            null,
-            null,
-            "-classpath",
-            classpath,
-            "-d",
-            classesDirectory.toString(),
-            repositoryFile.toString()
-        );
-
-        assertEquals(0, compilationResult);
+        assertCompiles(generatedDirectory, classesDirectory);
 
         JdbcDataSource dataSource = new JdbcDataSource();
 
@@ -455,26 +438,7 @@ class SqlcjCompilerIntegrationTest {
 
         assertTrue(Files.exists(repositoryFile));
 
-        Files.createDirectories(classesDirectory);
-
-        JavaCompiler compilerApi = ToolProvider.getSystemJavaCompiler();
-
-        assertNotNull(compilerApi);
-
-        String classpath = System.getProperty("java.class.path");
-
-        int compilationResult = compilerApi.run(
-            null,
-            null,
-            null,
-            "-classpath",
-            classpath,
-            "-d",
-            classesDirectory.toString(),
-            repositoryFile.toString()
-        );
-
-        assertEquals(0, compilationResult);
+        assertCompiles(generatedDirectory, classesDirectory);
 
         JdbcDataSource dataSource = new JdbcDataSource();
 
@@ -1497,6 +1461,308 @@ class SqlcjCompilerIntegrationTest {
         );
     }
 
+    /**
+     * Two entries over one migration directory that both return the complete
+     * row of one table share the single top-level row record the package
+     * generates for it.
+     */
+    @Test
+    void shouldGenerateOneSharedRowRecordForTwoEntries() throws Exception {
+        Path migrations = authorMigrations();
+        Path queriesFile = authorQueries();
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        new SqlcjCompiler().compile(
+            authorAndLibraryConfig(
+                migrations,
+                queriesFile,
+                migrations,
+                queriesFile,
+                generatedDirectory
+            )
+        );
+
+        Path packageDirectory = generatedDirectory.resolve("dev/example/generated");
+
+        assertTrue(Files.exists(packageDirectory.resolve("AuthorRepository.java")));
+        assertTrue(Files.exists(packageDirectory.resolve("LibraryRepository.java")));
+        assertTrue(Files.exists(packageDirectory.resolve("AuthorsRow.java")));
+
+        try (Stream<Path> files = Files.list(packageDirectory)) {
+            assertEquals(3, files.count());
+        }
+
+        assertEquals(
+            "dev/example/generated/AuthorRepository.java\n"
+                + "dev/example/generated/AuthorsRow.java\n"
+                + "dev/example/generated/LibraryRepository.java\n",
+            Files.readString(generatedDirectory.resolve("sqlcj-manifest.txt"))
+        );
+
+        Path classesDirectory = tempDir.resolve("classes");
+
+        assertCompiles(generatedDirectory, classesDirectory);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> row = Class.forName("dev.example.generated.AuthorsRow", true, classLoader);
+
+            assertTrue(row.isRecord());
+            assertNull(row.getEnclosingClass());
+
+            assertEquals(
+                List.of("id", "name", "createdAt"),
+                Arrays.stream(row.getRecordComponents())
+                    .map(RecordComponent::getName)
+                    .toList()
+            );
+
+            for (String repositoryName : List.of("AuthorRepository", "LibraryRepository")) {
+                Class<?> repository = Class.forName(
+                    "dev.example.generated." + repositoryName,
+                    true,
+                    classLoader
+                );
+
+                assertEquals(
+                    row,
+                    repository.getMethod("getAuthor", Long.class).getReturnType()
+                );
+            }
+        }
+    }
+
+    /** A row record no entry returns any more is deleted on regeneration. */
+    @Test
+    void shouldDeleteTheStaleRowRecordOfARemovedFullRowQuery() throws IOException {
+        Path migrations = authorMigrations();
+        Path queriesFile = authorQueries();
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Config config = new Config(
+            List.of(new SqlConfig("Author", migrations.toString(), queriesFile.toString())),
+            new JavaConfig(generatedDirectory.toString(), "dev.example.generated")
+        );
+
+        new SqlcjCompiler().compile(config);
+
+        Path rowFile = generatedDirectory.resolve("dev/example/generated/AuthorsRow.java");
+
+        assertTrue(Files.exists(rowFile));
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: GetAuthor :one
+                SELECT id
+                FROM authors
+                WHERE id = $1;
+                """
+        );
+
+        new SqlcjCompiler().compile(config);
+
+        assertFalse(Files.exists(rowFile));
+
+        assertEquals(
+            "dev/example/generated/AuthorRepository.java\n",
+            Files.readString(generatedDirectory.resolve("sqlcj-manifest.txt"))
+        );
+    }
+
+    /**
+     * Two entries that return the full row of one table must define it from the
+     * same columns, because the package generates one record.
+     */
+    @Test
+    void shouldReportTwoEntriesThatDefineOneRowDifferently() throws IOException {
+        Path authorSchema = tempDir.resolve("author-schema.sql");
+        Path librarySchema = tempDir.resolve("library-schema.sql");
+        Path queriesFile = authorQueries();
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Files.writeString(
+            authorSchema,
+            """
+                CREATE TABLE authors
+                (
+                    id         BIGINT NOT NULL,
+                    name       VARCHAR(255),
+                    created_at TIMESTAMP
+                );
+                """
+        );
+
+        Files.writeString(
+            librarySchema,
+            """
+                CREATE TABLE authors
+                (
+                    id         BIGINT NOT NULL,
+                    name       VARCHAR(255) NOT NULL,
+                    created_at TIMESTAMP
+                );
+                """
+        );
+
+        Config config = authorAndLibraryConfig(
+            authorSchema,
+            queriesFile,
+            librarySchema,
+            queriesFile,
+            generatedDirectory
+        );
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> new SqlcjCompiler().compile(config)
+        );
+
+        assertEquals(
+            "Invalid query group 'Library' in %s: ".formatted(queriesFile)
+                + "Table 'authors' differs from its definition in query group 'Author', "
+                + "which generates the same row type AuthorsRow",
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    /**
+     * Two entries whose row records are equal ignoring case are rejected across
+     * the package, because those class files are one path on a case-insensitive
+     * filesystem.
+     */
+    @Test
+    void shouldReportRowRecordsOfTwoEntriesThatAreEqualIgnoringCase() throws IOException {
+        Path authorSchema = tempDir.resolve("author-schema.sql");
+        Path librarySchema = tempDir.resolve("library-schema.sql");
+        Path authorQueries = tempDir.resolve("author-queries.sql");
+        Path libraryQueries = tempDir.resolve("library-queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Files.writeString(
+            authorSchema,
+            """
+                CREATE TABLE user_data
+                (
+                    id BIGINT NOT NULL
+                );
+                """
+        );
+
+        Files.writeString(
+            librarySchema,
+            """
+                CREATE TABLE userdata
+                (
+                    id BIGINT NOT NULL
+                );
+                """
+        );
+
+        Files.writeString(
+            authorQueries,
+            """
+                -- name: GetUserData :one
+                SELECT *
+                FROM user_data
+                WHERE id = $1;
+                """
+        );
+
+        Files.writeString(
+            libraryQueries,
+            """
+                -- name: FetchUserdata :one
+                SELECT *
+                FROM userdata
+                WHERE id = $1;
+                """
+        );
+
+        Config config = authorAndLibraryConfig(
+            authorSchema,
+            authorQueries,
+            librarySchema,
+            libraryQueries,
+            generatedDirectory
+        );
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> new SqlcjCompiler().compile(config)
+        );
+
+        assertEquals(
+            "Invalid query group 'Library' in %s: ".formatted(libraryQueries)
+                + "Tables 'user_data' and 'userdata' generate row types that are equal ignoring case: "
+                + "UserDataRow and UserdataRow",
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    /** A migration directory that creates and then alters the table authors. */
+    private Path authorMigrations() throws IOException {
+        Path migrations = Files.createDirectories(tempDir.resolve("migrations"));
+
+        Files.writeString(
+            migrations.resolve("V1__authors.sql"),
+            """
+                CREATE TABLE authors
+                (
+                    id   BIGINT NOT NULL,
+                    name VARCHAR(255)
+                );
+                """
+        );
+
+        Files.writeString(
+            migrations.resolve("V2__created_at.sql"),
+            "ALTER TABLE authors ADD COLUMN created_at TIMESTAMP;\n"
+        );
+
+        return migrations;
+    }
+
+    /** Two queries returning the complete row of the table authors. */
+    private Path authorQueries() throws IOException {
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: GetAuthor :one
+                SELECT *
+                FROM authors
+                WHERE id = $1;
+
+                -- name: ListAuthors :many
+                SELECT *
+                FROM authors;
+                """
+        );
+
+        return queriesFile;
+    }
+
+    private Config authorAndLibraryConfig(
+        Path authorSchema,
+        Path authorQueries,
+        Path librarySchema,
+        Path libraryQueries,
+        Path generatedDirectory
+    ) {
+        return new Config(
+            List.of(
+                new SqlConfig("Author", authorSchema.toString(), authorQueries.toString()),
+                new SqlConfig("Library", librarySchema.toString(), libraryQueries.toString())
+            ),
+            new JavaConfig(generatedDirectory.toString(), "dev.example.generated")
+        );
+    }
+
     @Test
     void shouldDeleteTheStaleRepositoriesOfRenamedAndRemovedGroups() throws IOException {
         Path generatedDirectory = tempDir.resolve("generated");
@@ -1981,7 +2247,12 @@ class SqlcjCompilerIntegrationTest {
 
         String repository = Files.readString(repositoryFile);
 
-        assertTrue(repository.contains("public record UsersRow("));
+        assertTrue(
+            Files.readString(generatedDirectory.resolve("generated/UsersRow.java"))
+                .contains("public record UsersRow(")
+        );
+
+        assertFalse(repository.contains("public record UsersRow("));
         assertFalse(repository.contains("InsertUserResult"));
         assertTrue(repository.contains("Long id"));
         assertTrue(repository.contains("String name"));
@@ -2002,25 +2273,7 @@ class SqlcjCompilerIntegrationTest {
         assertTrue(repository.contains("return executor.queryMany("));
         assertTrue(repository.contains("RETURNING id, name"));
 
-        Files.createDirectories(classesDirectory);
-
-        JavaCompiler compilerApi = ToolProvider.getSystemJavaCompiler();
-
-        assertNotNull(compilerApi);
-
-        assertEquals(
-            0,
-            compilerApi.run(
-                null,
-                null,
-                null,
-                "-classpath",
-                System.getProperty("java.class.path"),
-                "-d",
-                classesDirectory.toString(),
-                repositoryFile.toString()
-            )
-        );
+        assertCompiles(generatedDirectory, classesDirectory);
 
         assertTrue(Files.exists(classesDirectory.resolve("generated/UsersRepository.class")));
     }
@@ -2236,26 +2489,9 @@ class SqlcjCompilerIntegrationTest {
             Files.readAllBytes(fromDirectory)
         );
 
-        Path classesDirectory = tempDir.resolve("classes");
-
-        Files.createDirectories(classesDirectory);
-
-        JavaCompiler compilerApi = ToolProvider.getSystemJavaCompiler();
-
-        assertNotNull(compilerApi);
-
-        assertEquals(
-            0,
-            compilerApi.run(
-                null,
-                null,
-                null,
-                "-classpath",
-                System.getProperty("java.class.path"),
-                "-d",
-                classesDirectory.toString(),
-                fromDirectory.toString()
-            )
+        assertCompiles(
+            tempDir.resolve("generated-directory"),
+            tempDir.resolve("classes")
         );
     }
 
@@ -2366,26 +2602,9 @@ class SqlcjCompilerIntegrationTest {
             Files.readAllBytes(fromDirectory)
         );
 
-        Path classesDirectory = tempDir.resolve("classes");
-
-        Files.createDirectories(classesDirectory);
-
-        JavaCompiler compilerApi = ToolProvider.getSystemJavaCompiler();
-
-        assertNotNull(compilerApi);
-
-        assertEquals(
-            0,
-            compilerApi.run(
-                null,
-                null,
-                null,
-                "-classpath",
-                System.getProperty("java.class.path"),
-                "-d",
-                classesDirectory.toString(),
-                fromDirectory.toString()
-            )
+        assertCompiles(
+            tempDir.resolve("generated-directory"),
+            tempDir.resolve("classes")
         );
     }
 
@@ -2729,6 +2948,42 @@ class SqlcjCompilerIntegrationTest {
         assertEquals(0, compilationResult);
 
         return classesDirectory;
+    }
+
+    /** Compiles every generated source of one output directory together. */
+    private void assertCompiles(Path generatedDirectory, Path classesDirectory) throws IOException {
+        Files.createDirectories(classesDirectory);
+
+        JavaCompiler compilerApi = ToolProvider.getSystemJavaCompiler();
+
+        assertNotNull(compilerApi);
+
+        List<String> arguments = new ArrayList<>(
+            List.of(
+                "-classpath",
+                System.getProperty("java.class.path"),
+                "-d",
+                classesDirectory.toString()
+            )
+        );
+
+        try (Stream<Path> generatedFiles = Files.walk(generatedDirectory)) {
+            generatedFiles
+                .map(Path::toString)
+                .filter(path -> path.endsWith(".java"))
+                .sorted()
+                .forEach(arguments::add);
+        }
+
+        assertEquals(
+            0,
+            compilerApi.run(
+                null,
+                null,
+                null,
+                arguments.toArray(new String[0])
+            )
+        );
     }
 
     private URLClassLoader classLoader(Path classesDirectory) throws IOException {

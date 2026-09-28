@@ -15,9 +15,11 @@
 # manifest are byte-identical. Two scratch configurations outside the sample
 # then generate the query groups 'Author' and 'Library' and next only 'Writer',
 # proving that a renamed or removed entry leaves no stale repository and a
-# manifest listing the surviving file alone. The final generation uses the
-# sample's own 'sqlcj.yaml' from the sample directory and must restore the
-# first generated output byte for byte before the sample is compiled and run.
+# manifest listing the surviving files alone. Both entries share the one
+# top-level 'AuthorsRow' record the package generates. The final generation
+# uses the sample's own 'sqlcj.yaml' from the sample directory and must restore
+# the first generated output byte for byte before the sample is compiled and
+# run.
 #
 # Requirements: JDK 21, Maven, psql, and a reachable PostgreSQL server.
 #
@@ -184,10 +186,15 @@ YAML
 (cd "${elsewhere_dir}" && java -jar "${cli_jar}" generate \
     --config ../regeneration/author-and-library.yaml)
 
-for repository in AuthorRepository LibraryRepository; do
-    [ -f "${generated_package}/${repository}.java" ] \
-        || fail "the renamed-entry setup is missing ${generated_package}/${repository}.java"
+for generated in AuthorRepository LibraryRepository AuthorsRow; do
+    [ -f "${generated_package}/${generated}.java" ] \
+        || fail "the renamed-entry setup is missing ${generated_package}/${generated}.java"
 done
+
+shared_row_count=$(find "${generated_root}" -type f -name 'AuthorsRow.java' | wc -l)
+
+[ "${shared_row_count}" -eq 1 ] \
+    || fail "expected the two entries to share 1 row record but found ${shared_row_count}"
 
 (cd "${elsewhere_dir}" && java -jar "${cli_jar}" generate \
     --config ../regeneration/writer.yaml)
@@ -200,29 +207,34 @@ done
 
 stale_count=$(find "${generated_root}" -type f -name '*.java' | wc -l)
 
-[ "${stale_count}" -eq 1 ] \
-    || fail "expected 1 generated source after the rename but found ${stale_count}"
+[ "${stale_count}" -eq 2 ] \
+    || fail "expected 2 generated sources after the rename but found ${stale_count}"
 
-[ -f "${generated_package}/WriterRepository.java" ] \
-    || fail "the surviving generated source is not ${generated_package}/WriterRepository.java"
+for generated in WriterRepository AuthorsRow; do
+    [ -f "${generated_package}/${generated}.java" ] \
+        || fail "the surviving generated sources are missing ${generated_package}/${generated}.java"
+done
 
 expected_manifest="${workspace}/expected-manifest.txt"
-printf 'com/example/app/db/WriterRepository.java\n' > "${expected_manifest}"
+printf 'com/example/app/db/AuthorsRow.java\ncom/example/app/db/WriterRepository.java\n' \
+    > "${expected_manifest}"
 
 cmp "${expected_manifest}" "${manifest_file}" \
-    || fail "the manifest does not list WriterRepository.java alone: $(cat "${manifest_file}")"
+    || fail "the manifest does not list the surviving files alone: $(cat "${manifest_file}")"
 
 log "Generating sources with the packaged CLI"
 
 (cd "${sample_dir}" && java -jar "${cli_jar}" generate)
 
-[ -f "${generated_package}/AuthorRepository.java" ] \
-    || fail "the expected generated source is missing: ${generated_package}/AuthorRepository.java"
+for generated in AuthorRepository AuthorsRow; do
+    [ -f "${generated_package}/${generated}.java" ] \
+        || fail "the expected generated source is missing: ${generated_package}/${generated}.java"
+done
 
 generated_count=$(find "${generated_root}" -type f -name '*.java' | wc -l)
 
-[ "${generated_count}" -eq 1 ] \
-    || fail "expected 1 generated source but found ${generated_count}"
+[ "${generated_count}" -eq 2 ] \
+    || fail "expected 2 generated sources but found ${generated_count}"
 
 for method in createAuthor getAuthor findAuthor listAuthors updateAuthorBio deleteAuthor \
     searchAuthors countAuthors listAuthorPage createBook listAuthorBooks; do
@@ -230,7 +242,7 @@ for method in createAuthor getAuthor findAuthor listAuthors updateAuthorBio dele
         || fail "the generated repository is missing the ${method} method"
 done
 
-grep -q "LocalDateTime createdAt" "${generated_package}/AuthorRepository.java" \
+grep -q "LocalDateTime createdAt" "${generated_package}/AuthorsRow.java" \
     || fail "the generated row is missing the column the second migration adds"
 
 diff -r "${first_generation}" "${generated_root}" \

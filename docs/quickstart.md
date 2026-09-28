@@ -272,14 +272,15 @@ All eleven queries become methods of the one generated `AuthorRepository`:
 `deleteAuthor`, `searchAuthors`, `countAuthors`, `listAuthorPage`, `createBook`,
 and `listAuthorBooks`. `CreateAuthor`, `GetAuthor`, `FindAuthor`, `ListAuthors`,
 `SearchAuthors`, and `ListAuthorPage` each return one complete `authors` row, so
-all six share the nested record `AuthorRepository.AuthorsRow`, generated once
-from the schema's column order. A query with its own result shape, such as a
-partial projection or a `RETURNING` column list, generates a nested
-`AuthorRepository.<QueryName>Result` record instead: `CountAuthors` generates
-`CountAuthorsResult` with the single non-null `Long` component `total`, and
-`ListAuthorBooks` generates `ListAuthorBooksResult` with the components `name`
-and `title`, where `title` is `null` for an author that the left-joined `books`
-table does not match.
+all six share the top-level record `AuthorsRow`, generated once for the package
+`com.example.app.db` from the schema's column order. Another entry of the same
+package that returns the full `authors` row would return that same record. A
+query with its own result shape, such as a partial projection or a `RETURNING`
+column list, generates a nested `AuthorRepository.<QueryName>Result` record
+instead: `CountAuthors` generates `CountAuthorsResult` with the single non-null
+`Long` component `total`, and `ListAuthorBooks` generates
+`ListAuthorBooksResult` with the components `name` and `title`, where `title` is
+`null` for an author that the left-joined `books` table does not match.
 
 `GetAuthor` and `FindAuthor` read the same row by the same key and differ only
 in cardinality: `getAuthor` returns `AuthorsRow` and requires exactly one row,
@@ -292,6 +293,7 @@ query contract is documented in [Queries](queries.md).
 package com.example.app;
 
 import com.example.app.db.AuthorRepository;
+import com.example.app.db.AuthorsRow;
 import dev.sqlcj.runtime.JdbcQueryExecutor;
 import dev.sqlcj.runtime.QueryCardinalityException;
 import dev.sqlcj.runtime.QueryExecutor;
@@ -311,11 +313,11 @@ public final class App {
 
         AuthorRepository authors = new AuthorRepository(executor);
 
-        AuthorRepository.AuthorsRow created = authors.createAuthor("Ada Lovelace", "First programmer");
+        AuthorsRow created = authors.createAuthor("Ada Lovelace", "First programmer");
 
         System.out.println("created: " + created.id() + " " + created.name());
 
-        AuthorRepository.AuthorsRow read = authors.getAuthor(created.id());
+        AuthorsRow read = authors.getAuthor(created.id());
 
         System.out.println("read: " + read.name() + " / " + read.bio());
 
@@ -323,11 +325,11 @@ public final class App {
 
         System.out.println("updated rows: " + updatedRows);
 
-        for (AuthorRepository.AuthorsRow author : authors.listAuthors()) {
+        for (AuthorsRow author : authors.listAuthors()) {
             System.out.println("listed: " + author.id() + " " + author.name());
         }
 
-        Optional<AuthorRepository.AuthorsRow> missing = authors.findAuthor(-1L);
+        Optional<AuthorsRow> missing = authors.findAuthor(-1L);
 
         System.out.println("missing row: " + missing.isPresent());
 
@@ -344,7 +346,7 @@ public final class App {
 
             AuthorRepository transactionalAuthors = new AuthorRepository(new JdbcQueryExecutor(connection));
 
-            AuthorRepository.AuthorsRow committed = transactionalAuthors.createAuthor("Grace Hopper", null);
+            AuthorsRow committed = transactionalAuthors.createAuthor("Grace Hopper", null);
 
             transactionalAuthors.updateAuthorBio(committed.id(), "Compiler pioneer");
 
@@ -360,7 +362,7 @@ public final class App {
 
             AuthorRepository transactionalAuthors = new AuthorRepository(new JdbcQueryExecutor(connection));
 
-            AuthorRepository.AuthorsRow discarded = transactionalAuthors.createAuthor("Temporary Author", null);
+            AuthorsRow discarded = transactionalAuthors.createAuthor("Temporary Author", null);
 
             transactionalAuthors.updateAuthorBio(discarded.id(), "never stored");
 
@@ -369,13 +371,13 @@ public final class App {
             System.out.println("rolled back: " + authors.findAuthor(discarded.id()).isPresent());
         }
 
-        for (AuthorRepository.AuthorsRow author : authors.searchAuthors("%lovelace%")) {
+        for (AuthorsRow author : authors.searchAuthors("%lovelace%")) {
             System.out.println("searched: " + author.id() + " " + author.name());
         }
 
         System.out.println("count: " + authors.countAuthors().total());
 
-        for (AuthorRepository.AuthorsRow author : authors.listAuthorPage(1, 1)) {
+        for (AuthorsRow author : authors.listAuthorPage(1, 1)) {
             System.out.println("page: " + author.id() + " " + author.name());
         }
 
@@ -455,11 +457,13 @@ mvn exec:java
 - `mvn compile` then compiles `src/main/java` together with
   `target/generated-sources/sqlcj`.
 
-Generation writes one repository per configured entry, plus the manifest that
-records what it wrote:
+Generation writes one repository per configured entry, one row record per table
+whose complete row an entry returns, plus the manifest that records what it
+wrote:
 
 ```text
 target/generated-sources/sqlcj/com/example/app/db/AuthorRepository.java
+target/generated-sources/sqlcj/com/example/app/db/AuthorsRow.java
 target/generated-sources/sqlcj/sqlcj-manifest.txt
 ```
 
