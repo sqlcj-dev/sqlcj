@@ -188,6 +188,52 @@ class PostgresIntegrationTest {
         ORDER BY id;
         """;
 
+    /** The first migration file of the migration-directory fixture. */
+    private static final String REGION_MIGRATION = """
+        CREATE TABLE region (
+            code  text PRIMARY KEY,
+            title text NOT NULL
+        );
+        """;
+
+    /**
+     * The second migration file, without the {@code COMMENT ON TYPE} statement
+     * JSqlParser does not parse, so that the directory loads.
+     */
+    private static final String STAGE_MIGRATION = """
+        CREATE TYPE stage_setting AS ENUM ('indoor', 'outdoor');
+
+        CREATE TABLE stages (
+            id          SERIAL PRIMARY KEY,
+            handle      text NOT NULL,
+            legacy_code text,
+            setting     stage_setting NOT NULL,
+            past_settings stage_setting[],
+            title       varchar(120) NOT NULL,
+            region      text NOT NULL REFERENCES region (code),
+            keywords    text[]
+        );
+
+        COMMENT ON TABLE stages IS 'Places where performances happen';
+        COMMENT ON COLUMN stages.handle IS 'Appears in public links';
+        """;
+
+    /** The third migration file, which reshapes the table the second creates. */
+    private static final String RESHAPE_STAGE_MIGRATION = """
+        ALTER TABLE stages RENAME TO stage;
+        ALTER TABLE stage DROP COLUMN legacy_code;
+        ALTER TABLE stage ADD COLUMN opened_at TIMESTAMP NOT NULL DEFAULT now();
+        """;
+
+    /** Queries over the tables the migration directory leaves. */
+    private static final String MIGRATED_QUERIES = """
+        -- name: CreateRegion :one
+        INSERT INTO region (code, title) VALUES ($1, $2) RETURNING *;
+
+        -- name: GetStage :one
+        SELECT id, handle, title, region, opened_at FROM stage WHERE handle = $1 AND region = $2;
+        """;
+
     private static final UUID EXTERNAL_ID = UUID.fromString("3f2504e0-4f89-11d3-9a0c-0305e82c3301");
 
     private static final OffsetDateTime UPDATED_AT = OffsetDateTime.of(
@@ -250,6 +296,9 @@ class PostgresIntegrationTest {
      */
     @BeforeEach
     void resetDatabase() throws Exception {
+        execute("DROP TABLE IF EXISTS stage");
+        execute("DROP TABLE IF EXISTS region");
+        execute("DROP TYPE IF EXISTS stage_setting");
         execute("DROP TABLE IF EXISTS customer_orders");
         execute("DROP TABLE IF EXISTS customers");
         execute("DROP TABLE IF EXISTS user_aliases");
@@ -1521,6 +1570,85 @@ class PostgresIntegrationTest {
         }
     }
 
+    /**
+     * Runs a migration directory end to end: PostgreSQL applies the same files
+     * the compiler loads as its schema source, in file-name order, and the
+     * generated code writes and reads the migrated tables through the renamed
+     * table and its added column.
+     */
+    @Test
+    void shouldExecuteGeneratedCodeOverAMigratedSchemaAgainstPostgres() throws Exception {
+        Path migrations = Files.createDirectories(tempDir.resolve("migrations"));
+
+        Files.writeString(migrations.resolve("001_region.sql"), REGION_MIGRATION);
+        Files.writeString(migrations.resolve("002_stage.sql"), STAGE_MIGRATION);
+        Files.writeString(
+            migrations.resolve("003_reshape_stage.sql"),
+            RESHAPE_STAGE_MIGRATION
+        );
+
+        List<Path> migrationFiles;
+
+        try (Stream<Path> files = Files.list(migrations)) {
+            migrationFiles = files.sorted().toList();
+        }
+
+        for (Path migrationFile : migrationFiles) {
+            execute(Files.readString(migrationFile));
+        }
+
+        Path classesDirectory = generateAndCompile(migrations, MIGRATED_QUERIES);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Object region = repository
+                .getClass()
+                .getMethod("createRegion", String.class, String.class)
+                .invoke(repository, "north", "North Side");
+
+            assertNotNull(region);
+
+            assertEquals(List.of("code", "title"), recordComponentNames(region));
+            assertEquals("north", component(region, "code"));
+            assertEquals("North Side", component(region, "title"));
+
+            execute("""
+                INSERT INTO stage (handle, setting, title, region)
+                VALUES ('main-hall', 'indoor', 'Main Hall', 'north')
+                """);
+
+            Object stage = repository
+                .getClass()
+                .getMethod("getStage", String.class, String.class)
+                .invoke(repository, "main-hall", "north");
+
+            assertNotNull(stage);
+
+            assertEquals(
+                List.of("id", "handle", "title", "region", "openedAt"),
+                recordComponentNames(stage)
+            );
+
+            assertEquals(
+                List.of(
+                    Integer.class,
+                    String.class,
+                    String.class,
+                    String.class,
+                    LocalDateTime.class
+                ),
+                recordComponentTypes(stage)
+            );
+
+            assertEquals(1, component(stage, "id"));
+            assertEquals("main-hall", component(stage, "handle"));
+            assertEquals("Main Hall", component(stage, "title"));
+            assertEquals("north", component(stage, "region"));
+            assertNotNull(component(stage, "openedAt"));
+        }
+    }
+
     private Object insertUser(
         URLClassLoader classLoader,
         QueryExecutor executor,
@@ -1596,18 +1724,29 @@ class PostgresIntegrationTest {
      */
     private Path generateAndCompile(String schema, String queries) throws Exception {
         Path schemaFile = tempDir.resolve("schema.sql");
+
+        Files.writeString(schemaFile, schema);
+
+        return generateAndCompile(schemaFile, queries);
+    }
+
+    /**
+     * Compiles the queries against the configured schema path, which is either
+     * one schema file or a directory of migration files, then compiles every
+     * generated Java file into an isolated temporary classes directory.
+     */
+    private Path generateAndCompile(Path schemaPath, String queries) throws Exception {
         Path queriesFile = tempDir.resolve("queries.sql");
         Path generatedDirectory = tempDir.resolve("generated");
         Path classesDirectory = tempDir.resolve("classes");
 
-        Files.writeString(schemaFile, schema);
         Files.writeString(queriesFile, queries);
 
         Config config = new Config(
             List.of(
                 new SqlConfig(
                     GROUP,
-                    schemaFile.toString(),
+                    schemaPath.toString(),
                     queriesFile.toString()
                 )
             ),
