@@ -15,6 +15,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -33,6 +34,80 @@ class DefaultSchemaParserTest {
             user_id BIGINT NOT NULL
         );
         """;
+
+    /**
+     * A single-file schema in the shape of a published sqlc example: an enum
+     * type, an enum column, an array column, indexes, and a dollar-quoted
+     * function body followed by another statement.
+     */
+    private static final String SINGLE_FILE_SCHEMA = """
+        CREATE TYPE shelf_state AS ENUM ('stocked', 'reserved', 'retired');
+
+        CREATE TABLE shelves (
+            shelf_id SERIAL PRIMARY KEY,
+            label    text NOT NULL DEFAULT ''
+        );
+
+        CREATE TABLE records (
+            record_id   SERIAL PRIMARY KEY,
+            shelf_id    integer NOT NULL REFERENCES shelves (shelf_id),
+            catalog_no  text NOT NULL DEFAULT '' UNIQUE,
+            state       shelf_state NOT NULL DEFAULT 'stocked',
+            released_on timestamp with time zone NOT NULL DEFAULT now(),
+            genres      varchar[] NOT NULL DEFAULT '{}'
+        );
+
+        CREATE INDEX records_state_idx ON records (state, released_on);
+
+        CREATE FUNCTION shelf_code(prefix text) RETURNS text AS $$
+        BEGIN
+            RETURN prefix || '-shelf';
+        END;
+        $$ LANGUAGE plpgsql;
+
+        CREATE INDEX shelves_label_idx ON shelves (label);
+        """;
+
+    /** The first migration file of the migration-directory fixture. */
+    private static final String REGION_MIGRATION = """
+        CREATE TABLE region (
+            code  text PRIMARY KEY,
+            title text NOT NULL
+        );
+        """;
+
+    /**
+     * The second migration file, whose {@code COMMENT ON TYPE} statement
+     * JSqlParser does not parse.
+     */
+    private static final String STAGE_MIGRATION = """
+        CREATE TYPE stage_setting AS ENUM ('indoor', 'outdoor');
+
+        CREATE TABLE stages (
+            id          SERIAL PRIMARY KEY,
+            handle      text NOT NULL,
+            legacy_code text,
+            setting     stage_setting NOT NULL,
+            past_settings stage_setting[],
+            title       varchar(120) NOT NULL,
+            region      text NOT NULL REFERENCES region (code),
+            keywords    text[]
+        );
+
+        COMMENT ON TYPE stage_setting IS 'Whether a stage is covered';
+        COMMENT ON TABLE stages IS 'Places where performances happen';
+        COMMENT ON COLUMN stages.handle IS 'Appears in public links';
+        """;
+
+    /** The third migration file, which reshapes the table the second creates. */
+    private static final String RESHAPE_STAGE_MIGRATION = """
+        ALTER TABLE stages RENAME TO stage;
+        ALTER TABLE stage DROP COLUMN legacy_code;
+        ALTER TABLE stage ADD COLUMN opened_at TIMESTAMP NOT NULL DEFAULT now();
+        """;
+
+    /** The statement of {@link #STAGE_MIGRATION} that fails to parse. */
+    private static final String COMMENT_ON_TYPE_STATEMENT = "COMMENT ON TYPE stage_setting IS 'Whether a stage is covered';\n";
 
     private final SchemaParser parser = new DefaultSchemaParser();
 
@@ -1288,6 +1363,162 @@ class DefaultSchemaParserTest {
             exception.getMessage()
         );
         assertFalse(exception.getMessage().contains("net.sf.jsqlparser"));
+    }
+
+    /**
+     * A single-file schema of the kind published sqlc examples use loads whole:
+     * its enum type, indexes, and dollar-quoted function are accepted and
+     * ignored, and its enum and array columns are recorded as unsupported.
+     */
+    @Test
+    void shouldLoadASingleFileSchemaWithEnumArrayIndexAndFunctionStatements() {
+        Schema schema = parser.parse(SINGLE_FILE_SCHEMA);
+
+        assertEquals(List.of("shelves", "records"), tableNames(schema));
+
+        Table shelves = table(schema, "shelves");
+
+        assertEquals(
+            List.of(
+                new Column("shelf_id", ColumnType.INTEGER, false),
+                new Column("label", ColumnType.TEXT, false)
+            ),
+            shelves.columns()
+        );
+
+        assertEquals(
+            List.of(
+                new Constraint(
+                    ConstraintType.PRIMARY_KEY,
+                    List.of("shelf_id")
+                )
+            ),
+            shelves.constraints()
+        );
+
+        Table records = table(schema, "records");
+
+        assertEquals(
+            List.of(
+                new Column("record_id", ColumnType.INTEGER, false),
+                new Column("shelf_id", ColumnType.INTEGER, false),
+                new Column("catalog_no", ColumnType.TEXT, false),
+                new Column("state", null, false, "SHELF_STATE"),
+                new Column(
+                    "released_on",
+                    ColumnType.TIMESTAMP_WITH_TIME_ZONE,
+                    false
+                ),
+                new Column("genres", null, false, "VARCHAR[]")
+            ),
+            records.columns()
+        );
+
+        assertEquals(
+            List.of(
+                new Constraint(
+                    ConstraintType.PRIMARY_KEY,
+                    List.of("record_id")
+                ),
+                new Constraint(
+                    ConstraintType.UNIQUE,
+                    List.of("catalog_no")
+                )
+            ),
+            records.constraints()
+        );
+    }
+
+    /**
+     * A migration file of the kind published sqlc examples use fails on its
+     * {@code COMMENT ON TYPE} statement, which JSqlParser does not parse, and
+     * the failure states the reason and the location of that statement.
+     */
+    @Test
+    void shouldRejectTheCommentOnTypeStatementOfAMigrationFile() {
+        Schema schema = parser.parse(REGION_MIGRATION);
+
+        SchemaParseException exception = assertThrows(
+            SchemaParseException.class,
+            () -> parser.parse(schema, STAGE_MIGRATION)
+        );
+
+        assertEquals(
+            "Encountered unexpected token: \"TYPE\" at line 14, column 12",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * Without that one statement the same migration files load in order: the
+     * remaining {@code COMMENT ON} targets, the enum type, and the reshaping
+     * statements are applied, and the enum, enum-array, and text-array columns
+     * are recorded as unsupported.
+     */
+    @Test
+    void shouldLoadTheMigrationFilesInOrderWithoutTheCommentOnTypeStatement() {
+        String loadableStageMigration = STAGE_MIGRATION.replace(
+            COMMENT_ON_TYPE_STATEMENT,
+            ""
+        );
+
+        assertNotEquals(STAGE_MIGRATION, loadableStageMigration);
+
+        Schema schema = parser.parse(
+            parser.parse(
+                parser.parse(REGION_MIGRATION),
+                loadableStageMigration
+            ),
+            RESHAPE_STAGE_MIGRATION
+        );
+
+        assertEquals(List.of("region", "stage"), tableNames(schema));
+
+        Table region = table(schema, "region");
+
+        assertEquals(
+            List.of(
+                new Column("code", ColumnType.TEXT, true),
+                new Column("title", ColumnType.TEXT, false)
+            ),
+            region.columns()
+        );
+
+        assertEquals(
+            List.of(
+                new Constraint(
+                    ConstraintType.PRIMARY_KEY,
+                    List.of("code")
+                )
+            ),
+            region.constraints()
+        );
+
+        Table stage = table(schema, "stage");
+
+        assertEquals(
+            List.of(
+                new Column("id", ColumnType.INTEGER, false),
+                new Column("handle", ColumnType.TEXT, false),
+                new Column("setting", null, false, "STAGE_SETTING"),
+                new Column("past_settings", null, true, "STAGE_SETTING[]"),
+                new Column("title", ColumnType.VARCHAR, false),
+                new Column("region", ColumnType.TEXT, false),
+                new Column("keywords", null, true, "TEXT[]"),
+                new Column("opened_at", ColumnType.TIMESTAMP, false)
+            ),
+            stage.columns()
+        );
+
+        assertEquals(
+            List.of(
+                new Constraint(
+                    ConstraintType.PRIMARY_KEY,
+                    List.of("id")
+                )
+            ),
+            stage.constraints()
+        );
     }
 
     /** The schema {@code statements} leave when applied to the base schema. */
