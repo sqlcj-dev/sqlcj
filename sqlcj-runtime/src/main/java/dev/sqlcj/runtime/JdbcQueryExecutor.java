@@ -5,6 +5,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -31,6 +32,13 @@ import java.util.Optional;
  * several generated operations can take part in one application-controlled
  * commit or rollback.</li>
  * </ul>
+ *
+ * <p>Each argument is bound at its one-based position with
+ * {@link PreparedStatement#setObject(int, Object)}, so a null argument is bound
+ * as SQL {@code NULL}. An {@link UntypedText} argument is the one exception: its
+ * {@link UntypedText#value() value} is bound with
+ * {@link java.sql.Types#OTHER}, which sends the text without a declared SQL
+ * type and lets the database type it from the context of its placeholder.
  *
  * <p>{@link #queryOne} reads the first row, maps it, and then advances the
  * result set once more to prove that there is no second row.
@@ -219,9 +227,19 @@ public final class JdbcQueryExecutor implements QueryExecutor {
         }
     }
 
+    /**
+     * Binds each argument at its one-based position, an {@link UntypedText} as
+     * its text without a declared SQL type and every other argument as itself.
+     */
     private void bindParameters(PreparedStatement statement, List<?> parameters) throws SQLException {
         for (int i = 0; i < parameters.size(); i++) {
-            statement.setObject(i + 1, parameters.get(i));
+            Object parameter = parameters.get(i);
+
+            if (parameter instanceof UntypedText(String value)) {
+                statement.setObject(i + 1, value, Types.OTHER);
+            } else {
+                statement.setObject(i + 1, parameter);
+            }
         }
     }
 

@@ -14,9 +14,11 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.Types;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
@@ -127,6 +129,80 @@ class JdbcQueryExecutorTest {
         );
 
         assertEquals("Alice", result);
+    }
+
+    /**
+     * An {@link UntypedText} argument is bound as its text without a declared
+     * SQL type, so the database types it from the context of its placeholder,
+     * while every other argument keeps its untouched {@code setObject} binding.
+     */
+    @Test
+    void shouldBindUntypedTextWithoutADeclaredSqlType() throws SQLException {
+        BindingRecorder recorder = new BindingRecorder();
+
+        try (Connection connection = dataSource.getConnection()) {
+            JdbcQueryExecutor connectionExecutor = new JdbcQueryExecutor(
+                recorder.track(connection)
+            );
+
+            assertEquals(
+                1,
+                connectionExecutor.execute(
+                    REPOSITORY,
+                    "UpdateUserName",
+                    "UPDATE users SET name = ? WHERE id = ?",
+                    Arrays.asList(new UntypedText("Alicia"), 1L)
+                )
+            );
+        }
+
+        assertEquals(
+            List.of(
+                new BoundParameter(1, "Alicia", Types.OTHER),
+                new BoundParameter(2, 1L, null)
+            ),
+            recorder.bindings
+        );
+    }
+
+    /** A null {@link UntypedText} value is bound without a declared SQL type too. */
+    @Test
+    void shouldBindNullUntypedTextWithoutADeclaredSqlType() throws SQLException {
+        BindingRecorder recorder = new BindingRecorder();
+
+        try (Connection connection = dataSource.getConnection()) {
+            JdbcQueryExecutor connectionExecutor = new JdbcQueryExecutor(
+                recorder.track(connection)
+            );
+
+            assertEquals(
+                1,
+                connectionExecutor.execute(
+                    REPOSITORY,
+                    "UpdateUserName",
+                    "UPDATE users SET name = ? WHERE id = ?",
+                    Arrays.asList(new UntypedText(null), 1L)
+                )
+            );
+        }
+
+        assertEquals(
+            List.of(
+                new BoundParameter(1, null, Types.OTHER),
+                new BoundParameter(2, 1L, null)
+            ),
+            recorder.bindings
+        );
+
+        assertNull(
+            executor.queryOne(
+                REPOSITORY,
+                "GetUser",
+                "SELECT name FROM users WHERE id = ?",
+                List.of(1L),
+                resultSet -> resultSet.getString("name")
+            )
+        );
     }
 
     @Test
@@ -828,6 +904,74 @@ class JdbcQueryExecutorTest {
         long id,
         String name
     ) {
+    }
+
+    /**
+     * One {@code PreparedStatement.setObject} call an executor made, with the
+     * SQL type it declared or {@code null} when it declared none.
+     */
+    private record BoundParameter(
+        int position,
+        Object value,
+        Integer sqlType
+    ) {
+    }
+
+    /**
+     * Records the parameter bindings an executor made, in call order. A tracked
+     * connection is returned as a dynamic proxy that delegates every call and
+     * records the {@code setObject} calls of the prepared statements it hands
+     * out.
+     */
+    private static final class BindingRecorder {
+
+        private final List<BoundParameter> bindings = new ArrayList<>();
+
+        private Connection track(Connection connection) {
+            return (Connection) Proxy.newProxyInstance(
+                getClass().getClassLoader(),
+                new Class<?>[] { Connection.class },
+                (proxy, method, arguments) -> {
+                    Object result = invoke(connection, method, arguments);
+
+                    if (result instanceof PreparedStatement statement) {
+                        return trackStatement(statement);
+                    }
+
+                    return result;
+                }
+            );
+        }
+
+        private PreparedStatement trackStatement(PreparedStatement statement) {
+            return (PreparedStatement) Proxy.newProxyInstance(
+                getClass().getClassLoader(),
+                new Class<?>[] { PreparedStatement.class },
+                (proxy, method, arguments) -> {
+                    if ("setObject".equals(method.getName())) {
+                        bindings.add(
+                            new BoundParameter(
+                                (Integer) arguments[0],
+                                arguments[1],
+                                arguments.length > 2
+                                    ? (Integer) arguments[2]
+                                    : null
+                            )
+                        );
+                    }
+
+                    return invoke(statement, method, arguments);
+                }
+            );
+        }
+
+        private Object invoke(Object delegate, Method method, Object[] arguments) throws Throwable {
+            try {
+                return method.invoke(delegate, arguments);
+            } catch (InvocationTargetException e) {
+                throw e.getCause();
+            }
+        }
     }
 
     /**

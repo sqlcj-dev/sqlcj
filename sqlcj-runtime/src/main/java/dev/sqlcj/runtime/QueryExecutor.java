@@ -9,6 +9,11 @@ import java.util.Optional;
  * <p>Every operation is given the generated repository's class name and the
  * name of the query it was generated from, so an execution or cardinality
  * failure names the query the application called.
+ *
+ * <p>The parameters of an operation are the query's arguments in the order
+ * their placeholders appear in its SQL, and any of them may be {@code null}. An
+ * argument may also be an {@link UntypedText}, which carries text an
+ * implementation binds without a declared SQL type.
  */
 public interface QueryExecutor {
 
