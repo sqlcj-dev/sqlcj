@@ -67,7 +67,10 @@ public final class SqlcjCompiler {
         writeManifest(outputDirectory, generatedPaths);
     }
 
-    /** Generates one repository per configured query group. */
+    /**
+     * Generates one repository per configured query group, followed by the row
+     * records those groups share.
+     */
     private List<GeneratedFile> generate(List<Source> sources, CodeGenerator codeGenerator) {
         List<GeneratedFile> files = new ArrayList<>();
         Map<String, GeneratedRepository> generatedRepositories = new HashMap<>();
@@ -85,6 +88,8 @@ public final class SqlcjCompiler {
 
             files.add(file);
         }
+
+        files.addAll(codeGenerator.generateRows());
 
         return files;
     }
@@ -151,7 +156,8 @@ public final class SqlcjCompiler {
 
     /**
      * Generates one group, reporting a generation failure such as a repeated
-     * repository method with the group and its query source.
+     * repository method, or a row record that conflicts with the row of an
+     * earlier group, with the group and its query source.
      */
     private GeneratedFile generateRepository(
         Source source,

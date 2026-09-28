@@ -35,8 +35,8 @@ import java.util.stream.Collectors;
  * disambiguated in their existing SQL order.
  *
  * <p>A query that returns one complete table row is named after that table
- * instead of after itself, so every such query of one group shares one nested
- * row record and one row mapper.
+ * instead of after itself, so every such query of one group shares one row
+ * record and one row mapper.
  *
  * <p>Two queries of one group that would generate the same method are rejected
  * instead of being disambiguated, because a repository method is a name the
@@ -176,11 +176,14 @@ final class JavaNames {
     /**
      * The resolved Java identifiers of one shared row record.
      *
+     * @param tableName  the schema's declared name of the table the row belongs
+     *                   to
      * @param queryIndex the group-relative index of the query that first
      *                   returned this row, whose analyzed columns are the row's
      *                   columns
      */
     record RowNames(
+        String tableName,
         String typeName,
         String mapperName,
         List<String> componentNames,
@@ -213,6 +216,7 @@ final class JavaNames {
             rowsByTable.put(
                 table,
                 new RowNames(
+                    table,
                     typeName,
                     resolveName(
                         decapitalize(typeName) + MAPPER_SUFFIX,
@@ -263,7 +267,7 @@ final class JavaNames {
         }
     }
 
-    /** One generated nested row type and the table that generated it. */
+    /** One generated row type and the table that generated it. */
     private record GeneratedRowType(String tableName, String typeName) {
     }
 
