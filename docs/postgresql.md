@@ -123,21 +123,25 @@ accepted and map exactly like their unparameterized spellings.
 | `CHAR`, `CHARACTER` | `String` | PostgreSQL blank-pads a stored value to the declared length, so `ab` written into a `CHAR(3)` column reads back as `ab `. |
 | `TEXT` | `String` | |
 | `DATE` | `java.time.LocalDate` | |
+| `TIME`, `TIME WITHOUT TIME ZONE` | `java.time.LocalTime` | |
 | `TIMESTAMP`, `TIMESTAMP WITHOUT TIME ZONE` | `java.time.LocalDateTime` | |
 | `TIMESTAMP WITH TIME ZONE`, `TIMESTAMPTZ` | `java.time.OffsetDateTime` | PostgreSQL normalizes the stored value to the session time zone, so a value read back equals the written value by instant rather than by offset. |
 | `DECIMAL`, `NUMERIC` | `java.math.BigDecimal` | |
+| `REAL`, `FLOAT4` | `Float` | |
+| `DOUBLE PRECISION`, `FLOAT8` | `Double` | |
 | `UUID` | `java.util.UUID` | |
+| `BYTEA` | `byte[]` | A record compares an array component by reference, so two row records holding equal bytes are not `equals`. |
 
 Any spelling that is not listed above, and any array of any element type, has no
 Java mapping. Such a column is recorded with its declared type instead of
 failing the schema, and fails only a query that uses it; see
 [Unsupported Types and DDL](#unsupported-types-and-ddl).
 
-The generated repository imports `java.time.LocalDate`, `java.time.LocalDateTime`,
-`java.time.OffsetDateTime`, `java.math.BigDecimal`, and `java.util.UUID` as
-needed; the remaining types need no import. Each result column is read with
-`resultSet.getObject(position, JavaType.class)` at its one-based position in the
-selected-column list.
+The generated repository imports `java.time.LocalDate`, `java.time.LocalTime`,
+`java.time.LocalDateTime`, `java.time.OffsetDateTime`, `java.math.BigDecimal`,
+and `java.util.UUID` as needed; the remaining types need no import. Each result
+column is read with `resultSet.getObject(position, JavaType.class)` at its
+one-based position in the selected-column list.
 
 ## Supported `CREATE TABLE` Constructs
 
@@ -300,17 +304,15 @@ Nullability itself is parsed from `NOT NULL` only:
   analyzed model, but the generated type is resolved from the column type alone.
 
 Null binding and null reading are executed against PostgreSQL for the nullable
-columns of the integration schema snapshot, which cover `SMALLINT`, `VARCHAR`,
-`TEXT`, `BOOLEAN`, `DATE`, `TIMESTAMP`, `DECIMAL`, `UUID`, and
-`TIMESTAMP WITH TIME ZONE`.
+columns of the integration schema snapshots, which cover `SMALLINT`, `VARCHAR`,
+`TEXT`, `BOOLEAN`, `DATE`, `TIMESTAMP`, `DECIMAL`, `UUID`,
+`TIMESTAMP WITH TIME ZONE`, `REAL`, `DOUBLE PRECISION`, `BYTEA`, and `TIME`.
 
 ## Unsupported Types and DDL
 
 The following type families have no Java mapping, because only the spellings
 listed in [Supported Column Types](#supported-column-types) are mapped:
 
-- floating point, such as `REAL` and `DOUBLE PRECISION`,
-- binary, such as `BYTEA`,
 - `JSON` and `JSONB`,
 - arrays,
 - enum types,
@@ -318,6 +320,11 @@ listed in [Supported Column Types](#supported-column-types) are mapped:
 - range types,
 - composite types,
 - spatial types.
+
+These spellings of otherwise mapped families are unmapped as well:
+
+- `FLOAT` and `FLOAT(p)`, whose precision selects `REAL` or `DOUBLE PRECISION`,
+- `TIME WITH TIME ZONE` and `TIMETZ`.
 
 A column of such a type does not fail the schema. It is recorded with its
 declared type, written as the canonical spelling of that type — upper case, with
@@ -370,7 +377,8 @@ Type table:
 - `PostgresIntegrationTest.shouldExecuteGeneratedOneQueryAgainstPostgres`,
   `PostgresIntegrationTest.shouldExecuteGeneratedWriteAgainstPostgres`,
   `PostgresIntegrationTest.shouldRoundTripSerialUuidAndTimestampWithTimeZoneValues`,
-  and `PostgresIntegrationTest.shouldRoundTripPostgresTypeSpellingValues`
+  `PostgresIntegrationTest.shouldRoundTripPostgresTypeSpellingValues`, and
+  `PostgresIntegrationTest.shouldRoundTripFloatingPointBinaryAndTimeValues`
   execute the Java mappings, including the blank-padded `CHAR` values, against
   PostgreSQL 16.
 - `DefaultSchemaParserTest.shouldRecordUnsupportedColumnType` and
@@ -470,7 +478,8 @@ Ignored statements:
 Nulls:
 
 - `PostgresIntegrationTest.shouldBindAndReadNullValuesThroughGeneratedCode`
-  binds null arguments and reads null results through generated code against
+  and `PostgresIntegrationTest.shouldRoundTripFloatingPointBinaryAndTimeValues`
+  bind null arguments and read null results through generated code against
   PostgreSQL.
 - `PostgresIntegrationTest.shouldEnforceResultCardinalitiesAgainstPostgres`
   proves that row absence is reported by `:optional` and `:one` rather than by a
