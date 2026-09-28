@@ -15,5 +15,7 @@ public enum ColumnType {
     REAL,
     DOUBLE_PRECISION,
     UUID,
-    BYTEA
+    BYTEA,
+    JSON,
+    JSONB
 }

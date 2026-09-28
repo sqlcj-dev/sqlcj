@@ -131,6 +131,8 @@ accepted and map exactly like their unparameterized spellings.
 | `DOUBLE PRECISION`, `FLOAT8` | `Double` | |
 | `UUID` | `java.util.UUID` | |
 | `BYTEA` | `byte[]` | A record compares an array component by reference, so two row records holding equal bytes are not `equals`. |
+| `JSON` | `String` | The JSON text itself. PostgreSQL stores it as written, so it reads back exactly as written. sqlcj never parses, validates, or normalizes it. |
+| `JSONB` | `String` | The JSON text itself. PostgreSQL stores a decomposed value, so the text reads back as PostgreSQL renders it rather than as written, and `=` compares by value. sqlcj never parses, validates, or normalizes it. |
 
 Any spelling that is not listed above, and any array of any element type, has no
 Java mapping. Such a column is recorded with its declared type instead of
@@ -140,8 +142,17 @@ failing the schema, and fails only a query that uses it; see
 The generated repository imports `java.time.LocalDate`, `java.time.LocalTime`,
 `java.time.LocalDateTime`, `java.time.OffsetDateTime`, `java.math.BigDecimal`,
 and `java.util.UUID` as needed; the remaining types need no import. Each result
-column is read with `resultSet.getObject(position, JavaType.class)` at its
-one-based position in the selected-column list.
+column is read at its one-based position in the selected-column list, with
+`resultSet.getObject(position, JavaType.class)`, or with
+`resultSet.getString(position)` for a `JSON` or `JSONB` column, which the driver
+reports as a type of its own rather than as a character type.
+
+A `JSON` or `JSONB` argument is passed to the executor as
+`new dev.sqlcj.runtime.UntypedText(value)`, written out in full so that the
+generated imports are unchanged, and `JdbcQueryExecutor` binds that text with
+`java.sql.Types.OTHER`. PostgreSQL then types the text from the context of its
+placeholder, which is what a `json` or `jsonb` column or comparison needs: text
+bound as `varchar` is rejected there.
 
 ## Supported `CREATE TABLE` Constructs
 
@@ -283,14 +294,18 @@ mixed:
   component and no method parameter is wrapped in `Optional`, and no custom
   nullable wrapper is used.
 
-Null handling is uniform and independent of the column type:
+Null handling does not depend on the column type:
 
 - the generated argument list is built with `java.util.Arrays.asList`, which
   accepts null elements,
 - `JdbcQueryExecutor` binds each argument positionally with
-  `PreparedStatement.setObject`, so a null argument is bound as SQL `NULL`,
-- each result column is read with `ResultSet.getObject(position, Class)`, so a
-  SQL `NULL` is read back as `null`.
+  `PreparedStatement.setObject`, so a null argument is bound as SQL `NULL`. A
+  `JSON` or `JSONB` argument is bound the same way through its
+  `dev.sqlcj.runtime.UntypedText` wrapper, so a null value becomes a SQL `NULL`
+  without a declared type,
+- each result column is read with `ResultSet.getObject(position, Class)`, or
+  with `ResultSet.getString(position)` for `JSON` and `JSONB`, so a SQL `NULL` is
+  read back as `null`.
 
 Nullability itself is parsed from `NOT NULL` only:
 
@@ -306,15 +321,15 @@ Nullability itself is parsed from `NOT NULL` only:
 Null binding and null reading are executed against PostgreSQL for the nullable
 columns of the integration schema snapshots, which cover `SMALLINT`, `VARCHAR`,
 `TEXT`, `BOOLEAN`, `DATE`, `TIMESTAMP`, `DECIMAL`, `UUID`,
-`TIMESTAMP WITH TIME ZONE`, `REAL`, `DOUBLE PRECISION`, `BYTEA`, and `TIME`.
+`TIMESTAMP WITH TIME ZONE`, `REAL`, `DOUBLE PRECISION`, `BYTEA`, `TIME`, `JSON`,
+and `JSONB`.
 
 ## Unsupported Types and DDL
 
 The following type families have no Java mapping, because only the spellings
 listed in [Supported Column Types](#supported-column-types) are mapped:
 
-- `JSON` and `JSONB`,
-- arrays,
+- arrays, including `JSON[]` and `JSONB[]`,
 - enum types,
 - domain types,
 - range types,
@@ -329,7 +344,7 @@ These spellings of otherwise mapped families are unmapped as well:
 A column of such a type does not fail the schema. It is recorded with its
 declared type, written as the canonical spelling of that type — upper case, with
 parenthesized type arguments removed — followed by `[]` for each declared array
-dimension, so `jsonb` is recorded as `JSONB`, `varchar(20)[]` as `VARCHAR[]`,
+dimension, so `xml` is recorded as `XML`, `varchar(20)[]` as `VARCHAR[]`,
 and `integer[][]` as `INTEGER[][]`.
 
 A recorded column fails only the analysis of a query that
@@ -377,10 +392,21 @@ Type table:
 - `PostgresIntegrationTest.shouldExecuteGeneratedOneQueryAgainstPostgres`,
   `PostgresIntegrationTest.shouldExecuteGeneratedWriteAgainstPostgres`,
   `PostgresIntegrationTest.shouldRoundTripSerialUuidAndTimestampWithTimeZoneValues`,
-  `PostgresIntegrationTest.shouldRoundTripPostgresTypeSpellingValues`, and
-  `PostgresIntegrationTest.shouldRoundTripFloatingPointBinaryAndTimeValues`
-  execute the Java mappings, including the blank-padded `CHAR` values, against
-  PostgreSQL 16.
+  `PostgresIntegrationTest.shouldRoundTripPostgresTypeSpellingValues`,
+  `PostgresIntegrationTest.shouldRoundTripFloatingPointBinaryAndTimeValues`, and
+  `PostgresIntegrationTest.shouldRoundTripJsonValues`
+  execute the Java mappings, including the blank-padded `CHAR` values, the JSON
+  text as written and as PostgreSQL renders it, and a `JSONB` equality
+  predicate, against PostgreSQL 16.
+- `JavaCodeGeneratorTest.shouldWrapJsonArgumentsAndReadJsonColumnsAsText` and
+  `JavaCodeGeneratorTest.shouldGenerateCompilableJavaSourceForJsonTypes` cover
+  the generated `UntypedText` argument at every binding position of a JSON
+  placeholder, the `getString` read, the unchanged binding and reading of the
+  other `String` types, and compilation of the generated source.
+- `JdbcQueryExecutorTest.shouldBindUntypedTextWithoutADeclaredSqlType` and
+  `JdbcQueryExecutorTest.shouldBindNullUntypedTextWithoutADeclaredSqlType`
+  cover the runtime binding of a null and a non-null `UntypedText` beside an
+  ordinary argument.
 - `DefaultSchemaParserTest.shouldRecordUnsupportedColumnType` and
   `DefaultSchemaParserTest.shouldParseNullabilityOfUnsupportedColumnTypes` cover
   the recorded type of an unmapped spelling and of an array, beside the mapped
@@ -393,7 +419,7 @@ Type table:
 - `SqlcjCompilerIntegrationTest.shouldReportTheQueryThatReadsAnUnsupportedTypeColumn`
   covers the query diagnostic and that no file is written, and
   `SqlcjCompilerIntegrationTest.shouldGenerateCompilableRepositoryBesideUnsupportedTypeColumns`
-  compiles a repository generated beside an array and a `JSONB` column.
+  compiles a repository generated beside an array and an `XML` column.
 
 `CREATE TABLE` table:
 

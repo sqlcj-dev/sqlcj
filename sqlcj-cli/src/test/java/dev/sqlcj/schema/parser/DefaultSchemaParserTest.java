@@ -358,7 +358,11 @@ class DefaultSchemaParserTest {
             "TIME(3), TIME",
             "TIME WITHOUT TIME ZONE, TIME",
             "time without time zone, TIME",
-            "TIME(3) WITHOUT TIME ZONE, TIME"
+            "TIME(3) WITHOUT TIME ZONE, TIME",
+            "JSON, JSON",
+            "json, JSON",
+            "JSONB, JSONB",
+            "jsonb, JSONB"
         }
     )
     void shouldParsePostgresTypeSpellings(String sqlType, ColumnType expectedType) {
@@ -462,17 +466,20 @@ class DefaultSchemaParserTest {
      *
      * <p>{@code FLOAT} and {@code FLOAT(p)}, whose precision selects the type,
      * and the time-zone-aware time spellings are unmapped beside the mapped
-     * floating-point, binary, and time spellings.
+     * floating-point, binary, and time spellings. An array of a mapped JSON
+     * spelling is recorded like any other array.
      */
     @ParameterizedTest
     @CsvSource(
         {
-            "JSONB, JSONB",
+            "XML, XML",
             "FLOAT, FLOAT",
             "float(24), FLOAT",
             "TIMETZ, TIMETZ",
             "time with time zone, TIME WITH TIME ZONE",
             "real[], REAL[]",
+            "json[], JSON[]",
+            "jsonb[], JSONB[]",
             "\"char\", \"CHAR\"",
             "varchar(20)[], VARCHAR[]",
             "integer[][], INTEGER[][]",
@@ -508,7 +515,7 @@ class DefaultSchemaParserTest {
         String sql = """
             CREATE TABLE users (
                 tags     INT[] NOT NULL,
-                metadata JSONB
+                metadata XML
             );
             """;
 
@@ -517,7 +524,7 @@ class DefaultSchemaParserTest {
         assertEquals(
             List.of(
                 new Column("tags", null, false, "INT[]"),
-                new Column("metadata", null, true, "JSONB")
+                new Column("metadata", null, true, "XML")
             ),
             table.columns()
         );
@@ -975,7 +982,7 @@ class DefaultSchemaParserTest {
         Schema schema = applied("""
             ALTER TABLE users ADD COLUMN created_at TIMESTAMPTZ NOT NULL;
             ALTER TABLE users ADD COLUMN revision SERIAL;
-            ALTER TABLE users ADD COLUMN metadata JSONB;
+            ALTER TABLE users ADD COLUMN metadata XML;
             ALTER TABLE users ADD COLUMN tags varchar(20)[];
             """);
 
@@ -986,7 +993,7 @@ class DefaultSchemaParserTest {
                 new Column("name", ColumnType.VARCHAR, true),
                 new Column("created_at", ColumnType.TIMESTAMP_WITH_TIME_ZONE, false),
                 new Column("revision", ColumnType.INTEGER, false),
-                new Column("metadata", null, true, "JSONB"),
+                new Column("metadata", null, true, "XML"),
                 new Column("tags", null, true, "VARCHAR[]")
             ),
             table(schema, "users").columns()
@@ -1075,13 +1082,13 @@ class DefaultSchemaParserTest {
     void shouldChangeColumnTypeInItsPositionKeepingItsNullability() {
         Schema schema = applied("""
             ALTER TABLE users ALTER COLUMN id TYPE INT4;
-            ALTER TABLE users ALTER COLUMN email TYPE JSONB;
+            ALTER TABLE users ALTER COLUMN email TYPE XML;
             """);
 
         assertEquals(
             List.of(
                 new Column("id", ColumnType.INTEGER, false),
-                new Column("email", null, true, "JSONB"),
+                new Column("email", null, true, "XML"),
                 new Column("name", ColumnType.VARCHAR, true)
             ),
             table(schema, "users").columns()
@@ -1091,7 +1098,7 @@ class DefaultSchemaParserTest {
     @Test
     void shouldChangeARecordedColumnTypeBackToAMappedType() {
         Schema schema = applied("""
-            ALTER TABLE users ALTER COLUMN name TYPE JSONB;
+            ALTER TABLE users ALTER COLUMN name TYPE XML;
             ALTER TABLE users ALTER COLUMN name SET NOT NULL;
             ALTER TABLE users ALTER COLUMN name TYPE TEXT;
             """);

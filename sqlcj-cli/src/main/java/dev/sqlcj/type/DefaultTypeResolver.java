@@ -11,7 +11,7 @@ public class DefaultTypeResolver implements TypeResolver {
             case BIGINT -> "Long";
             case SMALLINT -> "Short";
             case BOOLEAN -> "Boolean";
-            case VARCHAR, TEXT -> "String";
+            case VARCHAR, TEXT, JSON, JSONB -> "String";
             case DATE -> "LocalDate";
             case TIME -> "LocalTime";
             case TIMESTAMP -> "LocalDateTime";

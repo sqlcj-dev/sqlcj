@@ -731,6 +731,8 @@ public class DefaultSchemaParser implements SchemaParser {
             case "DOUBLE PRECISION", "FLOAT8" -> ColumnType.DOUBLE_PRECISION;
             case "UUID" -> ColumnType.UUID;
             case "BYTEA" -> ColumnType.BYTEA;
+            case "JSON" -> ColumnType.JSON;
+            case "JSONB" -> ColumnType.JSONB;
             default -> null;
         };
     }

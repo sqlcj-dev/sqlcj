@@ -637,27 +637,57 @@ public final class JavaCodeGenerator implements CodeGenerator {
      * than {@code List.of} so that a null argument can be bound.
      */
     private String generateParameterList(QueryModel query, JavaNames.QueryNames names) {
-        Map<Integer, String> namesByIndex = generateParameterNamesByIndex(query, names);
+        Map<Integer, String> argumentsByIndex = generateArgumentsByIndex(query, names);
 
         return query.bindingParameterIndexes().stream()
-            .map(namesByIndex::get)
+            .map(argumentsByIndex::get)
             .collect(Collectors.joining(", ", "java.util.Arrays.asList(", ")"));
     }
 
-    private Map<Integer, String> generateParameterNamesByIndex(
+    /**
+     * Renders the executor argument of each logical parameter, keyed by the
+     * placeholder index it is bound at, so that a repeated index renders the
+     * same argument at each of its binding positions.
+     */
+    private Map<Integer, String> generateArgumentsByIndex(
         QueryModel query,
         JavaNames.QueryNames names
     ) {
-        Map<Integer, String> namesByIndex = new LinkedHashMap<>();
+        Map<Integer, String> argumentsByIndex = new LinkedHashMap<>();
 
         for (int index = 0; index < query.parameters().size(); index++) {
-            namesByIndex.put(
-                query.parameters().get(index).index(),
-                names.parameterNames().get(index)
+            QueryParameter parameter = query.parameters().get(index);
+
+            argumentsByIndex.put(
+                parameter.index(),
+                generateArgument(parameter, names.parameterNames().get(index))
             );
         }
 
-        return namesByIndex;
+        return argumentsByIndex;
+    }
+
+    /**
+     * Renders one executor argument. A JSON parameter is wrapped in
+     * {@code dev.sqlcj.runtime.UntypedText} so that the runtime binds its text
+     * without a declared SQL type and the database types it from the context of
+     * its placeholder. The wrapper is written out in full, so the generated
+     * imports are the same as without it.
+     */
+    private String generateArgument(QueryParameter parameter, String name) {
+        if (isUntypedText(parameter.type())) {
+            return "new dev.sqlcj.runtime.UntypedText(" + name + ")";
+        }
+
+        return name;
+    }
+
+    /**
+     * Reports whether a type's Java text is bound and read as text the database
+     * types itself rather than through the JDBC type of {@code String}.
+     */
+    private boolean isUntypedText(ColumnType type) {
+        return type == ColumnType.JSON || type == ColumnType.JSONB;
     }
 
     private String generateReturnType(QueryModel query, JavaNames.QueryNames names) {
@@ -703,7 +733,19 @@ public final class JavaCodeGenerator implements CodeGenerator {
             .collect(Collectors.joining(",\n"));
     }
 
+    /**
+     * A JSON column is read with {@code getString}, because a driver reports it
+     * as a type of its own for which {@code getObject(position, String.class)}
+     * is not defined; every other column is read as its mapped Java type.
+     */
     private String generateResultMapping(QueryColumn column, int position) {
+        if (isUntypedText(column.type())) {
+            return "resultSet.getString(%d)"
+                .formatted(position)
+                .indent(8)
+                .stripTrailing();
+        }
+
         String javaType = typeResolver.resolve(column.type());
 
         return "resultSet.getObject(%d, %s.class)"
