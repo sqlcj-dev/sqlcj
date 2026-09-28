@@ -1747,6 +1747,192 @@ class SqlcjCompilerIntegrationTest {
         return queriesFile;
     }
 
+    /**
+     * Two entries over one migration directory that use one enum type share
+     * the single Java enum the package generates for it, which is listed in the
+     * manifest like every other generated file.
+     */
+    @Test
+    void shouldGenerateOneSharedEnumForTwoEntries() throws Exception {
+        Path migrations = stageMigrations();
+        Path queriesFile = stageQueries();
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        new SqlcjCompiler().compile(
+            authorAndLibraryConfig(
+                migrations,
+                queriesFile,
+                migrations,
+                queriesFile,
+                generatedDirectory
+            )
+        );
+
+        Path packageDirectory = generatedDirectory.resolve("dev/example/generated");
+
+        assertTrue(Files.exists(packageDirectory.resolve("StageSetting.java")));
+
+        assertEquals(
+            "dev/example/generated/AuthorRepository.java\n"
+                + "dev/example/generated/LibraryRepository.java\n"
+                + "dev/example/generated/StageSetting.java\n",
+            Files.readString(generatedDirectory.resolve("sqlcj-manifest.txt"))
+        );
+
+        Path classesDirectory = tempDir.resolve("classes");
+
+        assertCompiles(generatedDirectory, classesDirectory);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> stageSetting = Class.forName(
+                "dev.example.generated.StageSetting",
+                true,
+                classLoader
+            );
+
+            assertTrue(stageSetting.isEnum());
+            assertNull(stageSetting.getEnclosingClass());
+
+            for (String repositoryName : List.of("AuthorRepository", "LibraryRepository")) {
+                Class<?> repository = Class.forName(
+                    "dev.example.generated." + repositoryName,
+                    true,
+                    classLoader
+                );
+
+                Method method = repository.getMethod("getStage", stageSetting);
+
+                assertEquals(
+                    stageSetting,
+                    method.getReturnType().getRecordComponents()[1].getType()
+                );
+            }
+        }
+    }
+
+    /** A Java enum no entry uses anymore is deleted on regeneration. */
+    @Test
+    void shouldDeleteTheStaleEnumOfARemovedEnumQuery() throws IOException {
+        Path migrations = stageMigrations();
+        Path queriesFile = stageQueries();
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Config config = new Config(
+            List.of(new SqlConfig("Author", migrations.toString(), queriesFile.toString())),
+            new JavaConfig(generatedDirectory.toString(), "dev.example.generated")
+        );
+
+        new SqlcjCompiler().compile(config);
+
+        Path enumFile = generatedDirectory.resolve("dev/example/generated/StageSetting.java");
+
+        assertTrue(Files.exists(enumFile));
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: GetStage :one
+                SELECT id
+                FROM stages
+                WHERE id = $1;
+                """
+        );
+
+        new SqlcjCompiler().compile(config);
+
+        assertFalse(Files.exists(enumFile));
+
+        assertEquals(
+            "dev/example/generated/AuthorRepository.java\n",
+            Files.readString(generatedDirectory.resolve("sqlcj-manifest.txt"))
+        );
+    }
+
+    /**
+     * Two entries that use one enum type must define its labels alike, because
+     * the package generates one Java enum for it.
+     */
+    @Test
+    void shouldReportTwoEntriesThatDefineOneEnumTypeDifferently() throws IOException {
+        Path authorSchema = tempDir.resolve("author-schema.sql");
+        Path librarySchema = tempDir.resolve("library-schema.sql");
+        Path queriesFile = stageQueries();
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Files.writeString(authorSchema, stageSchema("'indoor', 'outdoor'"));
+        Files.writeString(librarySchema, stageSchema("'indoor'"));
+
+        Config config = authorAndLibraryConfig(
+            authorSchema,
+            queriesFile,
+            librarySchema,
+            queriesFile,
+            generatedDirectory
+        );
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> new SqlcjCompiler().compile(config)
+        );
+
+        assertEquals(
+            "Invalid query group 'Library' in %s: ".formatted(queriesFile)
+                + "Enum type 'stage_setting' differs from its definition in query group 'Author', "
+                + "which generates the same enum type StageSetting",
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    /** A migration directory that declares an enum type and a table using it. */
+    private Path stageMigrations() throws IOException {
+        Path migrations = Files.createDirectories(tempDir.resolve("migrations"));
+
+        Files.writeString(
+            migrations.resolve("V1__stages.sql"),
+            stageSchema("'indoor'")
+        );
+
+        Files.writeString(
+            migrations.resolve("V2__outdoor.sql"),
+            "ALTER TYPE stage_setting ADD VALUE 'outdoor';\n"
+        );
+
+        return migrations;
+    }
+
+    /** A schema declaring the enum type with {@code labels} and its table. */
+    private String stageSchema(String labels) {
+        return """
+            CREATE TYPE stage_setting AS ENUM (%s);
+
+            CREATE TABLE stages
+            (
+                id      BIGINT NOT NULL,
+                setting stage_setting
+            );
+            """
+            .formatted(labels);
+    }
+
+    /** One query reading and binding the enum column of the table stages. */
+    private Path stageQueries() throws IOException {
+        Path queriesFile = tempDir.resolve("stage-queries.sql");
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: GetStage :one
+                SELECT id, setting
+                FROM stages
+                WHERE setting = $1;
+                """
+        );
+
+        return queriesFile;
+    }
+
     private Config authorAndLibraryConfig(
         Path authorSchema,
         Path authorQueries,

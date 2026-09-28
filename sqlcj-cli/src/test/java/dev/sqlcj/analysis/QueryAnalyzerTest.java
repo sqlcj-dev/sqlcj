@@ -4,6 +4,7 @@ import dev.sqlcj.parser.Query;
 import dev.sqlcj.parser.QueryType;
 import dev.sqlcj.schema.Column;
 import dev.sqlcj.schema.ColumnType;
+import dev.sqlcj.schema.EnumType;
 import dev.sqlcj.schema.Schema;
 import dev.sqlcj.schema.Table;
 import dev.sqlcj.sql.ParsedSql;
@@ -33,6 +34,29 @@ class QueryAnalyzerTest {
                 ),
                 List.of()
             )
+        )
+    );
+
+    /**
+     * A schema whose {@code stages} table carries a column of each declared
+     * enum type, beside a text column.
+     */
+    private static final Schema enumSchema = new Schema(
+        List.of(
+            new Table(
+                "stages",
+                List.of(
+                    new Column("id", ColumnType.BIGINT, false),
+                    new Column("setting", ColumnType.ENUM, false, null, "stage_setting"),
+                    new Column("state", ColumnType.ENUM, true, null, "shelf_state"),
+                    new Column("handle", ColumnType.TEXT, true)
+                ),
+                List.of()
+            )
+        ),
+        List.of(
+            new EnumType("stage_setting", List.of("indoor", "outdoor")),
+            new EnumType("shelf_state", List.of("stocked"))
         )
     );
 
@@ -2938,5 +2962,108 @@ class QueryAnalyzerTest {
             "SELECT id FROM users WHERE tags IS NULL",
             model.executableSql()
         );
+    }
+
+    /**
+     * A selected enum column, an enum column returned by a write, and a
+     * placeholder typed from one carry the enum type the schema declared, so
+     * generation can name the Java enum of that type.
+     */
+    @Test
+    void shouldCarryTheEnumTypeOfASelectedColumnAndItsParameter() {
+        String sql = "SELECT setting, handle FROM stages WHERE setting = $1";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListStages", QueryType.MANY, sql),
+            parser.parse(sql),
+            enumSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("setting", ColumnType.ENUM, false, "stage_setting"),
+                new QueryColumn("handle", ColumnType.TEXT, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "setting", ColumnType.ENUM, "stage_setting")),
+            model.parameters()
+        );
+    }
+
+    @Test
+    void shouldCarryTheEnumTypeOfAReturningColumnAndItsParameter() {
+        String sql = "INSERT INTO stages (id, setting) VALUES ($1, $2) RETURNING setting";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CreateStage", QueryType.ONE, sql),
+            parser.parse(sql),
+            enumSchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("setting", ColumnType.ENUM, false, "stage_setting")),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "setting", ColumnType.ENUM, "stage_setting")
+            ),
+            model.parameters()
+        );
+    }
+
+    /**
+     * A repeated placeholder index must resolve to one Java type, and each
+     * enum type generates a Java type of its own, so an index shared by an enum
+     * and a text column, or by two enum types, is rejected. An enum is named by
+     * its PostgreSQL type, because analysis renders no Java name.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "UPDATE stages SET setting = $1 WHERE handle = $1|"
+                + "Placeholder $1 has conflicting types: stage_setting from 'setting' and String from 'handle'",
+            "UPDATE stages SET handle = $1 WHERE setting = $1|"
+                + "Placeholder $1 has conflicting types: String from 'handle' and stage_setting from 'setting'",
+            "UPDATE stages SET setting = $1 WHERE state = $1|"
+                + "Placeholder $1 has conflicting types: stage_setting from 'setting' and shelf_state from 'state'"
+        }
+    )
+    void shouldRejectARepeatedIndexAcrossConflictingEnumTypes(String sql, String message) {
+        Query query = new Query("UpdateStage", QueryType.EXEC, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, enumSchema)
+        );
+
+        assertEquals(message, exception.getMessage());
+    }
+
+    /** A repeated index of one enum type shares one generated parameter. */
+    @Test
+    void shouldAcceptARepeatedIndexOfOneEnumType() {
+        String sql = "SELECT id FROM stages WHERE setting = $1 OR setting = $1";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListStages", QueryType.MANY, sql),
+            parser.parse(sql),
+            enumSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "setting", ColumnType.ENUM, "stage_setting")),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 1), model.bindingParameterIndexes());
     }
 }

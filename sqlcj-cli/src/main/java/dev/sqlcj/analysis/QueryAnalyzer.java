@@ -337,7 +337,8 @@ public final class QueryAnalyzer {
                 new QueryColumn(
                     schemaColumn.name(),
                     requireSupportedType(schemaColumn),
-                    schemaColumn.nullable()
+                    schemaColumn.nullable(),
+                    schemaColumn.enumType()
                 )
             );
         }
@@ -556,22 +557,47 @@ public final class QueryAnalyzer {
         return parameters;
     }
 
+    /**
+     * Requires two occurrences of one placeholder index to have the same type.
+     * An enum occurrence is the same type only as an occurrence of the same
+     * enum type, because each enum type generates a Java type of its own; every
+     * other occurrence is compared by the Java type it resolves to.
+     */
     private void requireSameParameterType(QueryParameter parameter, QueryParameter occurrence) {
-        String type = typeResolver.resolve(parameter.type());
-        String occurrenceType = typeResolver.resolve(occurrence.type());
-
-        if (!type.equals(occurrenceType)) {
-            throw new UnsupportedOperationException(
-                "Placeholder $%d has conflicting types: %s from '%s' and %s from '%s'"
-                    .formatted(
-                        parameter.index(),
-                        type,
-                        parameter.name(),
-                        occurrenceType,
-                        occurrence.name()
-                    )
-            );
+        if (isSameParameterType(parameter, occurrence)) {
+            return;
         }
+
+        throw new UnsupportedOperationException(
+            "Placeholder $%d has conflicting types: %s from '%s' and %s from '%s'"
+                .formatted(
+                    parameter.index(),
+                    describeParameterType(parameter),
+                    parameter.name(),
+                    describeParameterType(occurrence),
+                    occurrence.name()
+                )
+        );
+    }
+
+    private boolean isSameParameterType(QueryParameter parameter, QueryParameter occurrence) {
+        if (parameter.type() == ColumnType.ENUM || occurrence.type() == ColumnType.ENUM) {
+            return parameter.type() == occurrence.type()
+                && parameter.enumType().equalsIgnoreCase(occurrence.enumType());
+        }
+
+        return typeResolver.resolve(parameter.type())
+            .equals(typeResolver.resolve(occurrence.type()));
+    }
+
+    /**
+     * Describes a parameter's type for a diagnostic. An enum is described by
+     * its PostgreSQL name, because analysis renders no Java name.
+     */
+    private String describeParameterType(QueryParameter parameter) {
+        return parameter.type() == ColumnType.ENUM
+            ? parameter.enumType()
+            : typeResolver.resolve(parameter.type());
     }
 
     private void requireContiguousIndexes(List<QueryParameter> parameters) {
@@ -1187,6 +1213,7 @@ public final class QueryAnalyzer {
             parameter,
             column.name(),
             requireSupportedType(column),
+            column.enumType(),
             parameters
         );
     }
@@ -1197,6 +1224,16 @@ public final class QueryAnalyzer {
         ColumnType type,
         List<QueryParameter> parameters
     ) {
+        addParameter(parameter, name, type, null, parameters);
+    }
+
+    private void addParameter(
+        JdbcParameter parameter,
+        String name,
+        ColumnType type,
+        String enumType,
+        List<QueryParameter> parameters
+    ) {
         if (!parameter.isUseFixedIndex()) {
             throw new UnsupportedOperationException(ANONYMOUS_PARAMETER_REJECTION);
         }
@@ -1205,7 +1242,8 @@ public final class QueryAnalyzer {
             new QueryParameter(
                 parameter.getIndex(),
                 name,
-                type
+                type,
+                enumType
             )
         );
     }
@@ -1277,7 +1315,8 @@ public final class QueryAnalyzer {
                     new QueryColumn(
                         selectedColumnName(selectItem.getAlias(), schemaColumn),
                         requireSupportedType(schemaColumn),
-                        schemaColumn.nullable() || resolved.source().leftJoined()
+                        schemaColumn.nullable() || resolved.source().leftJoined(),
+                        schemaColumn.enumType()
                     )
                 );
 
@@ -1462,7 +1501,8 @@ public final class QueryAnalyzer {
                 column -> new QueryColumn(
                     column.name(),
                     requireSupportedType(column),
-                    column.nullable() || source.leftJoined()
+                    column.nullable() || source.leftJoined(),
+                    column.enumType()
                 )
             )
             .toList();

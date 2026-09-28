@@ -30,6 +30,7 @@ import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
+import java.sql.ResultSet;
 import java.sql.Statement;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -177,6 +178,29 @@ class PostgresIntegrationTest {
             id       BIGINT PRIMARY KEY,
             payload  JSON,
             config   JSONB
+        );
+        """;
+
+    /**
+     * A snapshot whose enum type is declared and then extended in the order the
+     * statements state, so the modeled labels are PostgreSQL's own sort order.
+     * The added labels are not used by this DDL itself, which PostgreSQL
+     * forbids inside the transaction that adds them.
+     */
+    private static final String STAGE_EVENT_SCHEMA = """
+        CREATE TYPE stage_setting AS ENUM ('indoor', 'outdoor');
+
+        ALTER TYPE stage_setting ADD VALUE 'covered' BEFORE 'outdoor';
+
+        ALTER TYPE stage_setting ADD VALUE 'open air' AFTER 'outdoor';
+
+        ALTER TYPE stage_setting ADD VALUE IF NOT EXISTS 'indoor';
+
+        CREATE TABLE stage_events
+        (
+            id      BIGINT PRIMARY KEY,
+            setting stage_setting,
+            title   VARCHAR(255)
         );
         """;
 
@@ -332,6 +356,7 @@ class PostgresIntegrationTest {
     void resetDatabase() throws Exception {
         execute("DROP TABLE IF EXISTS stage");
         execute("DROP TABLE IF EXISTS region");
+        execute("DROP TABLE IF EXISTS stage_events");
         execute("DROP TYPE IF EXISTS stage_setting");
         execute("DROP TABLE IF EXISTS customer_orders");
         execute("DROP TABLE IF EXISTS customers");
@@ -1171,6 +1196,123 @@ class PostgresIntegrationTest {
             assertNull(component(nullResult, "payload"));
             assertNull(component(nullResult, "openedAt"));
             assertNull(component(nullResult, "closedAt"));
+        }
+    }
+
+    /**
+     * Proves that enum values round trip through generated code: the generated
+     * constants carry PostgreSQL's own labels in its own sort order, a null and
+     * a non-null value are written as {@code INSERT} values and read back as
+     * constants of the generated enum, and an equality predicate matches by
+     * label while a null argument matches no row.
+     */
+    @Test
+    void shouldRoundTripEnumValues() throws Exception {
+        execute(STAGE_EVENT_SCHEMA);
+
+        Path classesDirectory = generateAndCompile(
+            STAGE_EVENT_SCHEMA,
+            """
+                -- name: InsertStageEvent :exec
+                INSERT INTO stage_events (id, setting, title)
+                VALUES ($1, $2, $3);
+
+                -- name: GetStageEvent :one
+                SELECT id, setting, title
+                FROM stage_events
+                WHERE id = $1;
+
+                -- name: FindStageEventBySetting :optional
+                SELECT id, setting, title
+                FROM stage_events
+                WHERE setting = $1;
+                """
+        );
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> stageSetting = Class.forName(
+                "generated.StageSetting",
+                true,
+                classLoader
+            );
+
+            assertTrue(stageSetting.isEnum());
+
+            Object[] constants = stageSetting.getEnumConstants();
+
+            assertEquals(
+                List.of("INDOOR", "COVERED", "OUTDOOR", "OPEN_AIR"),
+                Arrays.stream(constants).map(Object::toString).toList()
+            );
+
+            Method label = stageSetting.getMethod("label");
+
+            List<Object> labels = new ArrayList<>();
+
+            for (Object constant : constants) {
+                labels.add(label.invoke(constant));
+            }
+
+            assertEquals(enumLabels("stage_setting"), labels);
+
+            Object covered = constants[1];
+
+            Object repository = newRepository(classLoader);
+
+            Method insertMethod = repository.getClass().getMethod(
+                "insertStageEvent",
+                Long.class,
+                stageSetting,
+                String.class
+            );
+
+            assertEquals(1, insertMethod.invoke(repository, 1L, covered, "Covered Stage"));
+            assertEquals(1, insertMethod.invoke(repository, 2L, null, null));
+
+            Method queryMethod = repository.getClass().getMethod("getStageEvent", Long.class);
+
+            Object result = queryMethod.invoke(repository, 1L);
+
+            assertNotNull(result);
+
+            assertEquals(
+                List.of("id", "setting", "title"),
+                recordComponentNames(result)
+            );
+
+            assertEquals(
+                List.of(Long.class, stageSetting, String.class),
+                recordComponentTypes(result)
+            );
+
+            assertEquals(covered, component(result, "setting"));
+            assertEquals("Covered Stage", component(result, "title"));
+
+            Object nullResult = queryMethod.invoke(repository, 2L);
+
+            assertNotNull(nullResult);
+
+            assertEquals(2L, component(nullResult, "id"));
+            assertNull(component(nullResult, "setting"));
+
+            Method findMethod = repository.getClass().getMethod(
+                "findStageEventBySetting",
+                stageSetting
+            );
+
+            Optional<?> found = assertInstanceOf(
+                Optional.class,
+                findMethod.invoke(repository, covered)
+            );
+
+            assertEquals(1L, component(found.orElseThrow(), "id"));
+
+            assertTrue(
+                assertInstanceOf(
+                    Optional.class,
+                    findMethod.invoke(repository, new Object[] { null })
+                ).isEmpty()
+            );
         }
     }
 
@@ -2073,6 +2215,26 @@ class PostgresIntegrationTest {
         Constructor<?> constructor = generatedClass.getConstructor(QueryExecutor.class);
 
         return constructor.newInstance(executor);
+    }
+
+    /** The labels of one enum type in PostgreSQL's own sort order. */
+    private List<Object> enumLabels(String typeName) throws Exception {
+        List<Object> labels = new ArrayList<>();
+
+        try (
+            Connection connection = dataSource.getConnection();
+            Statement statement = connection.createStatement();
+            ResultSet resultSet = statement.executeQuery(
+                "SELECT enumlabel FROM pg_enum WHERE enumtypid = '%s'::regtype ORDER BY enumsortorder"
+                    .formatted(typeName)
+            )
+        ) {
+            while (resultSet.next()) {
+                labels.add(resultSet.getString(1));
+            }
+        }
+
+        return labels;
     }
 
     private void execute(String sql) throws Exception {
