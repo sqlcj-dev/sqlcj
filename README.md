@@ -29,11 +29,12 @@ WHERE id = $1;
 ```java
 AuthorRepository authors = new AuthorRepository(executor);
 
-AuthorRepository.AuthorsRow author = authors.getAuthor(1L);
+AuthorsRow author = authors.getAuthor(1L);
 ```
 
 Every query of `sql/queries.sql` becomes a method of that one
-`AuthorRepository`.
+`AuthorRepository`, and the `authors` row it returns is the top-level
+`AuthorsRow` record generated once for the configured package.
 
 The SQL stays visible and owned by the application. sqlcj is not an ORM, a
 migration tool, or a query builder: it does not run migrations, inspect a live

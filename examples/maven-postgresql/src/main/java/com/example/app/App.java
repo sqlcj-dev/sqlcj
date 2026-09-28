@@ -1,6 +1,7 @@
 package com.example.app;
 
 import com.example.app.db.AuthorRepository;
+import com.example.app.db.AuthorsRow;
 import dev.sqlcj.runtime.JdbcQueryExecutor;
 import dev.sqlcj.runtime.QueryCardinalityException;
 import dev.sqlcj.runtime.QueryExecutor;
@@ -25,13 +26,13 @@ import java.util.Optional;
  * transaction from a caller-owned connection.
  *
  * <p>Create, read, optional read, list, search, and page each return one
- * complete {@code authors} row, so all six share the repository's single
- * {@link AuthorRepository.AuthorsRow} record. A query with its own result shape
- * generates its own record: {@link AuthorRepository.CountAuthorsResult} carries
- * the non-null {@code Long} count, and
- * {@link AuthorRepository.ListAuthorBooksResult} carries an author name beside
- * the title of the left-joined {@code books} row, which is {@code null} for an
- * author without a book.
+ * complete {@code authors} row, so all six share the single top-level
+ * {@link AuthorsRow} record of the generated package. A query with its own
+ * result shape generates its own nested record:
+ * {@link AuthorRepository.CountAuthorsResult} carries the non-null
+ * {@code Long} count, and {@link AuthorRepository.ListAuthorBooksResult}
+ * carries an author name beside the title of the left-joined {@code books} row,
+ * which is {@code null} for an author without a book.
  *
  * <p>Row absence is expressed by the {@code :optional} {@code FindAuthor}
  * query, which returns an empty {@link Optional}, while the {@code :one}
@@ -57,7 +58,7 @@ public final class App {
 
         AuthorRepository authors = new AuthorRepository(executor);
 
-        AuthorRepository.AuthorsRow created = authors.createAuthor("Ada Lovelace", "First programmer");
+        AuthorsRow created = authors.createAuthor("Ada Lovelace", "First programmer");
 
         check(created != null, "CreateAuthor returned no row");
         check(created.id() != null, "CreateAuthor returned no database-generated id");
@@ -66,7 +67,7 @@ public final class App {
 
         System.out.println("created: " + created.id() + " " + created.name());
 
-        AuthorRepository.AuthorsRow read = authors.getAuthor(created.id());
+        AuthorsRow read = authors.getAuthor(created.id());
 
         check(read != null, "GetAuthor returned no row for the created author");
         checkEquals(created.id(), read.id(), "GetAuthor id");
@@ -75,14 +76,14 @@ public final class App {
 
         System.out.println("read: " + read.name() + " / " + read.bio());
 
-        Optional<AuthorRepository.AuthorsRow> found = authors.findAuthor(created.id());
+        Optional<AuthorsRow> found = authors.findAuthor(created.id());
 
         check(found.isPresent(), "FindAuthor returned no row for the created author");
         checkEquals("Ada Lovelace", found.get().name(), "FindAuthor name");
 
         System.out.println("found: " + found.get().name());
 
-        List<AuthorRepository.AuthorsRow> listed = authors.listAuthors();
+        List<AuthorsRow> listed = authors.listAuthors();
 
         checkEquals(1, listed.size(), "ListAuthors row count after create");
         checkEquals(created.id(), listed.get(0).id(), "ListAuthors id");
@@ -114,7 +115,7 @@ public final class App {
 
         Long committedId = writeAndCommit(dataSource);
 
-        AuthorRepository.AuthorsRow committed = authors.getAuthor(committedId);
+        AuthorsRow committed = authors.getAuthor(committedId);
 
         check(committed != null, "the committed author is not readable after commit");
         checkEquals("Grace Hopper", committed.name(), "committed name");
@@ -131,7 +132,7 @@ public final class App {
 
         System.out.println("rolled back: empty");
 
-        List<AuthorRepository.AuthorsRow> searched = authors.searchAuthors("%lovelace%");
+        List<AuthorsRow> searched = authors.searchAuthors("%lovelace%");
 
         checkEquals(1, searched.size(), "SearchAuthors row count");
         checkEquals(created.id(), searched.get(0).id(), "SearchAuthors id");
@@ -146,7 +147,7 @@ public final class App {
 
         System.out.println("count: " + count.total());
 
-        List<AuthorRepository.AuthorsRow> page = authors.listAuthorPage(1, 1);
+        List<AuthorsRow> page = authors.listAuthorPage(1, 1);
 
         checkEquals(1, page.size(), "ListAuthorPage row count");
         checkEquals(committedId, page.get(0).id(), "ListAuthorPage id");
@@ -185,7 +186,7 @@ public final class App {
 
         System.out.println("deleted rows: " + deletedRows);
 
-        List<AuthorRepository.AuthorsRow> remaining = authors.listAuthors();
+        List<AuthorsRow> remaining = authors.listAuthors();
 
         checkEquals(1, remaining.size(), "ListAuthors row count after delete");
         checkEquals(committedId, remaining.get(0).id(), "remaining author id");
@@ -203,7 +204,7 @@ public final class App {
 
             AuthorRepository transactionalAuthors = new AuthorRepository(new JdbcQueryExecutor(connection));
 
-            AuthorRepository.AuthorsRow author = transactionalAuthors.createAuthor("Grace Hopper", null);
+            AuthorsRow author = transactionalAuthors.createAuthor("Grace Hopper", null);
 
             check(author != null, "CreateAuthor returned no row inside the committed transaction");
             checkEquals(null, author.bio(), "committed bio before update");
@@ -228,7 +229,7 @@ public final class App {
 
             AuthorRepository transactionalAuthors = new AuthorRepository(new JdbcQueryExecutor(connection));
 
-            AuthorRepository.AuthorsRow author = transactionalAuthors.createAuthor("Temporary Author", null);
+            AuthorsRow author = transactionalAuthors.createAuthor("Temporary Author", null);
 
             check(author != null, "CreateAuthor returned no row inside the rolled back transaction");
 

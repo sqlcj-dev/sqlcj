@@ -218,6 +218,10 @@ target/generated-sources/sqlcj/dev/example/generated/OrderRepository.java
 Both repositories may contain a query named `GetById`, because each name is
 resolved inside its own repository.
 
+The entries share one generated package, so they also share its row records: a
+table whose complete row both entries return generates one `<TableName>Row`
+file that both repositories return.
+
 ## Generated Java Names
 
 The configured `sql[].name` and the SQL names inside the entry — query names,
@@ -265,7 +269,9 @@ The rules are applied as follows:
   `Result`, so `get_author` generates `GetAuthorResult`,
 - a row record is the upper camel form of the table name followed by `Row`, so
   the table `authors` generates `AuthorsRow`. Row names are normalized, never
-  singularized,
+  singularized. A row record is a top-level type of `java.package`, generated
+  once per table into its own file and shared by every repository of the package
+  that returns that row,
 - a method is the lower camel form of the query name, so `get_author` generates
   `getAuthor`,
 - a row-mapper field is the method name followed by `RowMapper`, and the mapper
@@ -326,12 +332,28 @@ case-insensitive filesystem:
 sqlcj: Invalid query group 'User' in /home/dev/project/sql/queries.sql: Queries 'GetUser' and 'getuser' generate result types that differ only by case: GetUserResult and GetuserResult
 ```
 
-Two tables of one entry whose row records are equal ignoring case are rejected
-on the same grounds, naming both tables and both row types:
+Two tables whose row records are equal ignoring case are rejected on the same
+grounds, naming both tables and both row types. Because a row record belongs to
+the package, the two tables may come from one entry or from two:
 
 ```text
 sqlcj: Invalid query group 'User' in /home/dev/project/sql/queries.sql: Tables 'user_data' and 'userdata' generate row types that are equal ignoring case: UserDataRow and UserdataRow
 ```
+
+### Row record collisions
+
+Two entries of one package that return the complete row of one table generate
+one row record, so they must define that table alike: the analyzed row columns
+must have the same names, types, and nullability, in the same order. Otherwise
+the run ends, naming the entry that defined the table first:
+
+```text
+sqlcj: Invalid query group 'Library' in /home/dev/project/sql/library.sql: Table 'authors' differs from its definition in query group 'Author', which generates the same row type AuthorsRow
+```
+
+A cross-entry failure is reported against the later entry in configuration
+order and, like every generation failure, ends the run before any file is
+written.
 
 ### Generated path collisions
 
@@ -385,11 +407,12 @@ output directory or generated file it could not write and exit status `1`. The
 files the run had already written stay in place.
 
 A successful run records what it generated in `sqlcj-manifest.txt` inside
-`java.out`. The manifest is a UTF-8 text file listing every generated file as a
-path relative to `java.out`, with `/` between its name elements, sorted, one per
-line. The next successful run deletes the files the previous manifest listed
-that it did not generate itself, so a renamed or removed configuration entry
-leaves no stale repository behind.
+`java.out`. The manifest is a UTF-8 text file listing every generated file,
+repositories and row records alike, as a path relative to `java.out`, with `/`
+between its name elements, sorted, one per line. The next successful run deletes
+the files the previous manifest listed that it did not generate itself, so a
+renamed or removed configuration entry leaves no stale repository behind, and a
+row record no entry returns any more is deleted too.
 
 Cleanup is deliberately narrow:
 
