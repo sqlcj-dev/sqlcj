@@ -479,7 +479,11 @@ class JavaCodeGeneratorTest {
             "TIMESTAMP, LocalDateTime",
             "TIMESTAMP_WITH_TIME_ZONE, OffsetDateTime",
             "DECIMAL, BigDecimal",
-            "UUID, UUID"
+            "UUID, UUID",
+            "REAL, Float",
+            "DOUBLE_PRECISION, Double",
+            "BYTEA, byte[]",
+            "TIME, LocalTime"
         }
     )
     void shouldGenerateJavaTypeForQueryParameter(
@@ -551,6 +555,34 @@ class JavaCodeGeneratorTest {
         assertTrue(
             file.content().contains(
                 "import java.time.LocalDate;"
+            )
+        );
+    }
+
+    @Test
+    void shouldGenerateImportForLocalTime() {
+        QueryModel query = new QueryModel(
+            "GetUser",
+            QueryType.ONE,
+            "users",
+            SQL,
+            List.of(),
+            List.of(
+                new QueryColumn(
+                    "openedAt",
+                    ColumnType.TIME,
+                    true
+                )
+            ),
+            List.of(),
+            null
+        );
+
+        GeneratedFile file = generate(query);
+
+        assertTrue(
+            file.content().contains(
+                "import java.time.LocalTime;"
             )
         );
     }
@@ -822,6 +854,89 @@ class JavaCodeGeneratorTest {
         assertEquals(0, compile(file, "UsersRepository.java"));
     }
 
+    /**
+     * Compiles a repository that binds and reads the floating-point, binary,
+     * and time types, including a query whose only binding parameter is the
+     * array type {@code byte[]}.
+     */
+    @Test
+    void shouldGenerateCompilableJavaSourceForFloatingPointBinaryAndTimeTypes()
+        throws IOException {
+        QueryModel listMeasurements = new QueryModel(
+            "ListMeasurements",
+            QueryType.MANY,
+            "measurements",
+            SQL,
+            List.of(1, 2, 3, 4),
+            List.of(
+                new QueryColumn(
+                    "amount",
+                    ColumnType.REAL,
+                    true
+                ),
+                new QueryColumn(
+                    "ratio",
+                    ColumnType.DOUBLE_PRECISION,
+                    true
+                ),
+                new QueryColumn(
+                    "payload",
+                    ColumnType.BYTEA,
+                    true
+                ),
+                new QueryColumn(
+                    "opened_at",
+                    ColumnType.TIME,
+                    true
+                )
+            ),
+            List.of(
+                new QueryParameter(1, "amount", ColumnType.REAL),
+                new QueryParameter(2, "ratio", ColumnType.DOUBLE_PRECISION),
+                new QueryParameter(3, "payload", ColumnType.BYTEA),
+                new QueryParameter(4, "opened_at", ColumnType.TIME)
+            ),
+            null
+        );
+
+        QueryModel getMeasurementByPayload = new QueryModel(
+            "GetMeasurementByPayload",
+            QueryType.ONE,
+            "measurements",
+            SQL,
+            List.of(1),
+            List.of(
+                new QueryColumn(
+                    "payload",
+                    ColumnType.BYTEA,
+                    false
+                )
+            ),
+            List.of(
+                new QueryParameter(1, "payload", ColumnType.BYTEA)
+            ),
+            null
+        );
+
+        GeneratedFile file = codeGenerator.generate(
+            new QueryGroupModel(
+                GROUP,
+                List.of(listMeasurements, getMeasurementByPayload)
+            )
+        );
+
+        String source = file.content();
+
+        assertTrue(source.contains("import java.time.LocalTime;"));
+        assertTrue(source.contains("Float amount"));
+        assertTrue(source.contains("Double ratio"));
+        assertTrue(source.contains("byte[] payload"));
+        assertTrue(source.contains("LocalTime openedAt"));
+        assertTrue(source.contains("resultSet.getObject(3, byte[].class)"));
+
+        assertEquals(0, compile(file, "UsersRepository.java"));
+    }
+
     /** Compiles one generated source file in an isolated temporary location. */
     private int compile(GeneratedFile file, String fileName) throws IOException {
         Path sourceDirectory = tempDir.resolve("generated");
@@ -862,7 +977,11 @@ class JavaCodeGeneratorTest {
             "TIMESTAMP, LocalDateTime",
             "TIMESTAMP_WITH_TIME_ZONE, OffsetDateTime",
             "DECIMAL, BigDecimal",
-            "UUID, UUID"
+            "UUID, UUID",
+            "REAL, Float",
+            "DOUBLE_PRECISION, Double",
+            "BYTEA, byte[]",
+            "TIME, LocalTime"
         }
     )
     void shouldGenerateJavaTypeForResultColumn(ColumnType columnType, String expectedJavaType) {

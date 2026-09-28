@@ -723,10 +723,14 @@ public class DefaultSchemaParser implements SchemaParser {
             case "VARCHAR", "CHARACTER VARYING", "CHAR", "CHARACTER" -> ColumnType.VARCHAR;
             case "TEXT" -> ColumnType.TEXT;
             case "DATE" -> ColumnType.DATE;
+            case "TIME", "TIME WITHOUT TIME ZONE" -> ColumnType.TIME;
             case "TIMESTAMP", "TIMESTAMP WITHOUT TIME ZONE" -> ColumnType.TIMESTAMP;
             case "TIMESTAMP WITH TIME ZONE", "TIMESTAMPTZ" -> ColumnType.TIMESTAMP_WITH_TIME_ZONE;
             case "DECIMAL", "NUMERIC" -> ColumnType.DECIMAL;
+            case "REAL", "FLOAT4" -> ColumnType.REAL;
+            case "DOUBLE PRECISION", "FLOAT8" -> ColumnType.DOUBLE_PRECISION;
             case "UUID" -> ColumnType.UUID;
+            case "BYTEA" -> ColumnType.BYTEA;
             default -> null;
         };
     }

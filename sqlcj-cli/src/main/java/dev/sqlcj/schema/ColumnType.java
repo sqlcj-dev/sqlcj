@@ -8,8 +8,12 @@ public enum ColumnType {
     VARCHAR,
     TEXT,
     DATE,
+    TIME,
     TIMESTAMP,
     TIMESTAMP_WITH_TIME_ZONE,
     DECIMAL,
-    UUID
+    REAL,
+    DOUBLE_PRECISION,
+    UUID,
+    BYTEA
 }

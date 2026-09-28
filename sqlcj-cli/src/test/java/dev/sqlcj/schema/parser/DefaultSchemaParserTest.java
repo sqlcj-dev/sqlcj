@@ -342,7 +342,23 @@ class DefaultSchemaParserTest {
             "char, VARCHAR",
             "CHAR(2), VARCHAR",
             "CHARACTER, VARCHAR",
-            "character(3), VARCHAR"
+            "character(3), VARCHAR",
+            "REAL, REAL",
+            "real, REAL",
+            "FLOAT4, REAL",
+            "float4, REAL",
+            "DOUBLE PRECISION, DOUBLE_PRECISION",
+            "double precision, DOUBLE_PRECISION",
+            "FLOAT8, DOUBLE_PRECISION",
+            "float8, DOUBLE_PRECISION",
+            "BYTEA, BYTEA",
+            "bytea, BYTEA",
+            "TIME, TIME",
+            "time, TIME",
+            "TIME(3), TIME",
+            "TIME WITHOUT TIME ZONE, TIME",
+            "time without time zone, TIME",
+            "TIME(3) WITHOUT TIME ZONE, TIME"
         }
     )
     void shouldParsePostgresTypeSpellings(String sqlType, ColumnType expectedType) {
@@ -443,12 +459,20 @@ class DefaultSchemaParserTest {
      * only a query that uses the column fails. The recorded text is the
      * canonical spelling of the declared type, followed by {@code []} per
      * declared array dimension.
+     *
+     * <p>{@code FLOAT} and {@code FLOAT(p)}, whose precision selects the type,
+     * and the time-zone-aware time spellings are unmapped beside the mapped
+     * floating-point, binary, and time spellings.
      */
     @ParameterizedTest
     @CsvSource(
         {
             "JSONB, JSONB",
-            "DOUBLE PRECISION, DOUBLE PRECISION",
+            "FLOAT, FLOAT",
+            "float(24), FLOAT",
+            "TIMETZ, TIMETZ",
+            "time with time zone, TIME WITH TIME ZONE",
+            "real[], REAL[]",
             "\"char\", \"CHAR\"",
             "varchar(20)[], VARCHAR[]",
             "integer[][], INTEGER[][]",

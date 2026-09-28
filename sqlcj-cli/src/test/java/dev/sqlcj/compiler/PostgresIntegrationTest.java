@@ -33,6 +33,7 @@ import java.sql.Connection;
 import java.sql.Statement;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -43,6 +44,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Stream;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -143,6 +145,25 @@ class PostgresIntegrationTest {
             serial_two   SERIAL2,
             serial_four  SERIAL4,
             serial_eight SERIAL8
+        );
+        """;
+
+    /**
+     * A snapshot that declares every accepted floating-point, binary, and time
+     * spelling, each of them nullable so that one row can carry values and
+     * another can carry nulls.
+     */
+    private static final String MEASUREMENT_SCHEMA = """
+        CREATE TABLE measurements
+        (
+            id        BIGINT PRIMARY KEY,
+            amount    REAL,
+            ratio     FLOAT4,
+            total     DOUBLE PRECISION,
+            average   FLOAT8,
+            payload   BYTEA,
+            opened_at TIME,
+            closed_at TIME(3) WITHOUT TIME ZONE
         );
         """;
 
@@ -301,6 +322,7 @@ class PostgresIntegrationTest {
         execute("DROP TYPE IF EXISTS stage_setting");
         execute("DROP TABLE IF EXISTS customer_orders");
         execute("DROP TABLE IF EXISTS customers");
+        execute("DROP TABLE IF EXISTS measurements");
         execute("DROP TABLE IF EXISTS user_aliases");
         execute("DROP TABLE IF EXISTS users");
         execute(SCHEMA);
@@ -1010,6 +1032,131 @@ class PostgresIntegrationTest {
             assertEquals((short) 1, component(result, "serialTwo"));
             assertEquals(1, component(result, "serialFour"));
             assertEquals(1L, component(result, "serialEight"));
+        }
+    }
+
+    /**
+     * Proves that the floating-point, binary, and time spellings round trip
+     * through generated code: one row is written with non-null values and one
+     * with nulls, and both are read back as {@code Float}, {@code Double},
+     * {@code byte[]}, and {@code LocalTime} components.
+     */
+    @Test
+    void shouldRoundTripFloatingPointBinaryAndTimeValues() throws Exception {
+        execute(MEASUREMENT_SCHEMA);
+
+        Path classesDirectory = generateAndCompile(
+            MEASUREMENT_SCHEMA,
+            """
+                -- name: InsertMeasurement :exec
+                INSERT INTO measurements
+                    (id, amount, ratio, total, average, payload, opened_at, closed_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
+
+                -- name: GetMeasurement :one
+                SELECT id, amount, ratio, total, average, payload, opened_at, closed_at
+                FROM measurements
+                WHERE id = $1;
+                """
+        );
+
+        byte[] payload = { 1, 2, 3, -128 };
+
+        LocalTime openedAt = LocalTime.of(9, 30);
+        LocalTime closedAt = LocalTime.of(17, 45, 30);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method insertMethod = repository.getClass().getMethod(
+                "insertMeasurement",
+                Long.class,
+                Float.class,
+                Float.class,
+                Double.class,
+                Double.class,
+                byte[].class,
+                LocalTime.class,
+                LocalTime.class
+            );
+
+            assertEquals(
+                1,
+                insertMethod.invoke(
+                    repository,
+                    1L,
+                    1.5f,
+                    2.25f,
+                    3.5d,
+                    4.125d,
+                    payload,
+                    openedAt,
+                    closedAt
+                )
+            );
+
+            assertEquals(
+                1,
+                insertMethod.invoke(repository, 2L, null, null, null, null, null, null, null)
+            );
+
+            Method queryMethod = repository.getClass().getMethod("getMeasurement", Long.class);
+
+            Object result = queryMethod.invoke(repository, 1L);
+
+            assertNotNull(result);
+
+            assertEquals(
+                List.of(
+                    "id",
+                    "amount",
+                    "ratio",
+                    "total",
+                    "average",
+                    "payload",
+                    "openedAt",
+                    "closedAt"
+                ),
+                recordComponentNames(result)
+            );
+
+            assertEquals(
+                List.of(
+                    Long.class,
+                    Float.class,
+                    Float.class,
+                    Double.class,
+                    Double.class,
+                    byte[].class,
+                    LocalTime.class,
+                    LocalTime.class
+                ),
+                recordComponentTypes(result)
+            );
+
+            assertEquals(1.5f, component(result, "amount"));
+            assertEquals(2.25f, component(result, "ratio"));
+            assertEquals(3.5d, component(result, "total"));
+            assertEquals(4.125d, component(result, "average"));
+            assertArrayEquals(
+                payload,
+                assertInstanceOf(byte[].class, component(result, "payload"))
+            );
+            assertEquals(openedAt, component(result, "openedAt"));
+            assertEquals(closedAt, component(result, "closedAt"));
+
+            Object nullResult = queryMethod.invoke(repository, 2L);
+
+            assertNotNull(nullResult);
+
+            assertEquals(2L, component(nullResult, "id"));
+            assertNull(component(nullResult, "amount"));
+            assertNull(component(nullResult, "ratio"));
+            assertNull(component(nullResult, "total"));
+            assertNull(component(nullResult, "average"));
+            assertNull(component(nullResult, "payload"));
+            assertNull(component(nullResult, "openedAt"));
+            assertNull(component(nullResult, "closedAt"));
         }
     }
 

@@ -13,10 +13,14 @@ public class DefaultTypeResolver implements TypeResolver {
             case BOOLEAN -> "Boolean";
             case VARCHAR, TEXT -> "String";
             case DATE -> "LocalDate";
+            case TIME -> "LocalTime";
             case TIMESTAMP -> "LocalDateTime";
             case TIMESTAMP_WITH_TIME_ZONE -> "OffsetDateTime";
             case DECIMAL -> "BigDecimal";
+            case REAL -> "Float";
+            case DOUBLE_PRECISION -> "Double";
             case UUID -> "UUID";
+            case BYTEA -> "byte[]";
         };
     }
 }
