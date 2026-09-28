@@ -483,7 +483,9 @@ class JavaCodeGeneratorTest {
             "REAL, Float",
             "DOUBLE_PRECISION, Double",
             "BYTEA, byte[]",
-            "TIME, LocalTime"
+            "TIME, LocalTime",
+            "JSON, String",
+            "JSONB, String"
         }
     )
     void shouldGenerateJavaTypeForQueryParameter(
@@ -937,6 +939,127 @@ class JavaCodeGeneratorTest {
         assertEquals(0, compile(file, "UsersRepository.java"));
     }
 
+    /**
+     * A JSON parameter is bound through {@code dev.sqlcj.runtime.UntypedText}
+     * at every position its placeholder index is bound at, and a JSON result
+     * column is read as text. The other {@code String} types are bound and read
+     * exactly as before, and the wrapper is written out in full, so the
+     * generated imports are unchanged.
+     */
+    @Test
+    void shouldWrapJsonArgumentsAndReadJsonColumnsAsText() throws IOException {
+        QueryModel query = new QueryModel(
+            "FindDocument",
+            QueryType.ONE,
+            "documents",
+            """
+                SELECT id, metadata, profile, name
+                FROM documents
+                WHERE name = ?
+                  AND (metadata = ? OR metadata = ?)
+                  AND bio = ?
+                  AND profile = ?
+                """,
+            List.of(3, 1, 1, 4, 2),
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("metadata", ColumnType.JSONB, true),
+                new QueryColumn("profile", ColumnType.JSON, true),
+                new QueryColumn("name", ColumnType.VARCHAR, true)
+            ),
+            List.of(
+                new QueryParameter(1, "metadata", ColumnType.JSONB),
+                new QueryParameter(2, "profile", ColumnType.JSON),
+                new QueryParameter(3, "name", ColumnType.VARCHAR),
+                new QueryParameter(4, "bio", ColumnType.TEXT)
+            ),
+            null
+        );
+
+        GeneratedFile file = generate(query);
+
+        String source = file.content();
+
+        assertTrue(
+            source.contains(
+                "public FindDocumentResult findDocument("
+                    + "String metadata, String profile, String name, String bio)"
+            )
+        );
+
+        assertTrue(
+            source.contains(
+                "java.util.Arrays.asList("
+                    + "name, "
+                    + "new dev.sqlcj.runtime.UntypedText(metadata), "
+                    + "new dev.sqlcj.runtime.UntypedText(metadata), "
+                    + "bio, "
+                    + "new dev.sqlcj.runtime.UntypedText(profile))"
+            )
+        );
+
+        assertTrue(source.contains("resultSet.getObject(1, Long.class)"));
+        assertTrue(source.contains("resultSet.getString(2)"));
+        assertTrue(source.contains("resultSet.getString(3)"));
+        assertTrue(source.contains("resultSet.getObject(4, String.class)"));
+
+        assertFalse(source.contains("import dev.sqlcj.runtime.UntypedText;"));
+
+        assertCompiles(file);
+    }
+
+    /**
+     * Compiles a repository that binds JSON text in a write and binds and reads
+     * it in a query.
+     */
+    @Test
+    void shouldGenerateCompilableJavaSourceForJsonTypes() throws IOException {
+        QueryModel insertDocument = new QueryModel(
+            "InsertDocument",
+            QueryType.EXEC,
+            "documents",
+            SQL,
+            List.of(1, 2, 3),
+            List.of(),
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "metadata", ColumnType.JSONB),
+                new QueryParameter(3, "profile", ColumnType.JSON)
+            ),
+            null
+        );
+
+        QueryModel getDocument = new QueryModel(
+            "GetDocument",
+            QueryType.ONE,
+            "documents",
+            SQL,
+            List.of(1),
+            List.of(
+                new QueryColumn("metadata", ColumnType.JSONB, true),
+                new QueryColumn("profile", ColumnType.JSON, true)
+            ),
+            List.of(
+                new QueryParameter(1, "metadata", ColumnType.JSONB)
+            ),
+            null
+        );
+
+        GeneratedFile file = codeGenerator.generate(
+            new QueryGroupModel(
+                GROUP,
+                List.of(insertDocument, getDocument)
+            )
+        );
+
+        String source = file.content();
+
+        assertTrue(source.contains("String metadata, String profile"));
+        assertTrue(source.contains("resultSet.getString(1)"));
+
+        assertEquals(0, compile(file, "UsersRepository.java"));
+    }
+
     /** Compiles one generated source file in an isolated temporary location. */
     private int compile(GeneratedFile file, String fileName) throws IOException {
         Path sourceDirectory = tempDir.resolve("generated");
@@ -981,7 +1104,9 @@ class JavaCodeGeneratorTest {
             "REAL, Float",
             "DOUBLE_PRECISION, Double",
             "BYTEA, byte[]",
-            "TIME, LocalTime"
+            "TIME, LocalTime",
+            "JSON, String",
+            "JSONB, String"
         }
     )
     void shouldGenerateJavaTypeForResultColumn(ColumnType columnType, String expectedJavaType) {

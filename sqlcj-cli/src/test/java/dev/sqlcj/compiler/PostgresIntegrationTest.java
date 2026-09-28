@@ -168,6 +168,19 @@ class PostgresIntegrationTest {
         """;
 
     /**
+     * A snapshot declaring one nullable column of each JSON spelling, so that
+     * one row can carry JSON text and another can carry nulls.
+     */
+    private static final String DOCUMENT_SCHEMA = """
+        CREATE TABLE documents
+        (
+            id       BIGINT PRIMARY KEY,
+            payload  JSON,
+            config   JSONB
+        );
+        """;
+
+    /**
      * Queries used by the caller-owned transaction tests: an affected-row
      * write, a returning write, and a read.
      */
@@ -323,6 +336,7 @@ class PostgresIntegrationTest {
         execute("DROP TABLE IF EXISTS customer_orders");
         execute("DROP TABLE IF EXISTS customers");
         execute("DROP TABLE IF EXISTS measurements");
+        execute("DROP TABLE IF EXISTS documents");
         execute("DROP TABLE IF EXISTS user_aliases");
         execute("DROP TABLE IF EXISTS users");
         execute(SCHEMA);
@@ -1157,6 +1171,102 @@ class PostgresIntegrationTest {
             assertNull(component(nullResult, "payload"));
             assertNull(component(nullResult, "openedAt"));
             assertNull(component(nullResult, "closedAt"));
+        }
+    }
+
+    /**
+     * Proves that JSON text round trips through generated code: one row is
+     * written with JSON values and one with nulls, both are read back as
+     * {@code String} components, and a {@code JSONB} equality predicate matches
+     * by value rather than by text. {@code JSON} keeps the text as written and
+     * {@code JSONB} reads back as PostgreSQL normalizes it. The equality
+     * predicate is proven on {@code JSONB} alone, because PostgreSQL defines no
+     * {@code json = json} operator.
+     */
+    @Test
+    void shouldRoundTripJsonValues() throws Exception {
+        execute(DOCUMENT_SCHEMA);
+
+        Path classesDirectory = generateAndCompile(
+            DOCUMENT_SCHEMA,
+            """
+                -- name: InsertDocument :exec
+                INSERT INTO documents (id, payload, config)
+                VALUES ($1, $2, $3);
+
+                -- name: GetDocument :one
+                SELECT id, payload, config
+                FROM documents
+                WHERE id = $1;
+
+                -- name: FindDocumentByConfig :optional
+                SELECT id, payload, config
+                FROM documents
+                WHERE config = $1;
+                """
+        );
+
+        String payload = "{\"b\":  2,\n \"a\": 1}";
+        String config = "{\"b\": 2, \"a\": 1}";
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method insertMethod = repository.getClass().getMethod(
+                "insertDocument",
+                Long.class,
+                String.class,
+                String.class
+            );
+
+            assertEquals(1, insertMethod.invoke(repository, 1L, payload, config));
+            assertEquals(1, insertMethod.invoke(repository, 2L, null, null));
+
+            Method queryMethod = repository.getClass().getMethod("getDocument", Long.class);
+
+            Object result = queryMethod.invoke(repository, 1L);
+
+            assertNotNull(result);
+
+            assertEquals(
+                List.of("id", "payload", "config"),
+                recordComponentNames(result)
+            );
+
+            assertEquals(
+                List.of(Long.class, String.class, String.class),
+                recordComponentTypes(result)
+            );
+
+            assertEquals(payload, component(result, "payload"));
+            assertEquals("{\"a\": 1, \"b\": 2}", component(result, "config"));
+
+            Object nullResult = queryMethod.invoke(repository, 2L);
+
+            assertNotNull(nullResult);
+
+            assertEquals(2L, component(nullResult, "id"));
+            assertNull(component(nullResult, "payload"));
+            assertNull(component(nullResult, "config"));
+
+            Method findMethod = repository.getClass().getMethod(
+                "findDocumentByConfig",
+                String.class
+            );
+
+            Optional<?> found = assertInstanceOf(
+                Optional.class,
+                findMethod.invoke(repository, "{\"a\":1,   \"b\":2}")
+            );
+
+            assertEquals(1L, component(found.orElseThrow(), "id"));
+
+            assertTrue(
+                assertInstanceOf(
+                    Optional.class,
+                    findMethod.invoke(repository, new Object[] { null })
+                ).isEmpty()
+            );
         }
     }
 
