@@ -347,7 +347,10 @@ whose complete row an entry returns.
 - A `:exec` query generates no result record and returns `int`.
 - Every generated method passes the repository class name and the query name to
   the executor, as the first two arguments of its call, so a runtime failure
-  names the query the application called.
+  names the query the application called. A `JSON` or `JSONB` argument is passed
+  as `new dev.sqlcj.runtime.UntypedText(<parameter>)`, written out in full, so
+  that the runtime binds its text without a declared SQL type; see
+  [Supported Column Types](postgresql.md#supported-column-types).
 - Generated repository source imports only `dev.sqlcj.runtime.QueryExecutor`,
   `dev.sqlcj.runtime.RowMapper`, `java.util.List`, `java.util.Optional` when the
   entry declares an `:optional` query, and the JDK types of the mapped columns,
