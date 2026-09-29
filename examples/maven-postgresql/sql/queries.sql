@@ -53,3 +53,14 @@ SELECT a.name, b.title
 FROM authors a
 LEFT JOIN books b ON b.author_id = a.id
 ORDER BY a.id, b.id;
+
+-- name: CreateCatalogedBook :one
+INSERT INTO books (author_id, title, format, tags, details)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING *;
+
+-- name: ListBooksByFormat :many
+SELECT *
+FROM books
+WHERE format = $1
+ORDER BY id;
