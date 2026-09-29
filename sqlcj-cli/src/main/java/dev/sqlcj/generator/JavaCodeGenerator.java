@@ -533,13 +533,27 @@ public final class JavaCodeGenerator implements CodeGenerator {
             );
     }
 
-    /** A row record depends on the JDK types of its components alone. */
+    /**
+     * A row record depends on the JDK types of its components alone, which for
+     * an array component are {@code java.util.List} and the JDK type of its
+     * elements, in the order the components name them.
+     */
     private String generateRowImports(SharedRow row) {
-        return row.columns().stream()
-            .map(QueryColumn::type)
-            .map(this::resolveImport)
-            .filter(Objects::nonNull)
-            .distinct()
+        Set<String> imports = new LinkedHashSet<>();
+
+        for (QueryColumn column : row.columns()) {
+            if (column.array()) {
+                imports.add("java.util.List");
+            }
+
+            String elementImport = resolveImport(column.type());
+
+            if (elementImport != null) {
+                imports.add(elementImport);
+            }
+        }
+
+        return imports.stream()
             .map(type -> "import " + type + ";")
             .collect(Collectors.joining("\n"));
     }
@@ -769,7 +783,7 @@ public final class JavaCodeGenerator implements CodeGenerator {
     private String generateResultComponent(QueryColumn column, String name) {
         return "%s %s"
             .formatted(
-                javaType(column.type(), column.enumType()),
+                javaType(column.type(), column.enumType(), column.array()),
                 name
             )
             .indent(4)
@@ -780,12 +794,17 @@ public final class JavaCodeGenerator implements CodeGenerator {
      * The Java type of one column or parameter, which is the generated enum of
      * its enum type for an enum and the mapped type of its column type
      * otherwise. A generated enum belongs to the generated package, so it is
-     * referenced by its simple name and needs no import.
+     * referenced by its simple name and needs no import. An array column or
+     * parameter is a {@code List} of that type.
      */
-    private String javaType(ColumnType type, String enumType) {
-        return type == ColumnType.ENUM
+    private String javaType(ColumnType type, String enumType, boolean array) {
+        String elementType = type == ColumnType.ENUM
             ? JavaNames.enumTypeName(enumType)
             : typeResolver.resolve(type);
+
+        return array
+            ? "List<" + elementType + ">"
+            : elementType;
     }
 
     private String generateMethodParameters(QueryModel query, JavaNames.QueryNames names) {
@@ -793,7 +812,7 @@ public final class JavaCodeGenerator implements CodeGenerator {
             .mapToObj(index -> {
                 QueryParameter parameter = query.parameters().get(index);
 
-                return javaType(parameter.type(), parameter.enumType())
+                return javaType(parameter.type(), parameter.enumType(), parameter.array())
                     + " "
                     + names.parameterNames().get(index);
             })
@@ -1004,10 +1023,17 @@ public final class JavaCodeGenerator implements CodeGenerator {
      * without a declared SQL type and the database types it from the context of
      * its placeholder. An enum parameter is wrapped the same way, around the
      * label of the generated constant, because PostgreSQL rejects a label bound
-     * as {@code varchar} where an enum is expected. The wrapper is written out
-     * in full, so the generated imports are the same as without it.
+     * as {@code varchar} where an enum is expected. An array parameter is
+     * wrapped in {@code dev.sqlcj.runtime.SqlArray} with the element type's
+     * PostgreSQL name, so that the runtime binds the list as a server array.
+     * Every wrapper is written out in full, so the generated imports are the
+     * same as without it.
      */
     private String generateArgument(QueryParameter parameter, String name) {
+        if (parameter.array()) {
+            return generateArrayArgument(parameter, name);
+        }
+
         if (parameter.type() == ColumnType.ENUM) {
             return "new dev.sqlcj.runtime.UntypedText(%s == null ? null : %s.label())"
                 .formatted(name, name);
@@ -1018,6 +1044,62 @@ public final class JavaCodeGenerator implements CodeGenerator {
         }
 
         return name;
+    }
+
+    /**
+     * Renders one array executor argument, which carries the element type's
+     * PostgreSQL name beside the list. An array of an enum carries the labels
+     * of its constants instead of the constants themselves, because the runtime
+     * binds the values the database stores.
+     */
+    private String generateArrayArgument(QueryParameter parameter, String name) {
+        if (parameter.type() == ColumnType.ENUM) {
+            return "dev.sqlcj.runtime.SqlArray.of(%s, %s, %s::label)"
+                .formatted(
+                    generateStringLiteral(parameter.enumType()),
+                    name,
+                    JavaNames.enumTypeName(parameter.enumType())
+                );
+        }
+
+        return "new dev.sqlcj.runtime.SqlArray(%s, %s)"
+            .formatted(
+                generateStringLiteral(elementTypeName(parameter)),
+                name
+            );
+    }
+
+    /**
+     * The PostgreSQL name of one array element type, which is the name
+     * {@code Connection.createArrayOf} resolves the array type from. Only the
+     * element types sqlcj maps an array of have one. A blank-padded character
+     * element is named {@code bpchar} rather than {@code varchar}, because
+     * PostgreSQL compares a {@code bpchar} array only with another one.
+     */
+    private String elementTypeName(QueryParameter parameter) {
+        if (parameter.blankPadded() && parameter.type() == ColumnType.VARCHAR) {
+            return "bpchar";
+        }
+
+        return switch (parameter.type()) {
+            case INTEGER -> "int4";
+            case BIGINT -> "int8";
+            case SMALLINT -> "int2";
+            case BOOLEAN -> "bool";
+            case VARCHAR -> "varchar";
+            case TEXT -> "text";
+            case DATE -> "date";
+            case TIME -> "time";
+            case TIMESTAMP -> "timestamp";
+            case TIMESTAMP_WITH_TIME_ZONE -> "timestamptz";
+            case DECIMAL -> "numeric";
+            case REAL -> "float4";
+            case DOUBLE_PRECISION -> "float8";
+            case UUID -> "uuid";
+            default -> throw new IllegalStateException(
+                "Column type has no array element type: " + parameter.type()
+            );
+        };
     }
 
     /**
@@ -1075,10 +1157,18 @@ public final class JavaCodeGenerator implements CodeGenerator {
      * A JSON column is read with {@code getString}, because a driver reports it
      * as a type of its own for which {@code getObject(position, String.class)}
      * is not defined. An enum column reads its label the same way and resolves
-     * it to the generated constant; every other column is read as its mapped
+     * it to the generated constant; an array column reads its elements through
+     * {@code dev.sqlcj.runtime.SqlArray}, which reads each element as a scalar
+     * of the element type is read; every other column is read as its mapped
      * Java type.
      */
     private String generateResultMapping(QueryColumn column, int position) {
+        if (column.array()) {
+            return generateArrayMapping(column, position)
+                .indent(8)
+                .stripTrailing();
+        }
+
         if (column.type() == ColumnType.ENUM) {
             return "%s.fromLabel(resultSet.getString(%d))"
                 .formatted(JavaNames.enumTypeName(column.enumType()), position)
@@ -1099,6 +1189,20 @@ public final class JavaCodeGenerator implements CodeGenerator {
             .formatted(position, javaType)
             .indent(8)
             .stripTrailing();
+    }
+
+    /**
+     * Reads one array column as a list of its element type. An array of an enum
+     * reads each label and resolves it to the generated constant.
+     */
+    private String generateArrayMapping(QueryColumn column, int position) {
+        if (column.type() == ColumnType.ENUM) {
+            return "dev.sqlcj.runtime.SqlArray.getList(resultSet, %d, String.class, %s::fromLabel)"
+                .formatted(position, JavaNames.enumTypeName(column.enumType()));
+        }
+
+        return "dev.sqlcj.runtime.SqlArray.getList(resultSet, %d, %s.class)"
+            .formatted(position, typeResolver.resolve(column.type()));
     }
 
     private String generateExecutorField() {

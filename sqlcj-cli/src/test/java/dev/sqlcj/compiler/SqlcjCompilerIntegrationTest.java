@@ -2986,7 +2986,7 @@ class SqlcjCompilerIntegrationTest {
                 CREATE TABLE users
                 (
                     id   BIGINT NOT NULL,
-                    tags VARCHAR(20)[]
+                    tags JSONB[]
                 );
                 """
         );
@@ -3019,7 +3019,7 @@ class SqlcjCompilerIntegrationTest {
 
         assertEquals(
             "Invalid query 'ListTags' in %s at line 5: ".formatted(queriesFile)
-                + "Column 'tags' has unsupported type VARCHAR[]",
+                + "Column 'tags' has unsupported type JSONB[]",
             exception.getMessage()
         );
 
@@ -3038,7 +3038,7 @@ class SqlcjCompilerIntegrationTest {
                 (
                     id       BIGINT NOT NULL,
                     name     VARCHAR(255),
-                    tags     VARCHAR(20)[],
+                    tags     JSONB[],
                     metadata XML
                 );
                 """,

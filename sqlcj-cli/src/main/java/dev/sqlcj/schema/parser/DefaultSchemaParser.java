@@ -581,7 +581,9 @@ public class DefaultSchemaParser implements SchemaParser {
                 column.type(),
                 column.nullable(),
                 column.unsupportedType(),
-                column.enumType()
+                column.enumType(),
+                column.array(),
+                column.blankPadded()
             )
         );
 
@@ -638,7 +640,9 @@ public class DefaultSchemaParser implements SchemaParser {
                     retyped.type(),
                     column.nullable(),
                     retyped.unsupportedType(),
-                    retyped.enumType()
+                    retyped.enumType(),
+                    retyped.array(),
+                    retyped.blankPadded()
                 )
             );
         }
@@ -672,7 +676,9 @@ public class DefaultSchemaParser implements SchemaParser {
                     column.type(),
                     nullable,
                     column.unsupportedType(),
-                    column.enumType()
+                    column.enumType(),
+                    column.array(),
+                    column.blankPadded()
                 )
             );
         }
@@ -812,35 +818,46 @@ public class DefaultSchemaParser implements SchemaParser {
 
     /**
      * Parses one column, recording a column sqlcj cannot map with its declared
-     * type text instead of failing the schema. An array column is such a column
-     * regardless of its element type, because the mapped types and the modeled
-     * enum types are all scalar.
+     * type text instead of failing the schema. A column declared with exactly
+     * one array dimension is an array of its declared element type; a column of
+     * more dimensions, and an array whose element type has no array mapping, is
+     * recorded like any other unmapped column.
      */
     private Column parseColumn(ColumnDefinition definition, List<EnumType> enums) {
         String typeName = typeName(definition);
         int arrayDimensions = arrayDimensions(definition);
         boolean nullable = !isSerial(typeName) && isNullable(definition);
+        boolean array = arrayDimensions == 1;
 
-        ColumnType type = arrayDimensions == 0
+        ColumnType type = arrayDimensions <= 1
             ? columnType(typeName)
             : null;
 
         if (type != null) {
-            return new Column(columnName(definition), type, nullable);
-        }
+            if (!array || isArrayElementType(type)) {
+                return new Column(
+                    columnName(definition),
+                    type,
+                    nullable,
+                    null,
+                    null,
+                    array,
+                    isBlankPadded(typeName)
+                );
+            }
+        } else if (arrayDimensions <= 1) {
+            EnumType enumType = declaredEnum(definition, enums);
 
-        EnumType enumType = arrayDimensions == 0
-            ? declaredEnum(definition, enums)
-            : null;
-
-        if (enumType != null) {
-            return new Column(
-                columnName(definition),
-                ColumnType.ENUM,
-                nullable,
-                null,
-                enumType.name()
-            );
+            if (enumType != null) {
+                return new Column(
+                    columnName(definition),
+                    ColumnType.ENUM,
+                    nullable,
+                    null,
+                    enumType.name(),
+                    array
+                );
+            }
         }
 
         return new Column(
@@ -849,6 +866,31 @@ public class DefaultSchemaParser implements SchemaParser {
             nullable,
             typeName + "[]".repeat(arrayDimensions)
         );
+    }
+
+    /**
+     * Reports whether a declared spelling is the blank-padded character type,
+     * which PostgreSQL names {@code bpchar} and maps like {@code VARCHAR}. The
+     * distinction is kept because the two names are not interchangeable where
+     * PostgreSQL resolves an array type from its element's name.
+     */
+    private boolean isBlankPadded(String typeName) {
+        return switch (typeName) {
+            case "CHAR", "CHARACTER" -> true;
+            default -> false;
+        };
+    }
+
+    /**
+     * Reports whether an array of a mapped type is mapped as well.
+     * {@code BYTEA}, {@code JSON}, and {@code JSONB} arrays are recorded with
+     * their declared type instead, because their elements are bound and read as
+     * text or bytes rather than as a value of a mapped element type.
+     */
+    private boolean isArrayElementType(ColumnType type) {
+        return type != ColumnType.BYTEA
+            && type != ColumnType.JSON
+            && type != ColumnType.JSONB;
     }
 
     /**

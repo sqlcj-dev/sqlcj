@@ -459,16 +459,16 @@ class DefaultSchemaParserTest {
     }
 
     /**
-     * A column of a type sqlcj cannot map, including every array column, is
-     * recorded with its declared type text instead of failing the schema, so
-     * only a query that uses the column fails. The recorded text is the
-     * canonical spelling of the declared type, followed by {@code []} per
-     * declared array dimension.
+     * A column of a type sqlcj cannot map is recorded with its declared type
+     * text instead of failing the schema, so only a query that uses the column
+     * fails. The recorded text is the canonical spelling of the declared type,
+     * followed by {@code []} per declared array dimension.
      *
      * <p>{@code FLOAT} and {@code FLOAT(p)}, whose precision selects the type,
      * and the time-zone-aware time spellings are unmapped beside the mapped
-     * floating-point, binary, and time spellings. An array of a mapped JSON
-     * spelling is recorded like any other array.
+     * floating-point, binary, and time spellings. An array of more than one
+     * dimension, an array of an unmapped element type, and an array of
+     * {@code BYTEA}, {@code JSON}, or {@code JSONB} are recorded as well.
      */
     @ParameterizedTest
     @CsvSource(
@@ -478,13 +478,13 @@ class DefaultSchemaParserTest {
             "float(24), FLOAT",
             "TIMETZ, TIMETZ",
             "time with time zone, TIME WITH TIME ZONE",
-            "real[], REAL[]",
+            "bytea[], BYTEA[]",
             "json[], JSON[]",
             "jsonb[], JSONB[]",
+            "xml[], XML[]",
             "\"char\", \"CHAR\"",
-            "varchar(20)[], VARCHAR[]",
             "integer[][], INTEGER[][]",
-            "'numeric(10, 2)[3]', NUMERIC[]"
+            "'numeric(10, 2)[3][2]', NUMERIC[][]"
         }
     )
     void shouldRecordUnsupportedColumnType(String sqlType, String recordedType) {
@@ -515,7 +515,7 @@ class DefaultSchemaParserTest {
     void shouldParseNullabilityOfUnsupportedColumnTypes() {
         String sql = """
             CREATE TABLE users (
-                tags     INT[] NOT NULL,
+                tags     JSONB[] NOT NULL,
                 metadata XML
             );
             """;
@@ -524,10 +524,146 @@ class DefaultSchemaParserTest {
 
         assertEquals(
             List.of(
-                new Column("tags", null, false, "INT[]"),
+                new Column("tags", null, false, "JSONB[]"),
                 new Column("metadata", null, true, "XML")
             ),
             table.columns()
+        );
+    }
+
+    /**
+     * A column declared with exactly one array dimension is an array of its
+     * declared element type, which is any mapped type other than {@code BYTEA},
+     * {@code JSON}, and {@code JSONB}. The declared size of a dimension is
+     * ignored, as PostgreSQL ignores it, and so are the element type's
+     * parenthesized arguments.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        {
+            "INTEGER[], INTEGER",
+            "int4[], INTEGER",
+            "BIGINT[], BIGINT",
+            "SMALLINT[], SMALLINT",
+            "BOOLEAN[], BOOLEAN",
+            "'VARCHAR(20)[]', VARCHAR",
+            "TEXT[], TEXT",
+            "DATE[], DATE",
+            "TIME[], TIME",
+            "TIMESTAMP[], TIMESTAMP",
+            "timestamptz[], TIMESTAMP_WITH_TIME_ZONE",
+            "'numeric(10, 2)[3]', DECIMAL",
+            "REAL[], REAL",
+            "DOUBLE PRECISION[], DOUBLE_PRECISION",
+            "uuid[], UUID"
+        }
+    )
+    void shouldModelOneDimensionalArrayColumns(String sqlType, ColumnType elementType) {
+        String sql = """
+            CREATE TABLE users (
+                id    BIGINT NOT NULL,
+                value %s NOT NULL
+            );
+
+            ALTER TABLE users ADD COLUMN added %s;
+            ALTER TABLE users ALTER COLUMN id TYPE %s;
+            """
+            .formatted(sqlType, sqlType, sqlType);
+
+        Table table = parser.parse(sql).tables().getFirst();
+
+        assertEquals(
+            List.of(
+                new Column("id", elementType, false, null, null, true),
+                new Column("value", elementType, false, null, null, true),
+                new Column("added", elementType, true, null, null, true)
+            ),
+            table.columns()
+        );
+    }
+
+    /**
+     * An array of the blank-padded {@code CHAR} or {@code CHARACTER} spelling
+     * is a {@code VARCHAR} array that carries the spelling, which PostgreSQL
+     * names {@code bpchar}, and an array of a varying spelling does not. The
+     * spelling is carried through every statement that types a column, and kept
+     * through a rename and a nullability change, as the array shape is.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        {
+            "'CHAR(3)[]', true",
+            "'character(3)[]', true",
+            "CHARACTER[], true",
+            "'VARCHAR(20)[]', false",
+            "'character varying(20)[]', false"
+        }
+    )
+    void shouldModelTheBlankPaddedSpellingOfCharacterArrayColumns(
+        String sqlType,
+        boolean blankPadded
+    ) {
+        String sql = """
+            CREATE TABLE users (
+                id    BIGINT NOT NULL,
+                value %s NOT NULL
+            );
+
+            ALTER TABLE users ADD COLUMN added %s;
+            ALTER TABLE users ALTER COLUMN id TYPE %s;
+            ALTER TABLE users RENAME COLUMN added TO renamed;
+            ALTER TABLE users ALTER COLUMN renamed SET NOT NULL;
+            """
+            .formatted(sqlType, sqlType, sqlType);
+
+        Table table = parser.parse(sql).tables().getFirst();
+
+        assertEquals(
+            List.of(
+                new Column("id", ColumnType.VARCHAR, false, null, null, true, blankPadded),
+                new Column("value", ColumnType.VARCHAR, false, null, null, true, blankPadded),
+                new Column("renamed", ColumnType.VARCHAR, false, null, null, true, blankPadded)
+            ),
+            table.columns()
+        );
+    }
+
+    /**
+     * An array column keeps its element type and its array shape through a
+     * rename and through a nullability change, and a type change replaces both.
+     */
+    @Test
+    void shouldCarryTheArrayShapeOfARenamedAndRetypedColumn() {
+        Schema schema = parser.parse("""
+            CREATE TABLE users (
+                tags TEXT[]
+            );
+
+            ALTER TABLE users RENAME COLUMN tags TO labels;
+            ALTER TABLE users ALTER COLUMN labels SET NOT NULL;
+            """);
+
+        assertEquals(
+            List.of(new Column("labels", ColumnType.TEXT, false, null, null, true)),
+            table(schema, "users").columns()
+        );
+
+        assertEquals(
+            List.of(new Column("labels", ColumnType.INTEGER, false)),
+            table(
+                parser.parse(schema, "ALTER TABLE users ALTER COLUMN labels TYPE INTEGER;"),
+                "users"
+            )
+                .columns()
+        );
+
+        assertEquals(
+            List.of(new Column("labels", null, false, "JSONB[]")),
+            table(
+                parser.parse(schema, "ALTER TABLE users ALTER COLUMN labels TYPE JSONB[];"),
+                "users"
+            )
+                .columns()
         );
     }
 
@@ -995,7 +1131,7 @@ class DefaultSchemaParserTest {
                 new Column("created_at", ColumnType.TIMESTAMP_WITH_TIME_ZONE, false),
                 new Column("revision", ColumnType.INTEGER, false),
                 new Column("metadata", null, true, "XML"),
-                new Column("tags", null, true, "VARCHAR[]")
+                new Column("tags", ColumnType.VARCHAR, true, null, null, true)
             ),
             table(schema, "users").columns()
         );
@@ -1452,7 +1588,7 @@ class DefaultSchemaParserTest {
                     ColumnType.TIMESTAMP_WITH_TIME_ZONE,
                     false
                 ),
-                new Column("genres", null, false, "VARCHAR[]")
+                new Column("genres", ColumnType.VARCHAR, false, null, null, true)
             ),
             records.columns()
         );
@@ -1545,10 +1681,10 @@ class DefaultSchemaParserTest {
                 new Column("id", ColumnType.INTEGER, false),
                 new Column("handle", ColumnType.TEXT, false),
                 new Column("setting", ColumnType.ENUM, false, null, "stage_setting"),
-                new Column("past_settings", null, true, "STAGE_SETTING[]"),
+                new Column("past_settings", ColumnType.ENUM, true, null, "stage_setting", true),
                 new Column("title", ColumnType.VARCHAR, false),
                 new Column("region", ColumnType.TEXT, false),
-                new Column("keywords", null, true, "TEXT[]"),
+                new Column("keywords", ColumnType.TEXT, true, null, null, true),
                 new Column("opened_at", ColumnType.TIMESTAMP, false)
             ),
             stage.columns()
@@ -1752,26 +1888,35 @@ class DefaultSchemaParserTest {
     }
 
     /**
-     * An array of a declared enum type and a type the schema does not declare
-     * are recorded with their declared type as before, because only a scalar
-     * column of a declared enum type is modeled as an enum.
+     * A one-dimensional array of a declared enum type is modeled as an array
+     * column of that enum type, through every path that types a column. An
+     * array of more dimensions and a type the schema does not declare stay
+     * recorded with their declared type.
      */
     @Test
-    void shouldRecordEnumArraysAndUndeclaredTypesAsUnsupported() {
+    void shouldModelEnumArraysAndRecordUndeclaredTypesAsUnsupported() {
         Schema schema = parser.parse(
             enumSchema(),
             """
                 CREATE TABLE stages (
                     past_settings stage_setting[],
-                    state         shelf_state
+                    history       stage_setting[][],
+                    state         shelf_state,
+                    title         text
                 );
+
+                ALTER TABLE stages ADD COLUMN planned "STAGE_SETTING"[];
+                ALTER TABLE stages ALTER COLUMN title TYPE stage_setting[];
                 """
         );
 
         assertEquals(
             List.of(
-                new Column("past_settings", null, true, "STAGE_SETTING[]"),
-                new Column("state", null, true, "SHELF_STATE")
+                new Column("past_settings", ColumnType.ENUM, true, null, "stage_setting", true),
+                new Column("history", null, true, "STAGE_SETTING[][]"),
+                new Column("state", null, true, "SHELF_STATE"),
+                new Column("title", ColumnType.ENUM, true, null, "stage_setting", true),
+                new Column("planned", ColumnType.ENUM, true, null, "stage_setting", true)
             ),
             table(schema, "stages").columns()
         );
