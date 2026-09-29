@@ -205,6 +205,56 @@ class PostgresIntegrationTest {
         """;
 
     /**
+     * A snapshot declaring a one-dimensional array of every element type sqlcj
+     * maps: each mapped scalar type other than {@code BYTEA}, {@code JSON}, and
+     * {@code JSONB}, and a declared enum type.
+     */
+    private static final String ARRAY_SCHEMA = """
+        CREATE TYPE stage_setting AS ENUM ('indoor', 'outdoor');
+
+        CREATE TABLE array_values
+        (
+            id        BIGINT PRIMARY KEY,
+            codes     INTEGER[],
+            keys      BIGINT[],
+            scores    SMALLINT[],
+            flags     BOOLEAN[],
+            labels    VARCHAR(20)[],
+            notes     TEXT[],
+            days      DATE[],
+            times     TIME[],
+            moments   TIMESTAMP[],
+            instants  TIMESTAMPTZ[],
+            amounts   NUMERIC(10, 2)[],
+            ratios    REAL[],
+            weights   DOUBLE PRECISION[],
+            externals UUID[],
+            past      stage_setting[],
+            marks     CHAR(3)[]
+        );
+        """;
+
+    /** The array columns of {@link #ARRAY_SCHEMA}, in schema order. */
+    private static final List<String> ARRAY_COLUMNS = List.of(
+        "codes",
+        "keys",
+        "scores",
+        "flags",
+        "labels",
+        "notes",
+        "days",
+        "times",
+        "moments",
+        "instants",
+        "amounts",
+        "ratios",
+        "weights",
+        "externals",
+        "past",
+        "marks"
+    );
+
+    /**
      * Queries used by the caller-owned transaction tests: an affected-row
      * write, a returning write, and a read.
      */
@@ -357,6 +407,7 @@ class PostgresIntegrationTest {
         execute("DROP TABLE IF EXISTS stage");
         execute("DROP TABLE IF EXISTS region");
         execute("DROP TABLE IF EXISTS stage_events");
+        execute("DROP TABLE IF EXISTS array_values");
         execute("DROP TYPE IF EXISTS stage_setting");
         execute("DROP TABLE IF EXISTS customer_orders");
         execute("DROP TABLE IF EXISTS customers");
@@ -1314,6 +1365,206 @@ class PostgresIntegrationTest {
                 ).isEmpty()
             );
         }
+    }
+
+    /**
+     * Proves that a one-dimensional array round trips through generated code
+     * for every element type sqlcj maps: a non-empty list holding a
+     * {@code null} element, an empty list, and a {@code null} list are written
+     * and read back as {@code List} components of the element's Java type. A
+     * {@code TIMESTAMP WITH TIME ZONE} element is compared by instant, because
+     * PostgreSQL normalizes the stored value to the session time zone, and a
+     * {@code CHAR(n)} element is compared with its stored value, which
+     * PostgreSQL pads to the declared length.
+     */
+    @Test
+    void shouldRoundTripArrayValues() throws Exception {
+        execute(ARRAY_SCHEMA);
+
+        Path classesDirectory = generateAndCompile(
+            ARRAY_SCHEMA,
+            """
+                -- name: InsertArrayValues :exec
+                INSERT INTO array_values (
+                    id, codes, keys, scores, flags, labels, notes, days, times,
+                    moments, instants, amounts, ratios, weights, externals, past,
+                    marks
+                )
+                VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9,
+                    $10, $11, $12, $13, $14, $15, $16, $17
+                );
+
+                -- name: GetArrayValues :one
+                SELECT *
+                FROM array_values
+                WHERE id = $1;
+
+                -- name: FindArrayValuesByMarks :one
+                SELECT id
+                FROM array_values
+                WHERE marks = $1;
+                """
+        );
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> stageSetting = Class.forName(
+                "generated.StageSetting",
+                true,
+                classLoader
+            );
+
+            Object[] constants = stageSetting.getEnumConstants();
+
+            List<List<?>> values = List.of(
+                Arrays.asList(1, null, 3),
+                Arrays.asList(10L, null, 30L),
+                Arrays.asList((short) 1, null, (short) 3),
+                Arrays.asList(true, null, false),
+                Arrays.asList("first", null, "second"),
+                Arrays.asList("note one", null, "note two"),
+                Arrays.asList(LocalDate.of(2026, 1, 15), null, LocalDate.of(2026, 2, 20)),
+                Arrays.asList(LocalTime.of(10, 15, 30), null, LocalTime.of(23, 59)),
+                Arrays.asList(
+                    LocalDateTime.of(2026, 1, 1, 10, 0),
+                    null,
+                    LocalDateTime.of(2026, 2, 1, 11, 30)
+                ),
+                Arrays.asList(
+                    OffsetDateTime.of(2026, 1, 1, 10, 0, 0, 0, ZoneOffset.UTC),
+                    null,
+                    OffsetDateTime.of(2026, 2, 1, 11, 30, 0, 0, ZoneOffset.ofHours(2))
+                ),
+                Arrays.asList(new BigDecimal("100.50"), null, new BigDecimal("200.25")),
+                Arrays.asList(1.5f, null, 2.5f),
+                Arrays.asList(1.25, null, 2.5),
+                Arrays.asList(
+                    UUID.fromString("0f2a0e2e-95f0-4a0f-8f07-2b0f2f3c9a11"),
+                    null,
+                    UUID.fromString("7c9a1f4e-6b3d-4a5e-9f2b-1d8c0a6e4b22")
+                ),
+                Arrays.asList(constants[0], null, constants[1]),
+                Arrays.asList("ab", null, "c")
+            );
+
+            Object repository = newRepository(classLoader);
+
+            Method insertMethod = repository.getClass().getMethod(
+                "insertArrayValues",
+                arrayParameterTypes()
+            );
+
+            assertEquals(1, insertMethod.invoke(repository, arguments(1L, values)));
+            assertEquals(1, insertMethod.invoke(repository, arguments(2L, emptyLists())));
+            assertEquals(1, insertMethod.invoke(repository, arguments(3L, nullLists())));
+
+            Method queryMethod = repository.getClass().getMethod("getArrayValues", Long.class);
+
+            Object filled = queryMethod.invoke(repository, 1L);
+
+            List<String> componentNames = new ArrayList<>();
+
+            componentNames.add("id");
+            componentNames.addAll(ARRAY_COLUMNS);
+
+            assertEquals(componentNames, recordComponentNames(filled));
+
+            for (String column : ARRAY_COLUMNS) {
+                assertInstanceOf(List.class, component(filled, column));
+            }
+
+            for (int index = 0; index < ARRAY_COLUMNS.size(); index++) {
+                String column = ARRAY_COLUMNS.get(index);
+
+                if (column.equals("instants") || column.equals("marks")) {
+                    continue;
+                }
+
+                assertEquals(values.get(index), component(filled, column), column);
+            }
+
+            List<?> instants = (List<?>) component(filled, "instants");
+
+            assertEquals(3, instants.size());
+            assertNull(instants.get(1));
+
+            assertTrue(
+                ((OffsetDateTime) values.get(9).get(0))
+                    .isEqual((OffsetDateTime) instants.get(0))
+            );
+
+            assertTrue(
+                ((OffsetDateTime) values.get(9).get(2))
+                    .isEqual((OffsetDateTime) instants.get(2))
+            );
+
+            assertEquals(
+                Arrays.asList("ab ", null, "c  "),
+                component(filled, "marks"),
+                "marks"
+            );
+
+            Method findByMarks = repository.getClass().getMethod(
+                "findArrayValuesByMarks",
+                List.class
+            );
+
+            assertEquals(
+                1L,
+                component(findByMarks.invoke(repository, values.getLast()), "id")
+            );
+
+            Object empty = queryMethod.invoke(repository, 2L);
+
+            for (String column : ARRAY_COLUMNS) {
+                assertEquals(List.of(), component(empty, column), column);
+            }
+
+            Object missing = queryMethod.invoke(repository, 3L);
+
+            for (String column : ARRAY_COLUMNS) {
+                assertNull(component(missing, column), column);
+            }
+        }
+    }
+
+    /** The parameter types of the generated array insert: an id and 16 lists. */
+    private Class<?>[] arrayParameterTypes() {
+        Class<?>[] parameterTypes = new Class<?>[ARRAY_COLUMNS.size() + 1];
+
+        parameterTypes[0] = Long.class;
+
+        Arrays.fill(parameterTypes, 1, parameterTypes.length, List.class);
+
+        return parameterTypes;
+    }
+
+    private Object[] arguments(long id, List<List<?>> values) {
+        List<Object> arguments = new ArrayList<>();
+
+        arguments.add(id);
+        arguments.addAll(values);
+
+        return arguments.toArray();
+    }
+
+    private List<List<?>> emptyLists() {
+        return repeated(List.of());
+    }
+
+    private List<List<?>> nullLists() {
+        return repeated(null);
+    }
+
+    /** One list per array column, each the same value. */
+    private List<List<?>> repeated(List<?> value) {
+        List<List<?>> lists = new ArrayList<>();
+
+        for (int index = 0; index < ARRAY_COLUMNS.size(); index++) {
+            lists.add(value);
+        }
+
+        return lists;
     }
 
     /**

@@ -352,6 +352,14 @@ a query of an entry reads or binds.
   as `new dev.sqlcj.runtime.UntypedText(<parameter>)`, written out in full, so
   that the runtime binds its text without a declared SQL type; see
   [Supported Column Types](postgresql.md#supported-column-types).
+- A column or parameter of a one-dimensional array type is a
+  `java.util.List<T>` of the element's Java type. Its argument is passed as
+  `new dev.sqlcj.runtime.SqlArray("<element type>", <parameter>)`, or as
+  `dev.sqlcj.runtime.SqlArray.of("<enum type>", <parameter>, <EnumType>::label)`
+  for an array of an enum, and the column is read as
+  `dev.sqlcj.runtime.SqlArray.getList(resultSet, position, <Type>.class)`, so a
+  `null` list, an empty list, and a `null` element are preserved in both
+  directions; see [Array Types](postgresql.md#array-types).
 - A column or parameter of an enum type the schema declares uses the Java enum
   the package generates for that type, by its simple name. Its argument is
   passed as
@@ -363,7 +371,8 @@ a query of an entry reads or binds.
   `dev.sqlcj.runtime.RowMapper`, `java.util.List`, `java.util.Optional` when the
   entry declares an `:optional` query, and the JDK types of the mapped columns,
   so the runtime artifact is the only sqlcj dependency a consumer needs. A row
-  record imports the JDK types of its components alone and depends on no sqlcj
+  record imports the JDK types of its components alone, which include
+  `java.util.List` for an array component, and depends on no sqlcj
   type, and a generated enum imports nothing at all.
 
 The `Author` entry of the [Quickstart](quickstart.md), which declares
@@ -560,8 +569,9 @@ them:
 - `ON CONFLICT`, `UPDATE ... FROM`, and `DELETE ... USING` on a non-returning
   `:exec` write.
 
-sqlcj itself provides no named parameters, macros, array parameters, dynamic
-`IN` expansion, or query-building API.
+sqlcj itself provides no named parameters, macros, array operators such as
+`= ANY`, dynamic `IN` expansion, or query-building API. An array parameter is
+one whole list bound at one placeholder, not a placeholder list.
 
 Unsupported schema input and unsupported column types are listed in
 [PostgreSQL Support](postgresql.md#unsupported-types-and-ddl).
@@ -758,3 +768,10 @@ Generated Java:
 - `PostgresIntegrationTest.shouldExecuteGeneratedFullRowQueriesIntoOneSharedRowTypeAgainstPostgres`
   executes a returning write, a full-row read, and a qualified full-row list of
   one table into one row type against PostgreSQL 16.
+- `JavaCodeGeneratorTest.shouldBindAndReadArrayColumnsPerElementType`,
+  `JavaCodeGeneratorTest.shouldBindEnumArrayLabelsAndReadEnumArrayColumnsByLabel`,
+  and `JavaCodeGeneratorTest.shouldImportListForAnArrayRowComponent` cover the
+  generated `List` type, the `SqlArray` argument and read, and the row record's
+  `java.util.List` import, and
+  `PostgresIntegrationTest.shouldRoundTripArrayValues` executes them against
+  PostgreSQL 16.

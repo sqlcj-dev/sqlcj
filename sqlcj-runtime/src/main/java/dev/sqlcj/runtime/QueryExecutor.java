@@ -13,7 +13,9 @@ import java.util.Optional;
  * <p>The parameters of an operation are the query's arguments in the order
  * their placeholders appear in its SQL, and any of them may be {@code null}. An
  * argument may also be an {@link UntypedText}, which carries text an
- * implementation binds without a declared SQL type.
+ * implementation binds without a declared SQL type, or a {@link SqlArray},
+ * which carries the elements an implementation binds as a SQL array of one
+ * element type.
  */
 public interface QueryExecutor {
 

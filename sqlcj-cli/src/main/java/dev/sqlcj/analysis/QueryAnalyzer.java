@@ -338,7 +338,8 @@ public final class QueryAnalyzer {
                     schemaColumn.name(),
                     requireSupportedType(schemaColumn),
                     schemaColumn.nullable(),
-                    schemaColumn.enumType()
+                    schemaColumn.enumType(),
+                    schemaColumn.array()
                 )
             );
         }
@@ -561,7 +562,9 @@ public final class QueryAnalyzer {
      * Requires two occurrences of one placeholder index to have the same type.
      * An enum occurrence is the same type only as an occurrence of the same
      * enum type, because each enum type generates a Java type of its own; every
-     * other occurrence is compared by the Java type it resolves to.
+     * other occurrence is compared by the Java type it resolves to. An array
+     * occurrence is a list of its element's Java type, so it is never the same
+     * type as an occurrence of that element.
      */
     private void requireSameParameterType(QueryParameter parameter, QueryParameter occurrence) {
         if (isSameParameterType(parameter, occurrence)) {
@@ -581,6 +584,10 @@ public final class QueryAnalyzer {
     }
 
     private boolean isSameParameterType(QueryParameter parameter, QueryParameter occurrence) {
+        if (parameter.array() != occurrence.array()) {
+            return false;
+        }
+
         if (parameter.type() == ColumnType.ENUM || occurrence.type() == ColumnType.ENUM) {
             return parameter.type() == occurrence.type()
                 && parameter.enumType().equalsIgnoreCase(occurrence.enumType());
@@ -592,12 +599,21 @@ public final class QueryAnalyzer {
 
     /**
      * Describes a parameter's type for a diagnostic. An enum is described by
-     * its PostgreSQL name, because analysis renders no Java name.
+     * its PostgreSQL name, because analysis renders no Java name, and an array
+     * by the list of its element's description.
      */
     private String describeParameterType(QueryParameter parameter) {
-        return parameter.type() == ColumnType.ENUM
-            ? parameter.enumType()
-            : typeResolver.resolve(parameter.type());
+        if (parameter.type() == ColumnType.ENUM) {
+            return parameter.array()
+                ? parameter.enumType() + "[]"
+                : parameter.enumType();
+        }
+
+        String javaType = typeResolver.resolve(parameter.type());
+
+        return parameter.array()
+            ? "List<" + javaType + ">"
+            : javaType;
     }
 
     private void requireContiguousIndexes(List<QueryParameter> parameters) {
@@ -1104,10 +1120,17 @@ public final class QueryAnalyzer {
      * column's type and only a character type makes that type a pattern.
      */
     private dev.sqlcj.schema.Column requireTextColumn(dev.sqlcj.schema.Column column) {
-        if (column.type() != ColumnType.VARCHAR && column.type() != ColumnType.TEXT) {
+        boolean text = column.type() == ColumnType.VARCHAR || column.type() == ColumnType.TEXT;
+
+        if (!text || column.array()) {
             throw new UnsupportedOperationException(
                 "A LIKE pattern placeholder requires a VARCHAR or TEXT column, but %s is %s."
-                    .formatted(column.name(), column.type())
+                    .formatted(
+                        column.name(),
+                        column.array()
+                            ? column.type() + "[]"
+                            : column.type()
+                    )
             );
         }
 
@@ -1214,6 +1237,8 @@ public final class QueryAnalyzer {
             column.name(),
             requireSupportedType(column),
             column.enumType(),
+            column.array(),
+            column.blankPadded(),
             parameters
         );
     }
@@ -1224,7 +1249,7 @@ public final class QueryAnalyzer {
         ColumnType type,
         List<QueryParameter> parameters
     ) {
-        addParameter(parameter, name, type, null, parameters);
+        addParameter(parameter, name, type, null, false, false, parameters);
     }
 
     private void addParameter(
@@ -1232,6 +1257,8 @@ public final class QueryAnalyzer {
         String name,
         ColumnType type,
         String enumType,
+        boolean array,
+        boolean blankPadded,
         List<QueryParameter> parameters
     ) {
         if (!parameter.isUseFixedIndex()) {
@@ -1243,7 +1270,9 @@ public final class QueryAnalyzer {
                 parameter.getIndex(),
                 name,
                 type,
-                enumType
+                enumType,
+                array,
+                blankPadded
             )
         );
     }
@@ -1316,7 +1345,8 @@ public final class QueryAnalyzer {
                         selectedColumnName(selectItem.getAlias(), schemaColumn),
                         requireSupportedType(schemaColumn),
                         schemaColumn.nullable() || resolved.source().leftJoined(),
-                        schemaColumn.enumType()
+                        schemaColumn.enumType(),
+                        schemaColumn.array()
                     )
                 );
 
@@ -1502,7 +1532,8 @@ public final class QueryAnalyzer {
                     column.name(),
                     requireSupportedType(column),
                     column.nullable() || source.leftJoined(),
-                    column.enumType()
+                    column.enumType(),
+                    column.array()
                 )
             )
             .toList();

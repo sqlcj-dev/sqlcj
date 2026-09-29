@@ -2948,6 +2948,233 @@ class JavaCodeGeneratorTest {
         );
     }
 
+    /**
+     * An array column and an array parameter are a {@code List} of the
+     * element's Java type. The parameter is wrapped in
+     * {@code dev.sqlcj.runtime.SqlArray} with the element type's PostgreSQL
+     * name, written out in full so that the generated imports are unchanged,
+     * and the column is read through the same type.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        {
+            "INTEGER, int4, Integer",
+            "BIGINT, int8, Long",
+            "SMALLINT, int2, Short",
+            "BOOLEAN, bool, Boolean",
+            "VARCHAR, varchar, String",
+            "TEXT, text, String",
+            "DATE, date, LocalDate",
+            "TIME, time, LocalTime",
+            "TIMESTAMP, timestamp, LocalDateTime",
+            "TIMESTAMP_WITH_TIME_ZONE, timestamptz, OffsetDateTime",
+            "DECIMAL, numeric, BigDecimal",
+            "REAL, float4, Float",
+            "DOUBLE_PRECISION, float8, Double",
+            "UUID, uuid, UUID"
+        }
+    )
+    void shouldBindAndReadArrayColumnsPerElementType(
+        ColumnType elementType,
+        String elementTypeName,
+        String javaType
+    ) {
+        QueryModel query = new QueryModel(
+            "FindStage",
+            QueryType.ONE,
+            "stages",
+            SQL,
+            List.of(1),
+            List.of(new QueryColumn("values", elementType, true, null, true)),
+            List.of(new QueryParameter(1, "values", elementType, null, true)),
+            null
+        );
+
+        String source = generate(query).content();
+
+        assertTrue(source.contains("public FindStageResult findStage(List<%s> values)".formatted(javaType)));
+        assertTrue(source.contains("List<%s> values".formatted(javaType)));
+
+        assertTrue(
+            source.contains(
+                "java.util.Arrays.asList(new dev.sqlcj.runtime.SqlArray(\"%s\", values))"
+                    .formatted(elementTypeName)
+            )
+        );
+
+        assertTrue(
+            source.contains(
+                "dev.sqlcj.runtime.SqlArray.getList(resultSet, 1, %s.class)".formatted(javaType)
+            )
+        );
+
+        assertFalse(source.contains("import dev.sqlcj.runtime.SqlArray;"));
+    }
+
+    /**
+     * A blank-padded character array parameter is bound with PostgreSQL's own
+     * name of that type, {@code bpchar}, because PostgreSQL compares a
+     * {@code bpchar} array only with another one, and a varying one keeps
+     * {@code varchar}. Both are read as lists of {@code String}.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        {
+            "true, bpchar",
+            "false, varchar"
+        }
+    )
+    void shouldBindBlankPaddedCharacterArraysAsBpchar(
+        boolean blankPadded,
+        String elementTypeName
+    ) {
+        QueryModel query = new QueryModel(
+            "FindStage",
+            QueryType.ONE,
+            "stages",
+            SQL,
+            List.of(1),
+            List.of(new QueryColumn("marks", ColumnType.VARCHAR, true, null, true)),
+            List.of(
+                new QueryParameter(1, "marks", ColumnType.VARCHAR, null, true, blankPadded)
+            ),
+            null
+        );
+
+        String source = generate(query).content();
+
+        assertTrue(source.contains("public FindStageResult findStage(List<String> marks)"));
+
+        assertTrue(
+            source.contains(
+                "java.util.Arrays.asList(new dev.sqlcj.runtime.SqlArray(\"%s\", marks))"
+                    .formatted(elementTypeName)
+            )
+        );
+
+        assertTrue(
+            source.contains("dev.sqlcj.runtime.SqlArray.getList(resultSet, 1, String.class)")
+        );
+    }
+
+    /**
+     * An array of an enum binds the labels of its constants and reads each
+     * label back into a constant, at every binding position of its index. The
+     * enum an array element alone names is generated like any other used enum.
+     */
+    @Test
+    void shouldBindEnumArrayLabelsAndReadEnumArrayColumnsByLabel() throws IOException {
+        QueryModel query = new QueryModel(
+            "FindStage",
+            QueryType.ONE,
+            "stages",
+            """
+                SELECT id, past_settings
+                FROM stages
+                WHERE past_settings = ? OR past_settings = ?
+                """,
+            List.of(1, 1),
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("past_settings", ColumnType.ENUM, true, "stage_setting", true)
+            ),
+            List.of(
+                new QueryParameter(1, "past_settings", ColumnType.ENUM, "stage_setting", true)
+            ),
+            null
+        );
+
+        GeneratedFile repository = generate(
+            enumGroup(
+                GROUP,
+                query,
+                new EnumType("stage_setting", List.of("indoor", "outdoor"))
+            )
+        );
+
+        String source = repository.content();
+
+        assertTrue(
+            source.contains(
+                "public FindStageResult findStage(List<StageSetting> pastSettings)"
+            )
+        );
+
+        assertTrue(
+            source.contains(
+                "java.util.Arrays.asList("
+                    + "dev.sqlcj.runtime.SqlArray.of(\"stage_setting\", pastSettings, StageSetting::label), "
+                    + "dev.sqlcj.runtime.SqlArray.of(\"stage_setting\", pastSettings, StageSetting::label))"
+            )
+        );
+
+        assertTrue(
+            source.contains(
+                "dev.sqlcj.runtime.SqlArray.getList(resultSet, 2, String.class, StageSetting::fromLabel)"
+            )
+        );
+
+        List<GeneratedFile> enums = codeGenerator.generateEnums();
+
+        assertEquals(1, enums.size());
+        assertEquals(Path.of("generated", "StageSetting.java"), enums.getFirst().path());
+
+        assertCompiles(repository, enums.getFirst());
+    }
+
+    /**
+     * A row record of an array component imports {@code java.util.List} beside
+     * the JDK types of its elements, in the order its components name them.
+     */
+    @Test
+    void shouldImportListForAnArrayRowComponent() throws IOException {
+        QueryModel query = new QueryModel(
+            "GetStage",
+            QueryType.ONE,
+            "stages",
+            SQL,
+            List.of(),
+            List.of(
+                new QueryColumn("opened_on", ColumnType.DATE, true),
+                new QueryColumn("tags", ColumnType.VARCHAR, true, null, true),
+                new QueryColumn("closed_on", ColumnType.DATE, true, null, true)
+            ),
+            List.of(),
+            "stages"
+        );
+
+        GeneratedFile repository = generate(query);
+
+        GeneratedFile row = codeGenerator.generateRows().getFirst();
+
+        assertEquals(
+            """
+                // Code generated by sqlcj. DO NOT EDIT.
+
+                package generated;
+
+                import java.time.LocalDate;
+                import java.util.List;
+
+                /**
+                 * Generated by sqlcj.
+                 *
+                 * Table: stages
+                 */
+
+                public record StagesRow(
+                    LocalDate openedOn,
+                    List<String> tags,
+                    List<LocalDate> closedOn
+                ) {
+                }
+                """,
+            row.content()
+        );
+
+        assertCompiles(repository, row);
+    }
+
     /** A {@code :one} query reading and binding one enum column. */
     private QueryModel enumQuery(String queryName) {
         return enumQuery(queryName, "stage_setting");

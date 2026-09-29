@@ -134,22 +134,26 @@ accepted and map exactly like their unparameterized spellings.
 | `JSON` | `String` | The JSON text itself. PostgreSQL stores it as written, so it reads back exactly as written. sqlcj never parses, validates, or normalizes it. |
 | `JSONB` | `String` | The JSON text itself. PostgreSQL stores a decomposed value, so the text reads back as PostgreSQL renders it rather than as written, and `=` compares by value. sqlcj never parses, validates, or normalizes it. |
 | The name of an enum type the schema declares | The generated Java enum of that type | Matched without SQL identifier delimiters and case-insensitively, as PostgreSQL resolves an unquoted type name. See [Enum Types](#enum-types). |
+| A one-dimensional array of any spelling above except `BYTEA`, `JSON`, and `JSONB`, written `type[]` or `type[n]` | `java.util.List<T>` of the element's Java type | The declared size is ignored, as PostgreSQL ignores it. See [Array Types](#array-types). |
 
-Any spelling that is not listed above, and any array of any element type,
-including an array of an enum type, has no Java mapping. Such a column is recorded with its declared type instead of
+Any spelling that is not listed above has no Java mapping. Such a column is
+recorded with its declared type instead of
 failing the schema, and fails only a query that uses it; see
 [Unsupported Types and DDL](#unsupported-types-and-ddl).
 
 The generated repository imports `java.time.LocalDate`, `java.time.LocalTime`,
 `java.time.LocalDateTime`, `java.time.OffsetDateTime`, `java.math.BigDecimal`,
-and `java.util.UUID` as needed; the remaining types need no import. A generated
+and `java.util.UUID` as needed; the remaining types need no import, and
+`java.util.List` is already imported by every repository. A row record imports
+`java.util.List` when one of its components is an array. A generated
 enum belongs to the generated package, so it is used by its simple name and
 needs no import either. Each result column is read at its one-based position in
 the selected-column list, with `resultSet.getObject(position, JavaType.class)`,
 or with `resultSet.getString(position)` for a `JSON` or `JSONB` column, which
 the driver reports as a type of its own rather than as a character type. An
 enum column reads its label the same way and resolves it with
-`<EnumType>.fromLabel(...)`.
+`<EnumType>.fromLabel(...)`, and an array column is read with
+`dev.sqlcj.runtime.SqlArray.getList(...)`.
 
 A `JSON` or `JSONB` argument is passed to the executor as
 `new dev.sqlcj.runtime.UntypedText(value)`, written out in full so that the
@@ -158,13 +162,14 @@ generated imports are unchanged, and `JdbcQueryExecutor` binds that text with
 placeholder, which is what a `json` or `jsonb` column or comparison needs: text
 bound as `varchar` is rejected there. An enum argument is passed the same way,
 around the label of its constant, because a label bound as `varchar` is
-rejected where an enum is expected.
+rejected where an enum is expected. An array argument is wrapped in
+`dev.sqlcj.runtime.SqlArray` the same way; see [Array Types](#array-types).
 
 ## Enum Types
 
 `CREATE TYPE <name> AS ENUM (...)` adds an enum type to the schema, and a
-non-array column whose declared type names it is modeled as a column of that
-type. Every query that reads or binds such a column uses the one Java enum the
+column whose declared type names it is modeled as a column of that type. Every
+query that reads or binds such a column uses the one Java enum the
 package generates for the type:
 
 ```sql
@@ -224,9 +229,10 @@ public enum StageSetting {
 - `fromLabel` reads back a label: `null` for a SQL `NULL`, and a failure for a
   label the generated enum does not hold, which means the database declares one
   the schema source does not.
-- Only an enum type a query actually uses generates a file.
-- An array of an enum type, such as `stage_setting[]`, has no Java mapping and
-  is recorded with its declared type like any other array.
+- Only an enum type a query actually uses generates a file, including an enum
+  type only an array element names.
+- A one-dimensional array of an enum type, such as `stage_setting[]`, is a
+  `List` of that generated enum; see [Array Types](#array-types).
 
 These statements update the enum types the statements and files before them
 left:
@@ -266,6 +272,74 @@ Two entries of one package that use one enum type must define its labels alike,
 and a generated enum must not collide with another generated type of the
 package; both are documented in
 [Generated Java Names](configuration.md#generated-java-names).
+
+## Array Types
+
+A column declared as a one-dimensional array, written `type[]` or `type[n]`, is
+modeled as an array of its element type and generates `java.util.List<T>` of
+that element's Java type, for method parameters and result components alike:
+
+```sql
+CREATE TABLE stages (
+    id       BIGINT PRIMARY KEY,
+    tags     varchar(20)[],
+    past     stage_setting[]
+);
+```
+
+generates `List<String> tags` and `List<StageSetting> past`.
+
+- The element type is any spelling in
+  [Supported Column Types](#supported-column-types) except `BYTEA`, `JSON`, and
+  `JSONB`, or the name of an enum type the schema declares.
+- The declared size of a dimension is ignored, as PostgreSQL ignores it, so
+  `numeric(10, 2)[3]` is the same type as `numeric(10, 2)[]`.
+- An array column is typed the same way through `CREATE TABLE`,
+  `ALTER TABLE ... ADD COLUMN`, and `ALTER TABLE ... ALTER COLUMN ... TYPE`, and
+  a rename or a nullability change keeps it.
+- An array is a type of its own: a placeholder index used once as an array and
+  once as a value of its element type is rejected, like any other conflicting
+  index.
+- A `LIKE`/`ILIKE` pattern placeholder still requires a scalar `VARCHAR` or
+  `TEXT` column, so an array column is rejected there.
+- No array operator or function, such as `= ANY` or `&&`, is analyzed.
+
+An array argument is passed to the executor as
+`new dev.sqlcj.runtime.SqlArray("<element type>", <parameter>)`, written out in
+full so that the generated imports are unchanged, where `<element type>` is
+PostgreSQL's own name of the element type: `int4`, `int8`, `int2`, `bool`,
+`varchar`, `bpchar`, `text`, `date`, `time`, `timestamp`, `timestamptz`,
+`numeric`, `float4`, `float8`, `uuid`, or the declared name of an enum type. A
+`CHAR` or `CHARACTER` element is named `bpchar`, PostgreSQL's own name of the
+blank-padded character type, because PostgreSQL compares a `bpchar` array only
+with another one; `VARCHAR` and `CHARACTER VARYING` elements are named
+`varchar`. Both read their elements back as `String`, blank padded to the
+declared length for `CHAR`, as a scalar of that type is read. An array of an
+enum carries the labels of its constants instead, as
+`dev.sqlcj.runtime.SqlArray.of("<enum type>", <parameter>, <EnumType>::label)`.
+
+`JdbcQueryExecutor` builds the value with `Connection.createArrayOf` on the
+connection the operation runs on and binds it with
+`PreparedStatement.setArray`. An array column is read with
+`dev.sqlcj.runtime.SqlArray.getList(resultSet, position, <Type>.class)`, which
+reads each element as a scalar of that type is read; an array of an enum is read
+as `dev.sqlcj.runtime.SqlArray.getList(resultSet, position, String.class,
+<EnumType>::fromLabel)`. Both go through the JDBC `java.sql.Array` API alone, so
+neither the runtime nor the generated code depends on a driver.
+
+Nulls are carried in both directions:
+
+- a `null` list argument is bound with
+  `PreparedStatement.setNull(position, java.sql.Types.ARRAY)`, so the column
+  receives a SQL `NULL` rather than an empty array,
+- a `null` element is bound as a `NULL` element of the array,
+- a SQL `NULL` column reads back as a `null` list, an empty array as an empty
+  list, and a `NULL` element as a `null` element.
+
+A declared multidimensional array, such as `integer[][]`, and an array of
+`BYTEA`, `JSON`, `JSONB`, or an unmapped element type have no Java mapping and
+are recorded with their declared type; see
+[Unsupported Types and DDL](#unsupported-types-and-ddl).
 
 ## Supported `CREATE TABLE` Constructs
 
@@ -416,11 +490,15 @@ Null handling does not depend on the column type:
   `JSON` or `JSONB` argument is bound the same way through its
   `dev.sqlcj.runtime.UntypedText` wrapper, so a null value becomes a SQL `NULL`
   without a declared type. A null enum argument is wrapped the same way, so it
-  is bound as SQL `NULL` instead of as the label of a constant,
+  is bound as SQL `NULL` instead of as the label of a constant. A null array
+  argument is bound as a SQL `NULL` array through its
+  `dev.sqlcj.runtime.SqlArray` wrapper, and a null element stays null inside the
+  bound array,
 - each result column is read with `ResultSet.getObject(position, Class)`, or
   with `ResultSet.getString(position)` for `JSON`, `JSONB`, and an enum, so a
   SQL `NULL` is read back as `null`, which `fromLabel` keeps `null` for an
-  enum.
+  enum. An array column is read with `dev.sqlcj.runtime.SqlArray.getList`, which
+  reads a SQL `NULL` as a null list and a `NULL` element as a null element.
 
 Nullability itself is parsed from `NOT NULL` only:
 
@@ -437,14 +515,15 @@ Null binding and null reading are executed against PostgreSQL for the nullable
 columns of the integration schema snapshots, which cover `SMALLINT`, `VARCHAR`,
 `TEXT`, `BOOLEAN`, `DATE`, `TIMESTAMP`, `DECIMAL`, `UUID`,
 `TIMESTAMP WITH TIME ZONE`, `REAL`, `DOUBLE PRECISION`, `BYTEA`, `TIME`, `JSON`,
-`JSONB`, and an enum type.
+`JSONB`, an enum type, and an array of every mapped element type.
 
 ## Unsupported Types and DDL
 
 The following type families have no Java mapping, because only the spellings
 listed in [Supported Column Types](#supported-column-types) are mapped:
 
-- arrays, including `JSON[]`, `JSONB[]`, and an array of an enum type,
+- multidimensional arrays, such as `integer[][]`, and arrays of `BYTEA`,
+  `JSON`, `JSONB`, or an unmapped element type,
 - domain types,
 - range types,
 - composite types,
@@ -458,7 +537,7 @@ These spellings of otherwise mapped families are unmapped as well:
 A column of such a type does not fail the schema. It is recorded with its
 declared type, written as the canonical spelling of that type — upper case, with
 parenthesized type arguments removed — followed by `[]` for each declared array
-dimension, so `xml` is recorded as `XML`, `varchar(20)[]` as `VARCHAR[]`,
+dimension, so `xml` is recorded as `XML`, `jsonb[]` as `JSONB[]`,
 and `integer[][]` as `INTEGER[][]`.
 
 A recorded column fails only the analysis of a query that
@@ -492,7 +571,7 @@ query, its source, its header line, and the offending column and recorded type:
 ```text
 sqlcj: Invalid schema source /home/dev/project/schema.sql: Unsupported schema statement: CreateView at line 12
 sqlcj: Invalid schema source /home/dev/project/schema.sql: Encountered unexpected token: ";" at line 4, column 1
-sqlcj: Invalid query 'ListTags' in /home/dev/project/queries.sql at line 5: Column 'tags' has unsupported type VARCHAR[]
+sqlcj: Invalid query 'ListTags' in /home/dev/project/queries.sql at line 5: Column 'tags' has unsupported type JSONB[]
 ```
 
 ## Verified by
@@ -538,7 +617,51 @@ Type table:
 - `SqlcjCompilerIntegrationTest.shouldReportTheQueryThatReadsAnUnsupportedTypeColumn`
   covers the query diagnostic and that no file is written, and
   `SqlcjCompilerIntegrationTest.shouldGenerateCompilableRepositoryBesideUnsupportedTypeColumns`
-  compiles a repository generated beside an array and an `XML` column.
+  compiles a repository generated beside a `JSONB[]` and an `XML` column.
+
+Array types:
+
+- `DefaultSchemaParserTest.shouldModelOneDimensionalArrayColumns` covers every
+  element spelling through `CREATE TABLE`, `ADD COLUMN`, and
+  `ALTER COLUMN ... TYPE`, including the ignored declared size, and
+  `DefaultSchemaParserTest.shouldCarryTheArrayShapeOfARenamedAndRetypedColumn`
+  covers the rename, the nullability change, and the two retypes;
+  `DefaultSchemaParserTest.shouldModelTheBlankPaddedSpellingOfCharacterArrayColumns`
+  covers the `CHAR` and `CHARACTER` spellings that carry `bpchar` and the
+  varying spellings that do not, through the same statements.
+- `DefaultSchemaParserTest.shouldRecordUnsupportedColumnType` covers the
+  multidimensional arrays and the `BYTEA`, `JSON`, `JSONB`, and `XML` arrays
+  that stay recorded.
+- `QueryAnalyzerTest.shouldCarryTheArrayShapeOfSelectedColumnsAndTheirParameters`,
+  `QueryAnalyzerTest.shouldExpandTheArrayColumnsOfAWildcard`, and
+  `QueryAnalyzerTest.shouldCarryTheArrayShapeOfAReturningWrite` cover the
+  analyzed positions, and
+  `QueryAnalyzerTest.shouldRejectARepeatedIndexAcrossAnArrayAndItsElement` and
+  `QueryAnalyzerTest.shouldRejectLikeOnAnArrayColumn` cover the rejections.
+  `QueryAnalyzerTest.shouldCarryTheBlankPaddedSpellingOfAnArrayParameter` covers
+  the spelling a character array parameter carries.
+- `JavaCodeGeneratorTest.shouldBindAndReadArrayColumnsPerElementType` covers the
+  generated `List` type, the `SqlArray` argument, and the `getList` read of
+  every element type;
+  `JavaCodeGeneratorTest.shouldBindEnumArrayLabelsAndReadEnumArrayColumnsByLabel`
+  covers the enum array at every binding position of its index and the enum file
+  an array element alone generates; and
+  `JavaCodeGeneratorTest.shouldImportListForAnArrayRowComponent` covers the row
+  record's imports. The enum array test and the row-component test compile the
+  generated source. `JavaCodeGeneratorTest.shouldBindBlankPaddedCharacterArraysAsBpchar`
+  covers the `bpchar` argument of a `CHAR` array and the `varchar` argument of a
+  `VARCHAR` array.
+- `JdbcQueryExecutorTest.shouldBindSqlArrayAsAServerArray` and
+  `JdbcQueryExecutorTest.shouldBindNullSqlArrayElementsAsANullArray` cover the
+  recorded `createArrayOf` name and elements, the `setArray` position, and the
+  `setNull` of a null list, and `SqlArrayTest` covers the converted elements and
+  the null, empty, and element-null lists a read returns.
+- `PostgresIntegrationTest.shouldRoundTripArrayValues` writes and reads a
+  non-empty list holding a `null` element, an empty list, and a `null` list for
+  every mapped element type and an enum type against PostgreSQL 16, comparing
+  the `TIMESTAMPTZ` elements by instant and the `CHAR(3)` elements with the
+  blank-padded values PostgreSQL stores, and finds the row again through a
+  placeholder equality on the `CHAR(3)` array column.
 
 Enum types:
 
@@ -551,8 +674,9 @@ Enum types:
   each diagnostic.
 - `DefaultSchemaParserTest.shouldKeepTheEnumTypeOfARenamedAndRetypedColumn`
   covers the enum type a rename and a nullability change carry along, and
-  `DefaultSchemaParserTest.shouldRecordEnumArraysAndUndeclaredTypesAsUnsupported`
-  covers the enum array and the undeclared type that stay recorded.
+  `DefaultSchemaParserTest.shouldModelEnumArraysAndRecordUndeclaredTypesAsUnsupported`
+  covers the modeled enum array beside the multidimensional enum array and the
+  undeclared type that stay recorded.
 - `DefaultSchemaParserTest.shouldRejectStatementOutsideTheIgnoredList` covers
   the rejected `ALTER TYPE` actions and the composite `CREATE TYPE`, and
   `DefaultSchemaParserTest.shouldRejectDropType` covers `DROP TYPE`.

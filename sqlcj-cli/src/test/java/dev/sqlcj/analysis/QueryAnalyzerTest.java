@@ -60,6 +60,36 @@ class QueryAnalyzerTest {
         )
     );
 
+    /**
+     * A schema whose {@code stages} table carries a one-dimensional array of a
+     * mapped scalar type and of a declared enum type, beside the scalar columns
+     * of the same types.
+     */
+    private static final Schema arraySchema = new Schema(
+        List.of(
+            new Table(
+                "stages",
+                List.of(
+                    new Column("id", ColumnType.BIGINT, false),
+                    new Column("tags", ColumnType.VARCHAR, true, null, null, true),
+                    new Column("scores", ColumnType.INTEGER, false, null, null, true),
+                    new Column(
+                        "past_settings",
+                        ColumnType.ENUM,
+                        true,
+                        null,
+                        "stage_setting",
+                        true
+                    ),
+                    new Column("setting", ColumnType.ENUM, false, null, "stage_setting"),
+                    new Column("handle", ColumnType.TEXT, true)
+                ),
+                List.of()
+            )
+        ),
+        List.of(new EnumType("stage_setting", List.of("indoor", "outdoor")))
+    );
+
     /** A schema with both text column types, for the text predicate forms. */
     private static final Schema predicateSchema = new Schema(
         List.of(
@@ -86,7 +116,7 @@ class QueryAnalyzerTest {
                 List.of(
                     new Column("id", ColumnType.BIGINT, false),
                     new Column("name", ColumnType.VARCHAR, true),
-                    new Column("tags", null, true, "VARCHAR[]")
+                    new Column("tags", null, true, "JSONB[]")
                 ),
                 List.of()
             )
@@ -2910,7 +2940,7 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(
-            "Column 'tags' has unsupported type VARCHAR[]",
+            "Column 'tags' has unsupported type JSONB[]",
             exception.getMessage()
         );
     }
@@ -3046,6 +3076,219 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(message, exception.getMessage());
+    }
+
+    /**
+     * An array column carries its element type and its array shape into every
+     * selected column and into every parameter typed from it, in a comparison,
+     * an {@code IN} list, and a range bound alike.
+     */
+    @Test
+    void shouldCarryTheArrayShapeOfSelectedColumnsAndTheirParameters() {
+        String sql = """
+            SELECT tags, past_settings, handle
+            FROM stages
+            WHERE tags = $1
+              AND past_settings IN ($2)
+              AND scores BETWEEN $3 AND $4""";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListStages", QueryType.MANY, sql),
+            parser.parse(sql),
+            arraySchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("tags", ColumnType.VARCHAR, true, null, true),
+                new QueryColumn("past_settings", ColumnType.ENUM, true, "stage_setting", true),
+                new QueryColumn("handle", ColumnType.TEXT, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "tags", ColumnType.VARCHAR, null, true),
+                new QueryParameter(2, "past_settings", ColumnType.ENUM, "stage_setting", true),
+                new QueryParameter(3, "scores", ColumnType.INTEGER, null, true),
+                new QueryParameter(4, "scores", ColumnType.INTEGER, null, true)
+            ),
+            model.parameters()
+        );
+    }
+
+    /**
+     * A parameter typed from a blank-padded character array column carries that
+     * spelling, so that generation can bind its elements as {@code bpchar}, and
+     * a parameter typed from a varying one does not.
+     */
+    @Test
+    void shouldCarryTheBlankPaddedSpellingOfAnArrayParameter() {
+        Schema schema = new Schema(
+            List.of(
+                new Table(
+                    "stages",
+                    List.of(
+                        new Column("marks", ColumnType.VARCHAR, true, null, null, true, true),
+                        new Column("tags", ColumnType.VARCHAR, true, null, null, true)
+                    ),
+                    List.of()
+                )
+            ),
+            List.of()
+        );
+
+        String sql = """
+            SELECT marks
+            FROM stages
+            WHERE marks = $1
+              AND tags = $2""";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListStages", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "marks", ColumnType.VARCHAR, null, true, true),
+                new QueryParameter(2, "tags", ColumnType.VARCHAR, null, true)
+            ),
+            model.parameters()
+        );
+    }
+
+    /** A wildcard expands an array column with its array shape. */
+    @Test
+    void shouldExpandTheArrayColumnsOfAWildcard() {
+        String sql = "SELECT * FROM stages";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListStages", QueryType.MANY, sql),
+            parser.parse(sql),
+            arraySchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("tags", ColumnType.VARCHAR, true, null, true),
+                new QueryColumn("scores", ColumnType.INTEGER, false, null, true),
+                new QueryColumn("past_settings", ColumnType.ENUM, true, "stage_setting", true),
+                new QueryColumn("setting", ColumnType.ENUM, false, "stage_setting"),
+                new QueryColumn("handle", ColumnType.TEXT, true)
+            ),
+            model.columns()
+        );
+    }
+
+    /**
+     * An {@code INSERT} value and an {@code UPDATE} assignment take the array
+     * shape of the column they write, and a {@code RETURNING} item and a
+     * {@code RETURNING *} carry it back.
+     */
+    @Test
+    void shouldCarryTheArrayShapeOfAReturningWrite() {
+        String insert = "INSERT INTO stages (id, tags) VALUES ($1, $2) RETURNING tags";
+
+        QueryModel inserted = analyzer.analyze(
+            new Query("CreateStage", QueryType.ONE, insert),
+            parser.parse(insert),
+            arraySchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("tags", ColumnType.VARCHAR, true, null, true)),
+            inserted.columns()
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "tags", ColumnType.VARCHAR, null, true)
+            ),
+            inserted.parameters()
+        );
+
+        String update = "UPDATE stages SET past_settings = $1 WHERE id = $2 RETURNING *";
+
+        QueryModel updated = analyzer.analyze(
+            new Query("UpdateStage", QueryType.ONE, update),
+            parser.parse(update),
+            arraySchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(
+                    1,
+                    "past_settings",
+                    ColumnType.ENUM,
+                    "stage_setting",
+                    true
+                ),
+                new QueryParameter(2, "id", ColumnType.BIGINT)
+            ),
+            updated.parameters()
+        );
+
+        assertEquals(
+            new QueryColumn("past_settings", ColumnType.ENUM, true, "stage_setting", true),
+            updated.columns().get(3)
+        );
+    }
+
+    /**
+     * An array parameter is a list of its element's Java type, so a placeholder
+     * index shared by an array and a value of its element type has no single
+     * Java type and is rejected.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "UPDATE stages SET tags = $1 WHERE handle = $1|"
+                + "Placeholder $1 has conflicting types: List<String> from 'tags' and String from 'handle'",
+            "UPDATE stages SET past_settings = $1 WHERE setting = $1|"
+                + "Placeholder $1 has conflicting types: stage_setting[] from 'past_settings' and stage_setting from 'setting'"
+        }
+    )
+    void shouldRejectARepeatedIndexAcrossAnArrayAndItsElement(String sql, String message) {
+        Query query = new Query("UpdateStage", QueryType.EXEC, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, arraySchema)
+        );
+
+        assertEquals(message, exception.getMessage());
+    }
+
+    /**
+     * A {@code LIKE} pattern takes the tested column's type, and a list of text
+     * is no pattern, so an array column is rejected like any other non-text
+     * column.
+     */
+    @Test
+    void shouldRejectLikeOnAnArrayColumn() {
+        String sql = "SELECT id FROM stages WHERE tags LIKE $1";
+
+        Query query = new Query("FindStages", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, arraySchema)
+        );
+
+        assertEquals(
+            "A LIKE pattern placeholder requires a VARCHAR or TEXT column, but tags is VARCHAR[].",
+            exception.getMessage()
+        );
     }
 
     /** A repeated index of one enum type shares one generated parameter. */

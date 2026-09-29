@@ -205,6 +205,94 @@ class JdbcQueryExecutorTest {
         );
     }
 
+    /**
+     * A {@link SqlArray} argument is bound as a server array of its element
+     * type, built on the connection the operation runs on, and its null
+     * elements are carried into that array. Every other argument keeps its
+     * untouched {@code setObject} binding.
+     */
+    @Test
+    void shouldBindSqlArrayAsAServerArray() throws SQLException {
+        BindingRecorder recorder = new BindingRecorder();
+
+        try (Connection connection = dataSource.getConnection()) {
+            createTaggedTable(connection);
+
+            JdbcQueryExecutor connectionExecutor = new JdbcQueryExecutor(
+                recorder.track(connection)
+            );
+
+            assertEquals(
+                1,
+                connectionExecutor.execute(
+                    REPOSITORY,
+                    "InsertTagged",
+                    "INSERT INTO tagged (id, tags) VALUES (?, ?)",
+                    Arrays.asList(1L, new SqlArray("varchar", Arrays.asList("a", null, "b")))
+                )
+            );
+        }
+
+        assertEquals(
+            List.of(new BoundParameter(1, 1L, null)),
+            recorder.bindings
+        );
+
+        assertEquals(
+            List.of(new CreatedArray("varchar", Arrays.asList("a", null, "b"))),
+            recorder.createdArrays
+        );
+
+        assertEquals(List.of(2), recorder.arrayPositions);
+        assertTrue(recorder.nullBindings.isEmpty());
+    }
+
+    /**
+     * A {@link SqlArray} whose elements are {@code null} is bound as a SQL
+     * {@code NULL} array, so no array value is built at all.
+     */
+    @Test
+    void shouldBindNullSqlArrayElementsAsANullArray() throws SQLException {
+        BindingRecorder recorder = new BindingRecorder();
+
+        try (Connection connection = dataSource.getConnection()) {
+            createTaggedTable(connection);
+
+            JdbcQueryExecutor connectionExecutor = new JdbcQueryExecutor(
+                recorder.track(connection)
+            );
+
+            assertEquals(
+                1,
+                connectionExecutor.execute(
+                    REPOSITORY,
+                    "InsertTagged",
+                    "INSERT INTO tagged (id, tags) VALUES (?, ?)",
+                    Arrays.asList(1L, new SqlArray("varchar", null))
+                )
+            );
+        }
+
+        assertEquals(
+            List.of(new BoundParameter(2, null, Types.ARRAY)),
+            recorder.nullBindings
+        );
+
+        assertTrue(recorder.createdArrays.isEmpty());
+        assertTrue(recorder.arrayPositions.isEmpty());
+    }
+
+    private void createTaggedTable(Connection connection) throws SQLException {
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("""
+                CREATE TABLE tagged (
+                    id   BIGINT PRIMARY KEY,
+                    tags VARCHAR ARRAY
+                )
+                """);
+        }
+    }
+
     @Test
     void shouldReturnAllRowsForQueryMany() {
         List<User> results = executor.queryMany(
@@ -918,6 +1006,16 @@ class JdbcQueryExecutorTest {
     }
 
     /**
+     * One {@code Connection.createArrayOf} call an executor made, with the
+     * element type name it named and the elements it passed.
+     */
+    private record CreatedArray(
+        String typeName,
+        List<Object> elements
+    ) {
+    }
+
+    /**
      * Records the parameter bindings an executor made, in call order. A tracked
      * connection is returned as a dynamic proxy that delegates every call and
      * records the {@code setObject} calls of the prepared statements it hands
@@ -927,11 +1025,26 @@ class JdbcQueryExecutorTest {
 
         private final List<BoundParameter> bindings = new ArrayList<>();
 
+        private final List<CreatedArray> createdArrays = new ArrayList<>();
+
+        private final List<Integer> arrayPositions = new ArrayList<>();
+
+        private final List<BoundParameter> nullBindings = new ArrayList<>();
+
         private Connection track(Connection connection) {
             return (Connection) Proxy.newProxyInstance(
                 getClass().getClassLoader(),
                 new Class<?>[] { Connection.class },
                 (proxy, method, arguments) -> {
+                    if ("createArrayOf".equals(method.getName())) {
+                        createdArrays.add(
+                            new CreatedArray(
+                                (String) arguments[0],
+                                Arrays.asList((Object[]) arguments[1])
+                            )
+                        );
+                    }
+
                     Object result = invoke(connection, method, arguments);
 
                     if (result instanceof PreparedStatement statement) {
@@ -956,6 +1069,20 @@ class JdbcQueryExecutorTest {
                                 arguments.length > 2
                                     ? (Integer) arguments[2]
                                     : null
+                            )
+                        );
+                    }
+
+                    if ("setArray".equals(method.getName())) {
+                        arrayPositions.add((Integer) arguments[0]);
+                    }
+
+                    if ("setNull".equals(method.getName())) {
+                        nullBindings.add(
+                            new BoundParameter(
+                                (Integer) arguments[0],
+                                null,
+                                (Integer) arguments[1]
                             )
                         );
                     }
