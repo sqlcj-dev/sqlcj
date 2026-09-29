@@ -16,10 +16,13 @@
 # then generate the query groups 'Author' and 'Library' and next only 'Writer',
 # proving that a renamed or removed entry leaves no stale repository and a
 # manifest listing the surviving files alone. Both entries share the one
-# top-level 'AuthorsRow' record the package generates. The final generation
-# uses the sample's own 'sqlcj.yaml' from the sample directory and must restore
-# the first generated output byte for byte before the sample is compiled and
-# run.
+# top-level 'AuthorsRow' record and the one 'BookFormat' enum the package
+# generates. The final generation uses the sample's own 'sqlcj.yaml' from the
+# sample directory and must restore the first generated output byte for byte
+# before the sample is compiled and run. The sample's migrations declare an
+# enum type and add an enum, an array, and a 'JSONB' column to 'books', so the
+# generated package holds the shared 'AuthorsRow' and 'BooksRow' records, the
+# 'BookFormat' enum, and one repository.
 #
 # Requirements: JDK 21, Maven, psql, and a reachable PostgreSQL server.
 #
@@ -186,7 +189,7 @@ YAML
 (cd "${elsewhere_dir}" && java -jar "${cli_jar}" generate \
     --config ../regeneration/author-and-library.yaml)
 
-for generated in AuthorRepository LibraryRepository AuthorsRow; do
+for generated in AuthorRepository LibraryRepository AuthorsRow BooksRow BookFormat; do
     [ -f "${generated_package}/${generated}.java" ] \
         || fail "the renamed-entry setup is missing ${generated_package}/${generated}.java"
 done
@@ -195,6 +198,11 @@ shared_row_count=$(find "${generated_root}" -type f -name 'AuthorsRow.java' | wc
 
 [ "${shared_row_count}" -eq 1 ] \
     || fail "expected the two entries to share 1 row record but found ${shared_row_count}"
+
+shared_enum_count=$(find "${generated_root}" -type f -name 'BookFormat.java' | wc -l)
+
+[ "${shared_enum_count}" -eq 1 ] \
+    || fail "expected the two entries to share 1 enum but found ${shared_enum_count}"
 
 (cd "${elsewhere_dir}" && java -jar "${cli_jar}" generate \
     --config ../regeneration/writer.yaml)
@@ -207,16 +215,16 @@ done
 
 stale_count=$(find "${generated_root}" -type f -name '*.java' | wc -l)
 
-[ "${stale_count}" -eq 2 ] \
-    || fail "expected 2 generated sources after the rename but found ${stale_count}"
+[ "${stale_count}" -eq 4 ] \
+    || fail "expected 4 generated sources after the rename but found ${stale_count}"
 
-for generated in WriterRepository AuthorsRow; do
+for generated in WriterRepository AuthorsRow BooksRow BookFormat; do
     [ -f "${generated_package}/${generated}.java" ] \
         || fail "the surviving generated sources are missing ${generated_package}/${generated}.java"
 done
 
 expected_manifest="${workspace}/expected-manifest.txt"
-printf 'com/example/app/db/AuthorsRow.java\ncom/example/app/db/WriterRepository.java\n' \
+printf 'com/example/app/db/AuthorsRow.java\ncom/example/app/db/BookFormat.java\ncom/example/app/db/BooksRow.java\ncom/example/app/db/WriterRepository.java\n' \
     > "${expected_manifest}"
 
 cmp "${expected_manifest}" "${manifest_file}" \
@@ -226,18 +234,19 @@ log "Generating sources with the packaged CLI"
 
 (cd "${sample_dir}" && java -jar "${cli_jar}" generate)
 
-for generated in AuthorRepository AuthorsRow; do
+for generated in AuthorRepository AuthorsRow BooksRow BookFormat; do
     [ -f "${generated_package}/${generated}.java" ] \
         || fail "the expected generated source is missing: ${generated_package}/${generated}.java"
 done
 
 generated_count=$(find "${generated_root}" -type f -name '*.java' | wc -l)
 
-[ "${generated_count}" -eq 2 ] \
-    || fail "expected 2 generated sources but found ${generated_count}"
+[ "${generated_count}" -eq 4 ] \
+    || fail "expected 4 generated sources but found ${generated_count}"
 
 for method in createAuthor getAuthor findAuthor listAuthors updateAuthorBio deleteAuthor \
-    searchAuthors countAuthors listAuthorPage createBook listAuthorBooks; do
+    searchAuthors countAuthors listAuthorPage createBook listAuthorBooks \
+    createCatalogedBook listBooksByFormat; do
     grep -q " ${method}(" "${generated_package}/AuthorRepository.java" \
         || fail "the generated repository is missing the ${method} method"
 done
@@ -274,9 +283,10 @@ PGPASSWORD="${db_password}" psql \
     --set=ON_ERROR_STOP=1 \
     --quiet \
     --username "${db_user}" \
-    --command 'DROP TABLE IF EXISTS books, authors;' \
+    --command 'DROP TABLE IF EXISTS books, authors; DROP TYPE IF EXISTS book_format;' \
     --file "${sample_dir}/sql/migrations/V1__create_authors_and_books.sql" \
     --file "${sample_dir}/sql/migrations/V2__add_author_created_at_and_book_index.sql" \
+    --file "${sample_dir}/sql/migrations/V3__add_book_format_tags_and_details.sql" \
     "${jdbc_url#jdbc:}"
 
 log "Compiling the sample against the staged runtime"

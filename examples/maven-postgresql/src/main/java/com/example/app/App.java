@@ -2,6 +2,8 @@ package com.example.app;
 
 import com.example.app.db.AuthorRepository;
 import com.example.app.db.AuthorsRow;
+import com.example.app.db.BookFormat;
+import com.example.app.db.BooksRow;
 import dev.sqlcj.runtime.JdbcQueryExecutor;
 import dev.sqlcj.runtime.QueryCardinalityException;
 import dev.sqlcj.runtime.QueryExecutor;
@@ -18,17 +20,19 @@ import java.util.Optional;
  * Runs the documented sqlcj workflow against PostgreSQL through generated
  * code: create, read, optional read, list, update, a missing-row read, a
  * committed transaction, a rolled back transaction, a case-insensitive search,
- * a count, a page, a book insert, a left-joined projection, and delete.
+ * a count, a page, a book insert, a left-joined projection, a cataloged book
+ * insert, a read by enum value, and delete.
  *
- * <p>All eleven named queries are methods of one generated
+ * <p>All thirteen named queries are methods of one generated
  * {@link AuthorRepository}. The repository is constructed once per execution
  * context: once from the {@code DataSource}-backed executor, and once more per
  * transaction from a caller-owned connection.
  *
  * <p>Create, read, optional read, list, search, and page each return one
  * complete {@code authors} row, so all six share the single top-level
- * {@link AuthorsRow} record of the generated package. A query with its own
- * result shape generates its own nested record:
+ * {@link AuthorsRow} record of the generated package, and the two queries that
+ * return a complete {@code books} row share the top-level {@link BooksRow}
+ * record. A query with its own result shape generates its own nested record:
  * {@link AuthorRepository.CountAuthorsResult} carries the non-null
  * {@code Long} count, and {@link AuthorRepository.ListAuthorBooksResult}
  * carries an author name beside the title of the left-joined {@code books} row,
@@ -39,12 +43,18 @@ import java.util.Optional;
  * {@code GetAuthor} query requires exactly one row and raises a
  * {@link QueryCardinalityException} when none matches.
  *
+ * <p>The third migration adds an enum, an array, and a {@code JSONB} column to
+ * {@code books}, so {@link BooksRow} carries a {@link BookFormat} constant of
+ * the generated Java enum, a {@code List<String>} of tags, and the
+ * {@code JSONB} document as JSON text, which PostgreSQL returns normalized.
+ * The enum is also bound as a query parameter to select books by format.
+ *
  * <p>Every step is checked, so the process exits non-zero as soon as one
  * generated operation returns an unexpected result.
  *
  * <p>The verification harness applies the {@code sql/migrations} files in
- * version order to empty {@code authors} and {@code books} tables before this
- * application runs.
+ * version order to empty {@code authors} and {@code books} tables, without the
+ * {@code book_format} type, before this application runs.
  */
 public final class App {
 
@@ -174,6 +184,38 @@ public final class App {
         System.out.println(
             "author books: " + books.get(0).name() + " / " + books.get(0).title()
                 + ", " + books.get(1).name() + " / " + books.get(1).title()
+        );
+
+        List<String> catalogedTags = List.of("compilers", "history");
+        String catalogedDetails = "{\"pages\": 320}";
+
+        BooksRow cataloged = authors.createCatalogedBook(
+            committedId,
+            "Automatic Programming",
+            BookFormat.HARDCOVER,
+            catalogedTags,
+            catalogedDetails
+        );
+
+        check(cataloged != null, "CreateCatalogedBook returned no row");
+        check(cataloged.id() != null, "CreateCatalogedBook returned no database-generated id");
+        checkEquals(committedId, cataloged.authorId(), "CreateCatalogedBook author id");
+        checkEquals("Automatic Programming", cataloged.title(), "CreateCatalogedBook title");
+        checkEquals(BookFormat.HARDCOVER, cataloged.format(), "CreateCatalogedBook format");
+        checkEquals(catalogedTags, cataloged.tags(), "CreateCatalogedBook tags");
+        checkEquals(catalogedDetails, cataloged.details(), "CreateCatalogedBook details");
+
+        List<BooksRow> hardcovers = authors.listBooksByFormat(BookFormat.HARDCOVER);
+
+        checkEquals(1, hardcovers.size(), "ListBooksByFormat row count");
+        checkEquals(cataloged.id(), hardcovers.get(0).id(), "ListBooksByFormat id");
+        checkEquals(BookFormat.HARDCOVER, hardcovers.get(0).format(), "ListBooksByFormat format");
+        checkEquals(catalogedTags, hardcovers.get(0).tags(), "ListBooksByFormat tags");
+        checkEquals(catalogedDetails, hardcovers.get(0).details(), "ListBooksByFormat details");
+
+        System.out.println(
+            "cataloged book: " + cataloged.id() + " " + cataloged.format()
+                + " " + cataloged.tags() + " " + cataloged.details()
         );
 
         int deletedRows = authors.deleteAuthor(created.id());

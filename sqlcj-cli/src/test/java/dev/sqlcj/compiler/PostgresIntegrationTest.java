@@ -255,6 +255,88 @@ class PostgresIntegrationTest {
     );
 
     /**
+     * A snapshot reproducing the schema constructs of sqlc's {@code booktest}
+     * fixture with sqlcj's own names: two tables keyed by {@code SERIAL} with
+     * an inline foreign key reference, a unique defaulted text column, an enum
+     * column defaulting to a label, an integer column named {@code year}, a
+     * {@code timestamptz} column, a {@code varchar[]} column defaulting to the
+     * empty array, single- and two-column indexes, and a dollar-quoted
+     * {@code plpgsql} function followed by one more index.
+     */
+    private static final String CATALOG_SCHEMA = """
+        CREATE TABLE studios
+        (
+            studio_id SERIAL PRIMARY KEY,
+            name      text NOT NULL DEFAULT ''
+        );
+
+        CREATE INDEX studios_name_idx ON studios (name);
+
+        CREATE TYPE album_kind AS ENUM ('STUDIO', 'LIVE');
+
+        CREATE TABLE albums
+        (
+            album_id   SERIAL PRIMARY KEY,
+            studio_id  integer NOT NULL REFERENCES studios (studio_id),
+            catalog_no text NOT NULL DEFAULT '' UNIQUE,
+            kind       album_kind NOT NULL DEFAULT 'STUDIO',
+            title      text NOT NULL DEFAULT '',
+            year       integer NOT NULL DEFAULT 2000,
+            released   timestamptz NOT NULL DEFAULT now(),
+            tags       varchar[] NOT NULL DEFAULT '{}'
+        );
+
+        CREATE INDEX albums_title_year_idx ON albums (title, year);
+
+        CREATE FUNCTION greet_listener(text) RETURNS text AS $$
+        BEGIN
+            RETURN CONCAT('hello ', $1);
+        END;
+        $$ LANGUAGE plpgsql;
+
+        CREATE INDEX albums_kind_idx ON albums (kind);
+        """;
+
+    /**
+     * Queries whose shapes mirror {@code booktest}'s {@code GetBook},
+     * {@code CreateBook}, {@code UpdateBook}, and {@code UpdateBookISBN}: a
+     * full-row read by key, a seven-column insert returning the full row, an
+     * update of a text and an array column by key, and an update whose third
+     * assignment binds {@code $4} while the key binds {@code $3}.
+     */
+    private static final String CATALOG_QUERIES = """
+        -- name: GetAlbum :one
+        SELECT *
+        FROM albums
+        WHERE album_id = $1;
+
+        -- name: CreateAlbum :one
+        INSERT INTO albums (
+            studio_id,
+            catalog_no,
+            kind,
+            title,
+            year,
+            released,
+            tags
+        )
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7
+        )
+        RETURNING *;
+
+        -- name: UpdateAlbum :exec
+        UPDATE albums
+        SET title = $1, tags = $2
+        WHERE album_id = $3;
+
+        -- name: UpdateAlbumCatalogNo :exec
+        UPDATE albums
+        SET title = $1, tags = $2, catalog_no = $4
+        WHERE album_id = $3;
+        """;
+
+    /**
      * Queries used by the caller-owned transaction tests: an affected-row
      * write, a returning write, and a read.
      */
@@ -409,6 +491,10 @@ class PostgresIntegrationTest {
         execute("DROP TABLE IF EXISTS stage_events");
         execute("DROP TABLE IF EXISTS array_values");
         execute("DROP TYPE IF EXISTS stage_setting");
+        execute("DROP TABLE IF EXISTS albums");
+        execute("DROP TABLE IF EXISTS studios");
+        execute("DROP TYPE IF EXISTS album_kind");
+        execute("DROP FUNCTION IF EXISTS greet_listener(text)");
         execute("DROP TABLE IF EXISTS customer_orders");
         execute("DROP TABLE IF EXISTS customers");
         execute("DROP TABLE IF EXISTS measurements");
@@ -1660,6 +1746,191 @@ class PostgresIntegrationTest {
                     findMethod.invoke(repository, new Object[] { null })
                 ).isEmpty()
             );
+        }
+    }
+
+    /**
+     * Proves that the schema constructs and query shapes of sqlc's
+     * {@code booktest} fixture generate typed Java and run against PostgreSQL:
+     * the enum type becomes a Java enum keeping its PostgreSQL labels, the full
+     * row of the referencing table carries the enum, the
+     * {@code TIMESTAMP WITH TIME ZONE}, and the {@code varchar[]} column as
+     * typed components, the seven-column insert binds them in placeholder
+     * order, and the update whose assignments use {@code $1}, {@code $2}, and
+     * {@code $4} around the {@code $3} key exposes its parameters in
+     * placeholder order while binding them in textual order.
+     */
+    @Test
+    void shouldExecuteGeneratedCatalogQueriesOverBooktestSchemaConstructs() throws Exception {
+        execute(CATALOG_SCHEMA);
+        execute("INSERT INTO studios (studio_id, name) VALUES (1, 'Blue Note')");
+
+        Path classesDirectory = generateAndCompile(CATALOG_SCHEMA, CATALOG_QUERIES);
+
+        OffsetDateTime released = OffsetDateTime.of(
+            1963,
+            4,
+            1,
+            20,
+            30,
+            0,
+            0,
+            ZoneOffset.ofHours(-5)
+        );
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> albumKind = Class.forName("generated.AlbumKind", true, classLoader);
+
+            assertTrue(albumKind.isEnum());
+
+            Object[] constants = albumKind.getEnumConstants();
+
+            assertEquals(
+                List.of("STUDIO", "LIVE"),
+                Arrays.stream(constants).map(Object::toString).toList()
+            );
+
+            Method label = albumKind.getMethod("label");
+
+            List<Object> labels = new ArrayList<>();
+
+            for (Object constant : constants) {
+                labels.add(label.invoke(constant));
+            }
+
+            assertEquals(enumLabels("album_kind"), labels);
+
+            Object live = constants[1];
+
+            Object repository = newRepository(classLoader);
+
+            Method createMethod = repository.getClass().getMethod(
+                "createAlbum",
+                Integer.class,
+                String.class,
+                albumKind,
+                String.class,
+                Integer.class,
+                OffsetDateTime.class,
+                List.class
+            );
+
+            Object created = createMethod.invoke(
+                repository,
+                1,
+                "BN-1001",
+                live,
+                "Night Sessions",
+                1963,
+                released,
+                List.of("jazz", "live")
+            );
+
+            assertNotNull(created);
+
+            assertEquals(
+                List.of(
+                    "albumId",
+                    "studioId",
+                    "catalogNo",
+                    "kind",
+                    "title",
+                    "year",
+                    "released",
+                    "tags"
+                ),
+                recordComponentNames(created)
+            );
+
+            assertEquals(
+                List.of(
+                    Integer.class,
+                    Integer.class,
+                    String.class,
+                    albumKind,
+                    String.class,
+                    Integer.class,
+                    OffsetDateTime.class,
+                    List.class
+                ),
+                recordComponentTypes(created)
+            );
+
+            Object albumId = component(created, "albumId");
+
+            assertNotNull(albumId);
+            assertEquals(1, component(created, "studioId"));
+            assertEquals(live, component(created, "kind"));
+            assertEquals(List.of("jazz", "live"), component(created, "tags"));
+
+            assertTrue(released.isEqual((OffsetDateTime) component(created, "released")));
+
+            Method getMethod = repository.getClass().getMethod("getAlbum", Integer.class);
+
+            Object read = getMethod.invoke(repository, albumId);
+
+            assertNotNull(read);
+            assertEquals("BN-1001", component(read, "catalogNo"));
+            assertEquals("Night Sessions", component(read, "title"));
+            assertEquals(1963, component(read, "year"));
+            assertEquals(live, component(read, "kind"));
+            assertEquals(List.of("jazz", "live"), component(read, "tags"));
+
+            assertTrue(released.isEqual((OffsetDateTime) component(read, "released")));
+
+            Method updateMethod = repository.getClass().getMethod(
+                "updateAlbum",
+                String.class,
+                List.class,
+                Integer.class
+            );
+
+            assertEquals(
+                1,
+                updateMethod.invoke(
+                    repository,
+                    "Night Sessions, Complete",
+                    List.of("jazz"),
+                    albumId
+                )
+            );
+
+            Object updated = getMethod.invoke(repository, albumId);
+
+            assertEquals("Night Sessions, Complete", component(updated, "title"));
+            assertEquals(List.of("jazz"), component(updated, "tags"));
+            assertEquals("BN-1001", component(updated, "catalogNo"));
+
+            Method updateCatalogNoMethod = repository.getClass().getMethod(
+                "updateAlbumCatalogNo",
+                String.class,
+                List.class,
+                Integer.class,
+                String.class
+            );
+
+            assertEquals(
+                List.of(String.class, List.class, Integer.class, String.class),
+                List.of(updateCatalogNoMethod.getParameterTypes())
+            );
+
+            assertEquals(
+                1,
+                updateCatalogNoMethod.invoke(
+                    repository,
+                    "Night Sessions, Vol. 2",
+                    List.of("jazz", "reissue"),
+                    albumId,
+                    "BN-1002"
+                )
+            );
+
+            Object reissued = getMethod.invoke(repository, albumId);
+
+            assertEquals("Night Sessions, Vol. 2", component(reissued, "title"));
+            assertEquals(List.of("jazz", "reissue"), component(reissued, "tags"));
+            assertEquals("BN-1002", component(reissued, "catalogNo"));
+            assertEquals(live, component(reissued, "kind"));
         }
     }
 

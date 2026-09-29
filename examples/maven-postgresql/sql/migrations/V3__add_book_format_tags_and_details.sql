@@ -1,0 +1,7 @@
+CREATE TYPE book_format AS ENUM ('HARDCOVER', 'PAPERBACK', 'EBOOK');
+
+ALTER TABLE books ADD COLUMN format book_format;
+
+ALTER TABLE books ADD COLUMN tags TEXT[];
+
+ALTER TABLE books ADD COLUMN details JSONB;
