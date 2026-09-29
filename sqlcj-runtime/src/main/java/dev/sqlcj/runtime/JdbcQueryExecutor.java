@@ -35,10 +35,16 @@ import java.util.Optional;
  *
  * <p>Each argument is bound at its one-based position with
  * {@link PreparedStatement#setObject(int, Object)}, so a null argument is bound
- * as SQL {@code NULL}. An {@link UntypedText} argument is the one exception: its
- * {@link UntypedText#value() value} is bound with
+ * as SQL {@code NULL}. There are two exceptions. An {@link UntypedText}
+ * argument's {@link UntypedText#value() value} is bound with
  * {@link java.sql.Types#OTHER}, which sends the text without a declared SQL
- * type and lets the database type it from the context of its placeholder.
+ * type and lets the database type it from the context of its placeholder. A
+ * {@link SqlArray} argument's {@link SqlArray#elements() elements} are bound
+ * with {@link PreparedStatement#setArray(int, java.sql.Array)} as an array
+ * built with {@link Connection#createArrayOf} on the connection the operation
+ * runs on, and a null list is bound with
+ * {@link PreparedStatement#setNull(int, int)} and
+ * {@link java.sql.Types#ARRAY}.
  *
  * <p>{@link #queryOne} reads the first row, maps it, and then advances the
  * result set once more to prove that there is no second row.
@@ -216,7 +222,7 @@ public final class JdbcQueryExecutor implements QueryExecutor {
         StatementOperation<T> operation
     ) {
         try (PreparedStatement statement = target.prepareStatement(sql)) {
-            bindParameters(statement, parameters);
+            bindParameters(target, statement, parameters);
 
             return operation.run(statement);
         } catch (SQLException e) {
@@ -228,19 +234,51 @@ public final class JdbcQueryExecutor implements QueryExecutor {
     }
 
     /**
-     * Binds each argument at its one-based position, an {@link UntypedText} as
-     * its text without a declared SQL type and every other argument as itself.
+     * Binds each argument at its one-based position: an {@link UntypedText} as
+     * its text without a declared SQL type, a {@link SqlArray} as an array of
+     * its element type built on the connection the operation runs on, and every
+     * other argument as itself.
      */
-    private void bindParameters(PreparedStatement statement, List<?> parameters) throws SQLException {
+    private void bindParameters(
+        Connection target,
+        PreparedStatement statement,
+        List<?> parameters
+    ) throws SQLException {
         for (int i = 0; i < parameters.size(); i++) {
             Object parameter = parameters.get(i);
 
             if (parameter instanceof UntypedText(String value)) {
                 statement.setObject(i + 1, value, Types.OTHER);
+            } else if (parameter instanceof SqlArray(String elementType, List<?> elements)) {
+                bindArray(target, statement, i + 1, elementType, elements);
             } else {
                 statement.setObject(i + 1, parameter);
             }
         }
+    }
+
+    /**
+     * Binds one array argument, a null list as a SQL {@code NULL} array and
+     * every other list as a server array of its element type, built with
+     * {@link Connection#createArrayOf}.
+     */
+    private void bindArray(
+        Connection target,
+        PreparedStatement statement,
+        int position,
+        String elementType,
+        List<?> elements
+    ) throws SQLException {
+        if (elements == null) {
+            statement.setNull(position, Types.ARRAY);
+
+            return;
+        }
+
+        statement.setArray(
+            position,
+            target.createArrayOf(elementType, elements.toArray())
+        );
     }
 
     private static String failureMessage(String repository, String query) {
