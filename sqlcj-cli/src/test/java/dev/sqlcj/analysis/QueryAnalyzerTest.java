@@ -979,8 +979,8 @@ class QueryAnalyzerTest {
                 + "|A LIKE pattern placeholder requires a VARCHAR or TEXT column, but id is BIGINT.",
             "SELECT id FROM users WHERE $1 LIKE name"
                 + "|A LIKE placeholder must be the pattern, not the tested value.",
-            "SELECT id FROM users WHERE name LIKE :pattern"
-                + "|Named parameter ':pattern' is not supported; use an indexed placeholder such as $1"
+            "SELECT id FROM users WHERE :pattern LIKE name"
+                + "|A LIKE placeholder must be the pattern, not the tested value."
         }
     )
     void shouldRejectUnsupportedLikePlaceholderForm(String sql, String message) {
@@ -1132,20 +1132,28 @@ class QueryAnalyzerTest {
     }
 
     @Test
-    void shouldRejectNamedRangeBound() {
+    void shouldResolveNamedRangeBoundParameters() {
         String sql = "SELECT id FROM users WHERE id BETWEEN :lo AND :hi";
 
-        Query query = new Query("ListUsers", QueryType.MANY, sql);
-        ParsedSql parsedSql = parser.parse(sql);
-
-        UnsupportedOperationException exception = assertThrows(
-            UnsupportedOperationException.class,
-            () -> analyzer.analyze(query, parsedSql, schema)
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
         );
 
         assertEquals(
-            "Named parameter ':lo' is not supported; use an indexed placeholder such as $1",
-            exception.getMessage()
+            List.of(
+                new QueryParameter(1, "lo", ColumnType.BIGINT),
+                new QueryParameter(2, "hi", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+
+        assertEquals(
+            "SELECT id FROM users WHERE id BETWEEN ? AND ?",
+            model.executableSql()
         );
     }
 
@@ -1262,26 +1270,30 @@ class QueryAnalyzerTest {
         );
     }
 
+    /**
+     * A named pagination value is named after its placeholder rather than after
+     * its clause, so the generated method states the caller's own name.
+     */
     @ParameterizedTest
     @ValueSource(
         strings = {
-            "SELECT id FROM users ORDER BY id LIMIT :n",
-            "SELECT id FROM users ORDER BY id OFFSET :n"
+            "SELECT id FROM users ORDER BY id LIMIT :pageSize",
+            "SELECT id FROM users ORDER BY id OFFSET :pageSize"
         }
     )
-    void shouldRejectNamedPaginationValue(String sql) {
-        Query query = new Query("ListUsers", QueryType.MANY, sql);
-        ParsedSql parsedSql = parser.parse(sql);
-
-        UnsupportedOperationException exception = assertThrows(
-            UnsupportedOperationException.class,
-            () -> analyzer.analyze(query, parsedSql, schema)
+    void shouldNameNamedPaginationParameterAfterItsPlaceholder(String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
         );
 
         assertEquals(
-            "Named parameter ':n' is not supported; use an indexed placeholder such as $1",
-            exception.getMessage()
+            List.of(new QueryParameter(1, "pageSize", ColumnType.INTEGER)),
+            model.parameters()
         );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
     }
 
     @ParameterizedTest
@@ -2534,8 +2546,191 @@ class QueryAnalyzerTest {
     }
 
     @Test
-    void shouldRejectNamedParameter() {
+    void shouldResolveNamedParameter() {
         String sql = "SELECT * FROM users WHERE id = :userId";
+
+        QueryModel model = analyzer.analyze(
+            new Query("FindUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "userId", ColumnType.BIGINT)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+
+        assertEquals(
+            "SELECT * FROM users WHERE id = ?",
+            model.executableSql()
+        );
+    }
+
+    /**
+     * Each distinct name is one parameter numbered by its first textual
+     * occurrence, while every occurrence binds at its own textual position.
+     */
+    @Test
+    void shouldNumberNamedParametersByFirstOccurrence() {
+        String sql = """
+            SELECT id FROM users
+            WHERE (name = :term OR bio = :term)
+              AND id > :minId
+            ORDER BY id OFFSET :skip LIMIT :pageSize""";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            predicateSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "term", ColumnType.VARCHAR),
+                new QueryParameter(2, "minId", ColumnType.BIGINT),
+                new QueryParameter(3, "skip", ColumnType.INTEGER),
+                new QueryParameter(4, "pageSize", ColumnType.INTEGER)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 1, 2, 3, 4), model.bindingParameterIndexes());
+    }
+
+    /**
+     * An update names its parameters after its placeholders, and keeps binding
+     * its assignments before its predicate.
+     */
+    @Test
+    void shouldResolveNamedParametersOfUpdate() {
+        String sql = "UPDATE users SET name = :newName WHERE id = :id";
+
+        QueryModel model = analyzer.analyze(
+            new Query("UpdateUser", QueryType.EXEC, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "newName", ColumnType.VARCHAR),
+                new QueryParameter(2, "id", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+
+        assertEquals(
+            "UPDATE users SET name = ? WHERE id = ?",
+            model.executableSql()
+        );
+    }
+
+    @Test
+    void shouldResolveNamedParametersOfInsert() {
+        String sql = "INSERT INTO users (id, name) VALUES (:id, :name)";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CreateUser", QueryType.EXEC, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(
+            "INSERT INTO users (id, name) VALUES (?, ?)",
+            model.executableSql()
+        );
+    }
+
+    @Test
+    void shouldResolveNamedParametersInInList() {
+        String sql = "SELECT id FROM users WHERE id IN (:first, :second)";
+
+        QueryModel model = analyzer.analyze(
+            new Query("FindUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "first", ColumnType.BIGINT),
+                new QueryParameter(2, "second", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(
+            "SELECT id FROM users WHERE id IN (?, ?)",
+            model.executableSql()
+        );
+    }
+
+    @Test
+    void shouldResolveNamedLikePatternParameter() {
+        String sql = "SELECT id FROM users WHERE name LIKE :pattern";
+
+        QueryModel model = analyzer.analyze(
+            new Query("SearchUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "pattern", ColumnType.VARCHAR)),
+            model.parameters()
+        );
+
+        assertEquals(
+            "SELECT id FROM users WHERE name LIKE ?",
+            model.executableSql()
+        );
+    }
+
+    /**
+     * A placeholder name is the word written after the colon, whatever the SQL
+     * parser makes of that word elsewhere, so a name spelled like a keyword is
+     * a parameter of its own.
+     */
+    @Test
+    void shouldResolveNamedParametersSpelledLikeKeywords() {
+        String sql = "SELECT id FROM users WHERE id = :limit AND name = :user ORDER BY id LIMIT :year";
+
+        QueryModel model = analyzer.analyze(
+            new Query("FindUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "limit", ColumnType.BIGINT),
+                new QueryParameter(2, "user", ColumnType.VARCHAR),
+                new QueryParameter(3, "year", ColumnType.INTEGER)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(
+            "SELECT id FROM users WHERE id = ? AND name = ? ORDER BY id LIMIT ?",
+            model.executableSql()
+        );
+    }
+
+    @Test
+    void shouldRejectMixedPlaceholderForms() {
+        String sql = "SELECT * FROM users WHERE id IN ($1, :other)";
 
         Query query = new Query("FindUsers", QueryType.MANY, sql);
         ParsedSql parsedSql = parser.parse(sql);
@@ -2546,21 +2741,87 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(
-            "Named parameter ':userId' is not supported; use an indexed placeholder such as $1",
+            "Indexed '$N' and named ':name' placeholders must not be mixed in one query",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A qualified, quoted, or {@code &name} placeholder is rejected wherever it
+     * appears, including a clause this analyzer does not traverse, because the
+     * executable SQL would otherwise keep it.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '`',
+        value = {
+            "SELECT * FROM users WHERE id = :a.b|:a.b",
+            "SELECT * FROM users WHERE id = :\"x\"|:\"x\"",
+            "SELECT * FROM users WHERE id = &x|&x",
+            "SELECT id FROM users WHERE id = :id ORDER BY :\"x\"|:\"x\"",
+            "SELECT id FROM users WHERE id = :id ORDER BY &x|&x",
+            "SELECT id FROM users WHERE id = abs(:\"x\")|:\"x\"",
+            "SELECT id FROM users WHERE id = abs(&x)|&x",
+            "SELECT id FROM users WHERE id = abs(:a.b)|:a.b"
+        }
+    )
+    void shouldRejectUnsupportedNamedPlaceholderForm(String sql, String placeholder) {
+        Query query = new Query("FindUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(
+            "Named placeholder '%s' is not supported; write an unquoted name of letters, digits, "
+                .formatted(placeholder)
+                + "and underscores directly after ':', such as :userId",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A named placeholder in a location this analyzer does not visit is
+     * reported by the placeholder accounting, which writes the placeholder as
+     * the query does.
+     */
+    @Test
+    void shouldRejectNamedPlaceholderInUnanalyzedLocation() {
+        String sql = "SELECT id FROM users WHERE lower(name) = :name";
+
+        Query query = new Query("FindUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(
+            "SQL placeholders [:name] are not the analyzed parameters []; "
+                + "a placeholder is in an unsupported location",
             exception.getMessage()
         );
     }
 
     @Test
-    void shouldRejectNamedParameterInInList() {
-        String sql = "SELECT * FROM users WHERE id IN ($1, :other)";
+    void shouldRejectNamedPlaceholderWithConflictingTypes() {
+        String sql = "SELECT id FROM users WHERE id = :value AND name = :value";
 
         Query query = new Query("FindUsers", QueryType.MANY, sql);
         ParsedSql parsedSql = parser.parse(sql);
 
-        assertThrows(
+        UnsupportedOperationException exception = assertThrows(
             UnsupportedOperationException.class,
             () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(
+            "Placeholder :value has conflicting types: Long and String",
+            exception.getMessage()
         );
     }
 

@@ -99,6 +99,119 @@ class SqlParserTest {
         );
     }
 
+    /**
+     * Each distinct name is one logical parameter numbered by its first
+     * textual occurrence, and every occurrence becomes a {@code ?} of its own.
+     */
+    @Test
+    void shouldCompileNamedParametersByFirstOccurrence() {
+        ParsedSql parsedSql = parser.parse(
+            "SELECT * FROM users WHERE (name = :term OR bio = :term) AND id > :minId"
+        );
+
+        assertEquals(
+            "SELECT * FROM users WHERE (name = ? OR bio = ?) AND id > ?",
+            parsedSql.parameters().executableSql()
+        );
+
+        assertEquals(List.of(1, 1, 2), parsedSql.parameters().indexes());
+        assertEquals(List.of("term", "minId"), parsedSql.parameters().names());
+        assertFalse(parsedSql.parameters().hasPositionalParameter());
+    }
+
+    /** Names are compared exactly as written, so case distinguishes them. */
+    @Test
+    void shouldCompileNamesThatDifferInCaseAsDistinctParameters() {
+        ParsedSql parsedSql = parser.parse(
+            "SELECT * FROM users WHERE name = :term AND bio = :Term"
+        );
+
+        assertEquals(List.of(1, 2), parsedSql.parameters().indexes());
+        assertEquals(List.of("term", "Term"), parsedSql.parameters().names());
+    }
+
+    @Test
+    void shouldReportBothPlaceholderFormsOfOneSource() {
+        ParsedSql parsedSql = parser.parse(
+            "SELECT * FROM users WHERE id = $1 AND name = :name"
+        );
+
+        assertTrue(parsedSql.parameters().hasPositionalParameter());
+        assertEquals(List.of("name"), parsedSql.parameters().names());
+    }
+
+    /**
+     * Only a name written directly after a single colon is a parameter, so a
+     * quoted name, an ampersand placeholder, a separated name, and a numeric
+     * bind stay in the SQL for semantic analysis to reject.
+     */
+    @Test
+    void shouldNotCompileUnsupportedNamedPlaceholderForms() {
+        for (
+            String sql : List.of(
+                "SELECT * FROM users WHERE id = :\"x\"",
+                "SELECT * FROM users WHERE id = &x",
+                "SELECT * FROM users WHERE id = : x",
+                "SELECT * FROM users WHERE id = :1"
+            )
+        ) {
+            ParsedSql parsedSql = parser.parse(sql);
+
+            assertEquals(sql, parsedSql.parameters().executableSql());
+            assertTrue(parsedSql.parameters().indexes().isEmpty());
+            assertTrue(parsedSql.parameters().names().isEmpty());
+        }
+    }
+
+    /**
+     * A named placeholder the parser reported and this compiler did not replace
+     * is reported as the source spells it, so semantic analysis can reject it
+     * wherever it appears.
+     */
+    @Test
+    void shouldReportNamedPlaceholdersThatWereNotCompiled() {
+        ParsedSql parsedSql = parser.parse(
+            "SELECT id FROM users WHERE id = :id AND id = abs(:a.b) ORDER BY :\"x\", &y"
+        );
+
+        assertEquals(
+            List.of(":a.b", ":\"x\"", "&y"),
+            parsedSql.parameters().uncompiledPlaceholders()
+        );
+    }
+
+    @Test
+    void shouldReportNoUncompiledPlaceholderForSupportedForms() {
+        ParsedSql parsedSql = parser.parse(
+            "SELECT id FROM users WHERE id = $1 AND name = '&x' -- :\"x\""
+        );
+
+        assertTrue(parsedSql.parameters().uncompiledPlaceholders().isEmpty());
+    }
+
+    @Test
+    void shouldPreserveNamedPlaceholderTextThatIsNotAParameter() {
+        String sql = """
+            SELECT id, ':id literal' AS "c:id"
+            FROM users -- :id line comment
+            WHERE id = :id /* :id block comment */
+            """;
+
+        ParsedSql parsedSql = parser.parse(sql);
+
+        assertEquals(
+            """
+                SELECT id, ':id literal' AS "c:id"
+                FROM users -- :id line comment
+                WHERE id = ? /* :id block comment */
+                """,
+            parsedSql.parameters().executableSql()
+        );
+
+        assertEquals(List.of(1), parsedSql.parameters().indexes());
+        assertEquals(List.of("id"), parsedSql.parameters().names());
+    }
+
     @Test
     void shouldReportAnonymousParameterOutsideAnalyzedExpressions() {
         ParsedSql parsedSql = parser.parse("SELECT id FROM users WHERE id = $1 LIMIT ?");

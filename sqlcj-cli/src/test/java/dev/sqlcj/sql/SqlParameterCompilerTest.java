@@ -90,6 +90,56 @@ class SqlParameterCompilerTest {
     }
 
     @Test
+    void shouldReplaceReportedNamedParameterSpans() {
+        String sql = "SELECT * FROM users WHERE id = :id";
+
+        SqlParameters parameters = compile(
+            sql,
+            token(CCJSqlParserConstants.DOUBLE_COLON, ":", 31),
+            token(CCJSqlParserConstants.S_IDENTIFIER, "id", 32)
+        );
+
+        assertEquals("SELECT * FROM users WHERE id = ?", parameters.executableSql());
+        assertEquals(List.of(1), parameters.indexes());
+        assertEquals(List.of("id"), parameters.names());
+    }
+
+    /** A name that does not follow its colon directly is other text. */
+    @Test
+    void shouldIgnoreNameSeparatedFromItsColon() {
+        String sql = "SELECT * FROM users WHERE id = : id";
+
+        SqlParameters parameters = compile(
+            sql,
+            token(CCJSqlParserConstants.DOUBLE_COLON, ":", 31),
+            token(CCJSqlParserConstants.S_IDENTIFIER, "id", 33)
+        );
+
+        assertEquals(sql, parameters.executableSql());
+        assertTrue(parameters.indexes().isEmpty());
+        assertTrue(parameters.names().isEmpty());
+    }
+
+    @Test
+    void shouldRejectNamedSpanThatDoesNotHoldTheParameterImage() {
+        String sql = "SELECT * FROM users WHERE id = :id";
+
+        Token colon = token(CCJSqlParserConstants.DOUBLE_COLON, ":", 30);
+        Token name = token(CCJSqlParserConstants.S_IDENTIFIER, "id", 31);
+
+        SqlParseException exception = assertThrows(
+            SqlParseException.class,
+            () -> compile(sql, colon, name)
+        );
+
+        assertTrue(
+            exception.getMessage()
+                .startsWith("Parameter ':id' reported an unusable source position"),
+            exception.getMessage()
+        );
+    }
+
+    @Test
     void shouldRejectSpansThatAreNotInTextualOrder() {
         String sql = "SELECT * FROM users WHERE id = $1 AND id = $2";
 

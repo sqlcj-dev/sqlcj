@@ -53,6 +53,21 @@ public final class QueryAnalyzer {
     private static final String ANONYMOUS_PARAMETER_REJECTION = """
         Anonymous '?' parameters are not supported; use an indexed placeholder such as $1""";
 
+    /**
+     * The rejection of a placeholder written with a colon or ampersand that is
+     * not a supported named placeholder, which is written with the placeholder
+     * as the query spells it.
+     */
+    private static final String NAMED_PLACEHOLDER_REJECTION = """
+        Named placeholder '%s' is not supported; write an unquoted name of letters, digits, and \
+        underscores directly after ':', such as :userId""";
+
+    private static final String MIXED_PLACEHOLDER_REJECTION = """
+        Indexed '$N' and named ':name' placeholders must not be mixed in one query""";
+
+    /** The character that opens a supported named placeholder. */
+    private static final String NAME_PREFIX = ":";
+
     /** The parameter name of a {@code LIMIT} row count placeholder. */
     private static final String LIMIT_PARAMETER_NAME = "limit";
 
@@ -78,8 +93,90 @@ public final class QueryAnalyzer {
     private record ResolvedColumn(Source source, dev.sqlcj.schema.Column column) {
     }
 
+    /**
+     * One placeholder occurrence, resolved to the logical parameter it binds
+     * and, for a named placeholder, to the name that parameter carries.
+     */
+    private record Placeholder(int index, String name) {
+
+        /**
+         * The name of the parameter this occurrence binds, which a named
+         * placeholder states itself and every other placeholder takes from the
+         * column or clause it belongs to.
+         */
+        private String nameOr(String clauseName) {
+            return name == null
+                ? clauseName
+                : name;
+        }
+    }
+
+    /**
+     * The compiled placeholders of one query and the parameter occurrences
+     * analyzed against them, collected in the textual order of the executable
+     * {@code ?} positions.
+     */
+    private static final class Placeholders {
+
+        /** The compiled placeholder names in logical parameter order. */
+        private final List<String> names;
+
+        private final List<QueryParameter> occurrences = new ArrayList<>();
+
+        private Placeholders(List<String> names) {
+            this.names = names;
+        }
+
+        /**
+         * Reports the placeholder an expression is, and {@code null} when the
+         * expression is absent or binds none. A named placeholder the compiler
+         * did not replace is rejected as the query spells it, which keeps every
+         * accepted occurrence bound even though such a placeholder is normally
+         * already rejected from the compiler's report.
+         */
+        private Placeholder of(Expression expression) {
+            if (expression instanceof JdbcParameter parameter) {
+                if (!parameter.isUseFixedIndex()) {
+                    throw new UnsupportedOperationException(ANONYMOUS_PARAMETER_REJECTION);
+                }
+
+                return new Placeholder(parameter.getIndex(), null);
+            }
+
+            if (expression instanceof JdbcNamedParameter named) {
+                return new Placeholder(requireCompiledName(named), named.getName());
+            }
+
+            return null;
+        }
+
+        private int requireCompiledName(JdbcNamedParameter named) {
+            int index = NAME_PREFIX.equals(named.getParameterCharacter())
+                ? names.indexOf(named.getName())
+                : -1;
+
+            if (index < 0) {
+                throw new UnsupportedOperationException(
+                    NAMED_PLACEHOLDER_REJECTION.formatted(
+                        named.getParameterCharacter() + named.getName()
+                    )
+                );
+            }
+
+            return index + 1;
+        }
+
+        private void add(QueryParameter occurrence) {
+            occurrences.add(occurrence);
+        }
+
+        private List<QueryParameter> occurrences() {
+            return occurrences;
+        }
+    }
+
     public QueryModel analyze(Query query, ParsedSql parsedSql, Schema schema) {
-        requireIndexedPlaceholders(parsedSql);
+        requireSupportedPlaceholders(parsedSql);
 
         Statement statement = parsedSql.statement();
 
@@ -114,14 +211,16 @@ public final class QueryAnalyzer {
 
         List<QueryColumn> columns = resolveColumns(plainSelect, sources);
 
-        List<QueryParameter> bindingParameters = resolveBindingParameters(plainSelect, sources);
+        Placeholders placeholders = toPlaceholders(parsedSql);
+
+        resolveBindingParameters(plainSelect, sources, placeholders);
 
         return toQueryModel(
             query,
             parsedSql,
             table.getUnquotedName(),
             columns,
-            bindingParameters,
+            placeholders,
             resolveSelectRowTable(plainSelect, sources)
         );
     }
@@ -144,12 +243,16 @@ public final class QueryAnalyzer {
             rowTable = resolveReturningRowTable(returningClause, source);
         }
 
+        Placeholders placeholders = toPlaceholders(parsedSql);
+
+        resolveInsertParameters(insert, source.table(), placeholders);
+
         return toQueryModel(
             query,
             parsedSql,
             table.getUnquotedName(),
             columns,
-            resolveInsertParameters(insert, source.table()),
+            placeholders,
             rowTable
         );
     }
@@ -172,10 +275,12 @@ public final class QueryAnalyzer {
             rowTable = resolveReturningRowTable(returningClause, source);
         }
 
-        List<QueryParameter> bindingParameters = resolveUpdateSetParameters(update, source.table());
+        Placeholders placeholders = toPlaceholders(parsedSql);
+
+        resolveUpdateSetParameters(update, source.table(), placeholders);
 
         if (update.getWhere() != null) {
-            resolveParameters(update.getWhere(), List.of(source), bindingParameters);
+            resolveParameters(update.getWhere(), List.of(source), placeholders);
         }
 
         return toQueryModel(
@@ -183,7 +288,7 @@ public final class QueryAnalyzer {
             parsedSql,
             table.getUnquotedName(),
             columns,
-            bindingParameters,
+            placeholders,
             rowTable
         );
     }
@@ -206,10 +311,10 @@ public final class QueryAnalyzer {
             rowTable = resolveReturningRowTable(returningClause, source);
         }
 
-        List<QueryParameter> bindingParameters = new ArrayList<>();
+        Placeholders placeholders = toPlaceholders(parsedSql);
 
         if (delete.getWhere() != null) {
-            resolveParameters(delete.getWhere(), List.of(source), bindingParameters);
+            resolveParameters(delete.getWhere(), List.of(source), placeholders);
         }
 
         return toQueryModel(
@@ -217,7 +322,7 @@ public final class QueryAnalyzer {
             parsedSql,
             table.getUnquotedName(),
             columns,
-            bindingParameters,
+            placeholders,
             rowTable
         );
     }
@@ -408,7 +513,11 @@ public final class QueryAnalyzer {
      * Resolves the {@code INSERT} parameters by pairing the explicit column
      * list with the single values row, which is also their textual order.
      */
-    private List<QueryParameter> resolveInsertParameters(Insert insert, dev.sqlcj.schema.Table table) {
+    private void resolveInsertParameters(
+        Insert insert,
+        dev.sqlcj.schema.Table table,
+        Placeholders placeholders
+    ) {
         ExpressionList<net.sf.jsqlparser.schema.Column> columns = insert.getColumns();
 
         if (columns == null || columns.isEmpty()) {
@@ -423,24 +532,22 @@ public final class QueryAnalyzer {
             );
         }
 
-        List<QueryParameter> parameters = new ArrayList<>();
-
         for (int index = 0; index < columns.size(); index++) {
-            if (!(values.get(index) instanceof JdbcParameter parameter)) {
+            Placeholder placeholder = placeholders.of(values.get(index));
+
+            if (placeholder == null) {
                 throw new UnsupportedOperationException(
                     "INSERT values must be indexed placeholders."
                 );
             }
 
             addParameter(
-                parameter,
+                placeholder,
                 columns.get(index).getUnquotedColumnName(),
                 table,
-                parameters
+                placeholders
             );
         }
-
-        return parameters;
     }
 
     private ParenthesedExpressionList<?> resolveInsertValues(Insert insert) {
@@ -459,29 +566,30 @@ public final class QueryAnalyzer {
      * Resolves the {@code UPDATE} assignment parameters in source order, which
      * precedes any parameter in the {@code WHERE} expression.
      */
-    private List<QueryParameter> resolveUpdateSetParameters(Update update, dev.sqlcj.schema.Table table) {
-        List<QueryParameter> parameters = new ArrayList<>();
-
+    private void resolveUpdateSetParameters(
+        Update update,
+        dev.sqlcj.schema.Table table,
+        Placeholders placeholders
+    ) {
         for (UpdateSet updateSet : update.getUpdateSets()) {
-            if (
-                updateSet.getColumns().size() != 1
-                    || updateSet.getValues().size() != 1
-                    || !(updateSet.getValue(0) instanceof JdbcParameter parameter)
-            ) {
+            Placeholder placeholder = updateSet.getColumns().size() == 1
+                && updateSet.getValues().size() == 1
+                    ? placeholders.of(updateSet.getValue(0))
+                    : null;
+
+            if (placeholder == null) {
                 throw new UnsupportedOperationException(
                     "UPDATE assignments must set one column to an indexed placeholder."
                 );
             }
 
             addParameter(
-                parameter,
+                placeholder,
                 updateSet.getColumn(0).getUnquotedColumnName(),
                 table,
-                parameters
+                placeholders
             );
         }
-
-        return parameters;
     }
 
     /**
@@ -494,9 +602,11 @@ public final class QueryAnalyzer {
         ParsedSql parsedSql,
         String tableName,
         List<QueryColumn> columns,
-        List<QueryParameter> occurrences,
+        Placeholders placeholders,
         String rowTable
     ) {
+        List<QueryParameter> occurrences = placeholders.occurrences();
+
         List<Integer> bindingParameterIndexes = requireAccountedOccurrences(parsedSql, occurrences);
 
         return new QueryModel(
@@ -506,7 +616,7 @@ public final class QueryAnalyzer {
             parsedSql.parameters().executableSql(),
             bindingParameterIndexes,
             columns,
-            toParameters(occurrences),
+            toParameters(occurrences, parsedSql.parameters().names()),
             rowTable
         );
     }
@@ -521,12 +631,16 @@ public final class QueryAnalyzer {
             .map(QueryParameter::index)
             .toList();
 
-        List<Integer> placeholders = parsedSql.parameters().indexes();
+        List<Integer> compiled = parsedSql.parameters().indexes();
+        List<String> names = parsedSql.parameters().names();
 
-        if (!analyzed.equals(placeholders)) {
+        if (!analyzed.equals(compiled)) {
             throw new UnsupportedOperationException(
                 "SQL placeholders %s are not the analyzed parameters %s; a placeholder is in an unsupported location"
-                    .formatted(placeholders, analyzed)
+                    .formatted(
+                        describePlaceholders(compiled, names),
+                        describePlaceholders(analyzed, names)
+                    )
             );
         }
 
@@ -534,18 +648,40 @@ public final class QueryAnalyzer {
     }
 
     /**
+     * Writes a list of logical parameter numbers as the query spells its
+     * placeholders, which is {@code :name} for a named query and the number
+     * itself for an indexed one.
+     */
+    private String describePlaceholders(List<Integer> indexes, List<String> names) {
+        if (names.isEmpty()) {
+            return indexes.toString();
+        }
+
+        return indexes.stream()
+            .map(index -> describePlaceholder(index, names))
+            .collect(Collectors.joining(", ", "[", "]"));
+    }
+
+    /** Writes one logical parameter as the query spells its placeholder. */
+    private String describePlaceholder(int index, List<String> names) {
+        return names.isEmpty()
+            ? "$" + index
+            : NAME_PREFIX + names.get(index - 1);
+    }
+
+    /**
      * Retains one parameter per placeholder index in logical index order. A
      * repeated index keeps the name and type of its first occurrence and is
      * accepted only when every occurrence resolves to the same Java type.
      */
-    private List<QueryParameter> toParameters(List<QueryParameter> occurrences) {
+    private List<QueryParameter> toParameters(List<QueryParameter> occurrences, List<String> names) {
         Map<Integer, QueryParameter> parametersByIndex = new LinkedHashMap<>();
 
         for (QueryParameter occurrence : occurrences) {
             QueryParameter parameter = parametersByIndex.putIfAbsent(occurrence.index(), occurrence);
 
             if (parameter != null) {
-                requireSameParameterType(parameter, occurrence);
+                requireSameParameterType(parameter, occurrence, names);
             }
         }
 
@@ -566,9 +702,24 @@ public final class QueryAnalyzer {
      * occurrence is a list of its element's Java type, so it is never the same
      * type as an occurrence of that element.
      */
-    private void requireSameParameterType(QueryParameter parameter, QueryParameter occurrence) {
+    private void requireSameParameterType(
+        QueryParameter parameter,
+        QueryParameter occurrence,
+        List<String> names
+    ) {
         if (isSameParameterType(parameter, occurrence)) {
             return;
+        }
+
+        if (!names.isEmpty()) {
+            throw new UnsupportedOperationException(
+                "Placeholder %s has conflicting types: %s and %s"
+                    .formatted(
+                        describePlaceholder(parameter.index(), names),
+                        describeParameterType(parameter),
+                        describeParameterType(occurrence)
+                    )
+            );
         }
 
         throw new UnsupportedOperationException(
@@ -800,54 +951,61 @@ public final class QueryAnalyzer {
      * encountered, which is the JDBC binding order of the generated {@code ?}
      * positions.
      */
-    private List<QueryParameter> resolveBindingParameters(PlainSelect plainSelect, List<Source> sources) {
-        List<QueryParameter> parameters = new ArrayList<>();
-
+    private void resolveBindingParameters(
+        PlainSelect plainSelect,
+        List<Source> sources,
+        Placeholders placeholders
+    ) {
         if (plainSelect.getWhere() != null) {
             resolveParameters(
                 plainSelect.getWhere(),
                 sources,
-                parameters
+                placeholders
             );
         }
 
-        resolvePaginationParameters(plainSelect, parameters);
-
-        return parameters;
+        resolvePaginationParameters(plainSelect, placeholders);
     }
 
     /**
      * Resolves the pagination parameters, which follow every {@code WHERE}
      * parameter in textual order. A {@code LIMIT} row count and an
      * {@code OFFSET} value that is a placeholder each becomes an
-     * {@code INTEGER} parameter named after its own clause. The parser stores
+     * {@code INTEGER} parameter named after its own clause, or after the
+     * placeholder when the placeholder is named. The parser stores
      * {@code OFFSET a LIMIT b} exactly like {@code LIMIT b OFFSET a}, so two
      * placeholders are ordered by their source positions.
      */
-    private void resolvePaginationParameters(PlainSelect plainSelect, List<QueryParameter> parameters) {
-        JdbcParameter rowCount = resolvePaginationPlaceholder(
-            resolveLimitRowCount(plainSelect.getLimit())
-        );
+    private void resolvePaginationParameters(PlainSelect plainSelect, Placeholders placeholders) {
+        Expression rowCountValue = resolveLimitRowCount(plainSelect.getLimit());
+
+        Placeholder rowCount = placeholders.of(rowCountValue);
 
         Offset offset = plainSelect.getOffset();
 
-        JdbcParameter offsetValue = resolvePaginationPlaceholder(
-            offset == null ? null : offset.getOffset()
-        );
+        Expression offsetExpression = offset == null
+            ? null
+            : offset.getOffset();
 
-        if (rowCount != null && offsetValue != null && sourcePosition(offsetValue) < sourcePosition(rowCount)) {
-            addParameter(offsetValue, OFFSET_PARAMETER_NAME, ColumnType.INTEGER, parameters);
-            addParameter(rowCount, LIMIT_PARAMETER_NAME, ColumnType.INTEGER, parameters);
+        Placeholder offsetValue = placeholders.of(offsetExpression);
+
+        if (
+            rowCount != null
+                && offsetValue != null
+                && sourcePosition(offsetExpression) < sourcePosition(rowCountValue)
+        ) {
+            addParameter(offsetValue, OFFSET_PARAMETER_NAME, ColumnType.INTEGER, placeholders);
+            addParameter(rowCount, LIMIT_PARAMETER_NAME, ColumnType.INTEGER, placeholders);
 
             return;
         }
 
         if (rowCount != null) {
-            addParameter(rowCount, LIMIT_PARAMETER_NAME, ColumnType.INTEGER, parameters);
+            addParameter(rowCount, LIMIT_PARAMETER_NAME, ColumnType.INTEGER, placeholders);
         }
 
         if (offsetValue != null) {
-            addParameter(offsetValue, OFFSET_PARAMETER_NAME, ColumnType.INTEGER, parameters);
+            addParameter(offsetValue, OFFSET_PARAMETER_NAME, ColumnType.INTEGER, placeholders);
         }
     }
 
@@ -862,43 +1020,25 @@ public final class QueryAnalyzer {
             : limit.getRowCount();
     }
 
-    /**
-     * Rejects a named pagination value and reports the placeholder to bind,
-     * which is absent when the value binds none. A value such as a literal or
-     * {@code ALL} reaches the database as written, while a computed value keeps
-     * its placeholder unaccounted for the placeholder accounting check.
-     */
-    private JdbcParameter resolvePaginationPlaceholder(Expression value) {
-        if (value == null) {
-            return null;
-        }
-
-        requireIndexedParameter(value);
-
-        return value instanceof JdbcParameter parameter
-            ? parameter
-            : null;
-    }
-
     /** The source position of a placeholder token, counted from one. */
-    private int sourcePosition(JdbcParameter parameter) {
-        return parameter.getASTNode().jjtGetFirstToken().absoluteBegin;
+    private int sourcePosition(Expression placeholder) {
+        return placeholder.getASTNode().jjtGetFirstToken().absoluteBegin;
     }
 
     private void resolveParameters(
         Expression expression,
         List<Source> sources,
-        List<QueryParameter> parameters
+        Placeholders placeholders
     ) {
         if (expression instanceof AndExpression and) {
-            resolveParameters(and.getLeftExpression(), sources, parameters);
-            resolveParameters(and.getRightExpression(), sources, parameters);
+            resolveParameters(and.getLeftExpression(), sources, placeholders);
+            resolveParameters(and.getRightExpression(), sources, placeholders);
             return;
         }
 
         if (expression instanceof OrExpression or) {
-            resolveParameters(or.getLeftExpression(), sources, parameters);
-            resolveParameters(or.getRightExpression(), sources, parameters);
+            resolveParameters(or.getLeftExpression(), sources, placeholders);
+            resolveParameters(or.getRightExpression(), sources, placeholders);
             return;
         }
 
@@ -907,19 +1047,19 @@ public final class QueryAnalyzer {
                 resolveParameters(
                     nestedExpression,
                     sources,
-                    parameters
+                    placeholders
                 );
             }
             return;
         }
 
         if (expression instanceof InExpression in) {
-            resolveInExpression(in, sources, parameters);
+            resolveInExpression(in, sources, placeholders);
             return;
         }
 
         if (expression instanceof LikeExpression like) {
-            resolveLikeExpression(like, sources, parameters);
+            resolveLikeExpression(like, sources, placeholders);
             return;
         }
 
@@ -929,7 +1069,7 @@ public final class QueryAnalyzer {
         }
 
         if (expression instanceof Between between) {
-            resolveBetweenExpression(between, sources, parameters);
+            resolveBetweenExpression(between, sources, placeholders);
             return;
         }
 
@@ -938,12 +1078,12 @@ public final class QueryAnalyzer {
                 comparison.getLeftExpression(),
                 comparison.getRightExpression(),
                 sources,
-                parameters
+                placeholders
             );
         }
     }
 
-    private void resolveInExpression(InExpression in, List<Source> sources, List<QueryParameter> parameters) {
+    private void resolveInExpression(InExpression in, List<Source> sources, Placeholders placeholders) {
         if (!(in.getLeftExpression() instanceof net.sf.jsqlparser.schema.Column column)) {
             return;
         }
@@ -954,10 +1094,10 @@ public final class QueryAnalyzer {
 
         if (rightExpression instanceof ExpressionList<?> expressionList) {
             for (Expression expression : expressionList) {
-                requireIndexedParameter(expression);
+                Placeholder placeholder = placeholders.of(expression);
 
-                if (expression instanceof JdbcParameter parameter) {
-                    addParameter(parameter, schemaColumn, parameters);
+                if (placeholder != null) {
+                    addParameter(placeholder, schemaColumn, placeholders);
                 }
             }
 
@@ -968,7 +1108,7 @@ public final class QueryAnalyzer {
             rightExpression,
             schemaColumn,
             sources,
-            parameters
+            placeholders
         );
     }
 
@@ -976,12 +1116,12 @@ public final class QueryAnalyzer {
         Expression expression,
         dev.sqlcj.schema.Column schemaColumn,
         List<Source> sources,
-        List<QueryParameter> parameters
+        Placeholders placeholders
     ) {
-        requireIndexedParameter(expression);
+        Placeholder placeholder = placeholders.of(expression);
 
-        if (expression instanceof JdbcParameter parameter) {
-            addParameter(parameter, schemaColumn, parameters);
+        if (placeholder != null) {
+            addParameter(placeholder, schemaColumn, placeholders);
             return;
         }
 
@@ -990,14 +1130,14 @@ public final class QueryAnalyzer {
                 and.getLeftExpression(),
                 schemaColumn,
                 sources,
-                parameters
+                placeholders
             );
 
             resolveInExpression(
                 and.getRightExpression(),
                 schemaColumn,
                 sources,
-                parameters
+                placeholders
             );
 
             return;
@@ -1008,14 +1148,14 @@ public final class QueryAnalyzer {
                 or.getLeftExpression(),
                 schemaColumn,
                 sources,
-                parameters
+                placeholders
             );
 
             resolveInExpression(
                 or.getRightExpression(),
                 schemaColumn,
                 sources,
-                parameters
+                placeholders
             );
 
             return;
@@ -1023,15 +1163,15 @@ public final class QueryAnalyzer {
 
         if (expression instanceof ParenthesedExpressionList<?> expressionList) {
             for (Expression nestedExpression : expressionList) {
-                requireIndexedParameter(nestedExpression);
+                Placeholder nested = placeholders.of(nestedExpression);
 
-                if (nestedExpression instanceof JdbcParameter parameter) {
-                    addParameter(parameter, schemaColumn, parameters);
+                if (nested != null) {
+                    addParameter(nested, schemaColumn, placeholders);
                 } else {
                     resolveParameters(
                         nestedExpression,
                         sources,
-                        parameters
+                        placeholders
                     );
                 }
             }
@@ -1047,21 +1187,20 @@ public final class QueryAnalyzer {
     private void resolveLikeExpression(
         LikeExpression like,
         List<Source> sources,
-        List<QueryParameter> parameters
+        Placeholders placeholders
     ) {
         Expression left = like.getLeftExpression();
         Expression right = like.getRightExpression();
 
-        requireIndexedParameter(left);
-        requireIndexedParameter(right);
-
-        if (left instanceof JdbcParameter) {
+        if (placeholders.of(left) != null) {
             throw new UnsupportedOperationException(
                 "A LIKE placeholder must be the pattern, not the tested value."
             );
         }
 
-        if (!(right instanceof JdbcParameter parameter)) {
+        Placeholder pattern = placeholders.of(right);
+
+        if (pattern == null) {
             return;
         }
 
@@ -1076,9 +1215,9 @@ public final class QueryAnalyzer {
         requireSupportedType(schemaColumn);
 
         addParameter(
-            parameter,
+            pattern,
             requireTextColumn(schemaColumn),
-            parameters
+            placeholders
         );
     }
 
@@ -1158,17 +1297,15 @@ public final class QueryAnalyzer {
     private void resolveBetweenExpression(
         Between between,
         List<Source> sources,
-        List<QueryParameter> parameters
+        Placeholders placeholders
     ) {
         Expression left = between.getLeftExpression();
-        Expression start = between.getBetweenExpressionStart();
-        Expression end = between.getBetweenExpressionEnd();
 
-        requireIndexedParameter(left);
-        requireIndexedParameter(start);
-        requireIndexedParameter(end);
+        Placeholder tested = placeholders.of(left);
+        Placeholder start = placeholders.of(between.getBetweenExpressionStart());
+        Placeholder end = placeholders.of(between.getBetweenExpressionEnd());
 
-        if (!(start instanceof JdbcParameter) && !(end instanceof JdbcParameter)) {
+        if (tested != null || (start == null && end == null)) {
             return;
         }
 
@@ -1178,12 +1315,12 @@ public final class QueryAnalyzer {
 
         dev.sqlcj.schema.Column schemaColumn = resolveColumn(column, sources).column();
 
-        if (start instanceof JdbcParameter startParameter) {
-            addParameter(startParameter, schemaColumn, parameters);
+        if (start != null) {
+            addParameter(start, schemaColumn, placeholders);
         }
 
-        if (end instanceof JdbcParameter endParameter) {
-            addParameter(endParameter, schemaColumn, parameters);
+        if (end != null) {
+            addParameter(end, schemaColumn, placeholders);
         }
     }
 
@@ -1191,84 +1328,85 @@ public final class QueryAnalyzer {
         Expression left,
         Expression right,
         List<Source> sources,
-        List<QueryParameter> parameters
+        Placeholders placeholders
     ) {
-        requireIndexedParameter(left);
-        requireIndexedParameter(right);
+        Placeholder leftPlaceholder = placeholders.of(left);
+        Placeholder rightPlaceholder = placeholders.of(right);
 
-        if (left instanceof net.sf.jsqlparser.schema.Column column && right instanceof JdbcParameter parameter) {
+        if (left instanceof net.sf.jsqlparser.schema.Column column && rightPlaceholder != null) {
             addParameter(
-                parameter,
+                rightPlaceholder,
                 resolveColumn(column, sources).column(),
-                parameters
+                placeholders
             );
             return;
         }
 
-        if (left instanceof JdbcParameter parameter && right instanceof net.sf.jsqlparser.schema.Column column) {
+        if (leftPlaceholder != null && right instanceof net.sf.jsqlparser.schema.Column column) {
             addParameter(
-                parameter,
+                leftPlaceholder,
                 resolveColumn(column, sources).column(),
-                parameters
+                placeholders
             );
         }
     }
 
     private void addParameter(
-        JdbcParameter parameter,
+        Placeholder placeholder,
         String columnName,
         dev.sqlcj.schema.Table table,
-        List<QueryParameter> parameters
+        Placeholders placeholders
     ) {
         addParameter(
-            parameter,
+            placeholder,
             findColumn(table, columnName),
-            parameters
+            placeholders
         );
     }
 
     private void addParameter(
-        JdbcParameter parameter,
+        Placeholder placeholder,
         dev.sqlcj.schema.Column column,
-        List<QueryParameter> parameters
+        Placeholders placeholders
     ) {
         addParameter(
-            parameter,
+            placeholder,
             column.name(),
             requireSupportedType(column),
             column.enumType(),
             column.array(),
             column.blankPadded(),
-            parameters
+            placeholders
         );
     }
 
     private void addParameter(
-        JdbcParameter parameter,
+        Placeholder placeholder,
         String name,
         ColumnType type,
-        List<QueryParameter> parameters
+        Placeholders placeholders
     ) {
-        addParameter(parameter, name, type, null, false, false, parameters);
+        addParameter(placeholder, name, type, null, false, false, placeholders);
     }
 
+    /**
+     * Records one parameter occurrence, named after its placeholder when the
+     * placeholder is named, and otherwise after the column or clause it belongs
+     * to.
+     */
     private void addParameter(
-        JdbcParameter parameter,
+        Placeholder placeholder,
         String name,
         ColumnType type,
         String enumType,
         boolean array,
         boolean blankPadded,
-        List<QueryParameter> parameters
+        Placeholders placeholders
     ) {
-        if (!parameter.isUseFixedIndex()) {
-            throw new UnsupportedOperationException(ANONYMOUS_PARAMETER_REJECTION);
-        }
-
-        parameters.add(
+        placeholders.add(
             new QueryParameter(
-                parameter.getIndex(),
-                name,
+                placeholder.index(),
+                placeholder.nameOr(name),
                 type,
                 enumType,
                 array,
@@ -1278,28 +1416,37 @@ public final class QueryAnalyzer {
     }
 
     /**
-     * Rejects an anonymous placeholder reported anywhere in the SQL source,
-     * including a clause this analyzer does not traverse, so that an accepted
-     * query never keeps an unbound placeholder in its executable SQL.
+     * Rejects the placeholder forms an analyzed query must not contain
+     * anywhere in its SQL source, including a clause this analyzer does not
+     * traverse: an anonymous placeholder, which has no parameter to bind, a
+     * named placeholder the compiler did not replace, which the executable SQL
+     * would otherwise keep, and indexed and named placeholders in one query,
+     * whose parameter order would follow two rules at once.
      */
-    private void requireIndexedPlaceholders(ParsedSql parsedSql) {
+    private void requireSupportedPlaceholders(ParsedSql parsedSql) {
         if (parsedSql.parameters().hasAnonymousParameter()) {
             throw new UnsupportedOperationException(ANONYMOUS_PARAMETER_REJECTION);
+        }
+
+        List<String> uncompiled = parsedSql.parameters().uncompiledPlaceholders();
+
+        if (!uncompiled.isEmpty()) {
+            throw new UnsupportedOperationException(
+                NAMED_PLACEHOLDER_REJECTION.formatted(uncompiled.getFirst())
+            );
+        }
+
+        if (parsedSql.parameters().hasPositionalParameter() && !parsedSql.parameters().names().isEmpty()) {
+            throw new UnsupportedOperationException(MIXED_PLACEHOLDER_REJECTION);
         }
     }
 
     /**
-     * Rejects a named placeholder where an indexed placeholder is supported, so
-     * that an accepted query never keeps an unbound placeholder in its
-     * executable SQL.
+     * The compiled placeholders of one query, against which every analyzed
+     * placeholder occurrence resolves to its logical parameter.
      */
-    private void requireIndexedParameter(Expression expression) {
-        if (expression instanceof JdbcNamedParameter named) {
-            throw new UnsupportedOperationException(
-                "Named parameter ':%s' is not supported; use an indexed placeholder such as $1"
-                    .formatted(named.getName())
-            );
-        }
+    private Placeholders toPlaceholders(ParsedSql parsedSql) {
+        return new Placeholders(parsedSql.parameters().names());
     }
 
     /**

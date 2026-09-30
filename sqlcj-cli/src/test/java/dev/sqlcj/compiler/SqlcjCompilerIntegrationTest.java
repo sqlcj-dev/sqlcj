@@ -602,6 +602,63 @@ class SqlcjCompilerIntegrationTest {
         }
     }
 
+    /**
+     * A repository generated from named placeholders compiles and executes: its
+     * method parameters follow first-occurrence order and carry the placeholder
+     * names, while a repeated name binds at each of its textual positions.
+     */
+    @Test
+    void shouldExecuteGeneratedQueryWithNamedPlaceholders() throws Exception {
+        Path classesDirectory = generateAndCompile(
+            """
+                -- name: FindUser :one
+                SELECT id, name, active
+                FROM users
+                WHERE (name = :term OR name = :term)
+                  AND id = :userId;
+                """
+        );
+
+        String source = Files.readString(tempDir.resolve("generated/generated/UsersRepository.java"));
+
+        assertTrue(
+            source.contains(
+                "public FindUserResult findUser(String term, Long userId)"
+            )
+        );
+
+        assertTrue(source.contains("java.util.Arrays.asList(term, term, userId)"));
+        assertTrue(source.contains("WHERE (name = ? OR name = ?)"));
+        assertTrue(source.contains("AND id = ?"));
+
+        QueryExecutor executor = new JdbcQueryExecutor(usersDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName(
+                "generated.UsersRepository",
+                true,
+                classLoader
+            );
+
+            Object generatedQuery = generatedClass
+                .getConstructor(QueryExecutor.class)
+                .newInstance(executor);
+
+            Method method = generatedClass.getMethod(
+                "findUser",
+                String.class,
+                Long.class
+            );
+
+            Object result = method.invoke(generatedQuery, "Alice", 1L);
+
+            assertNotNull(result);
+
+            assertEquals(1L, getRecordComponent(result, "id"));
+            assertEquals("Alice", getRecordComponent(result, "name"));
+        }
+    }
+
     @Test
     void shouldExecuteGeneratedQueryWithRepeatedPlaceholder() throws Exception {
         Path classesDirectory = generateAndCompile(
