@@ -171,8 +171,8 @@ after `code` and disambiguated as `code1` and `code2`. The bounds are bound in
 textual order, the start bound before the end bound, whatever their placeholder
 indexes are. A placeholder bound beside a literal bound, as in
 `code BETWEEN $1 AND 10`, is typed the same way and binds one parameter. A named
-bound such as `code BETWEEN :lo AND :hi` is rejected like any other named
-placeholder, while a placeholder as the tested value, as in
+bound such as `code BETWEEN :lo AND :hi` is typed the same way and named after
+its placeholder, while a placeholder as the tested value, as in
 `$1 BETWEEN code AND code`, and a placeholder inside a computed bound, as in
 `code BETWEEN $1 + 1 AND $2`, are rejected as unanalyzed placeholder locations.
 
@@ -213,8 +213,10 @@ LIMIT $1 OFFSET $2;
   parameter.
 - Both values must be non-negative. sqlcj generates no validation, so PostgreSQL
   rejects a negative value when the query executes.
-- A named value such as `LIMIT :n` or `OFFSET :n` is rejected like any other
-  named placeholder. A placeholder in a computed value, as in `LIMIT $1 + 1` or
+- A named value is named after its placeholder rather than after its clause, so
+  `LIMIT :pageSize OFFSET :skip` generates
+  `listAuthorPage(Integer pageSize, Integer skip)`.
+- A placeholder in a computed value, as in `LIMIT $1 + 1` or
   `OFFSET $1 + 1`, in the `LIMIT a, b` form, as in `LIMIT 5, $1`, and in a
   `FETCH FIRST $1 ROWS ONLY` clause are rejected as unanalyzed placeholder
   locations.
@@ -225,8 +227,8 @@ A write targets exactly one table of its entry's schema.
 
 | Statement | Accepted shape |
 | --- | --- |
-| `INSERT` | an explicit column list and a single `VALUES` row whose values are all `$N` placeholders |
-| `UPDATE` | `SET` assignments that each assign one direct column a single `$N` placeholder, with an optional `WHERE` using the read predicate forms |
+| `INSERT` | an explicit column list and a single `VALUES` row whose values are all placeholders |
+| `UPDATE` | `SET` assignments that each assign one direct column a single placeholder, with an optional `WHERE` using the read predicate forms |
 | `DELETE` | one target table with an optional `WHERE` using the read predicate forms |
 
 ```sql
@@ -268,24 +270,40 @@ table expressions are rejected in a returning write.
 
 ## Parameters
 
-sqlcj uses PostgreSQL `$N` placeholders. The compiler replaces each real
-placeholder token with a JDBC `?` and leaves every other character of the
-statement byte-for-byte unchanged, so `$1` inside a string literal, a quoted
-identifier, or a comment is not a parameter.
+A query writes its parameters either as PostgreSQL `$N` placeholders or as
+`:name` placeholders, and one query uses one of the two forms. The compiler
+replaces each real placeholder token with a JDBC `?` and leaves every other
+character of the statement byte-for-byte unchanged, so `$1` or `:id` inside a
+string literal, a quoted identifier, or a comment is not a parameter.
 
 - Placeholder indexes must be positive and contiguous from `$1`.
+- A named placeholder is a colon followed directly by an unquoted name of ASCII
+  letters, digits, and underscores that does not start with a digit, such as
+  `:userId`. Names are compared exactly as written, so `:term` and `:Term` are
+  two parameters, and a name spelled like a SQL keyword, such as `:limit`,
+  `:user`, or `:year`, is an ordinary name.
+- Each distinct name is one parameter, numbered by its first textual
+  occurrence, and every occurrence of that name is bound at its own `?`
+  position.
+- A named placeholder is accepted wherever a `$N` placeholder is, and names its
+  generated method parameter after itself, so `LIMIT :pageSize` generates
+  `pageSize` rather than `limit`.
 - The Java type of a placeholder is the type of the column it is compared with,
   assigned to, or inserted into.
-- Anonymous `?` placeholders and named `:name` placeholders are rejected.
+- Mixing `$N` and `:name` placeholders in one query is rejected, as are
+  anonymous `?` placeholders, a qualified name such as `:a.b`, a quoted name
+  such as `:"x"`, and an `&name` placeholder.
 - A placeholder in a location sqlcj does not analyze — for example `ORDER BY $1`
-  — is rejected rather than left unbound.
+  or `lower(name) = :name` — is rejected rather than left unbound.
 
 ### Logical order versus textual order
 
 The two orders are distinct and both are observable:
 
 - **Logical order** is placeholder index order. It is the order of the generated
-  method parameters: `$1` is the first method parameter, `$2` the second.
+  method parameters: `$1` is the first method parameter, `$2` the second. In a
+  named query it is first-occurrence order: the name written first is the first
+  method parameter.
 - **Textual order** is the order in which placeholder tokens appear in the SQL.
   It is the JDBC binding order of the generated `?` positions.
 
@@ -308,10 +326,23 @@ public int updateAuthorBio(Long id, String bio) {
 }
 ```
 
-An index may repeat. A repeated index produces one method parameter, named and
-typed from its first occurrence, and its value is bound at every textual
-position where the index occurs. Occurrences of one index whose inferred Java
+An index and a name may repeat. A repeated index produces one method parameter,
+named and typed from its first occurrence, and its value is bound at every
+textual position where the index occurs; a repeated name behaves the same way
+and keeps its own name. Occurrences of one index or one name whose inferred Java
 types differ are rejected.
+
+`UpdateAuthorBio` written with named placeholders states the same two orders:
+
+```sql
+-- name: UpdateAuthorBio :exec
+UPDATE authors
+SET bio = :bio
+WHERE id = :id;
+```
+
+The generated method takes `(bio, id)`, because `:bio` occurs first, and binds
+`(bio, id)`.
 
 ## Generated Java
 
@@ -531,7 +562,9 @@ name, and its header line.
   is not a plain inner or left join, a join predicate that is not one qualified
   equality, and a set operation such as `UNION`.
 - A placeholder in a location sqlcj does not analyze, including `ORDER BY $1`, a
-  computed `LIKE` pattern such as `'%' || $1 || '%'`, a placeholder as the
+  named placeholder under a function such as `lower(name) = :name` or under a
+  cast such as `:name::text`, a computed `LIKE` pattern such as
+  `'%' || $1 || '%'`, a placeholder as the
   tested value of a range such as `$1 BETWEEN id AND id`, a computed range
   bound such as `id BETWEEN $1 + 1 AND $2`, a computed pagination value such as
   `LIMIT $1 + 1` or `OFFSET $1 + 1`, a `LIMIT a, b` row count such as
@@ -540,11 +573,10 @@ name, and its header line.
 - A `LIKE`-family pattern placeholder that is negated, uses another keyword such
   as `SIMILAR TO`, carries an `ESCAPE` clause or a `BINARY` modifier, tests a
   non-text column, or stands as the tested value.
-- A named range bound such as `id BETWEEN :lo AND :hi` and a named pagination
-  value such as `LIMIT :n` or `OFFSET :n`, which fail with the named-placeholder
-  diagnostic.
-- Anonymous `?` and named `:name` placeholders, and non-contiguous or
-  non-positive placeholder indexes.
+- Anonymous `?` placeholders, `$N` and `:name` placeholders mixed in one query,
+  a qualified name such as `:a.b`, a quoted name such as `:"x"`, an `&name`
+  placeholder, one name whose occurrences have conflicting types, and
+  non-contiguous or non-positive placeholder indexes.
 - An `INSERT` without an explicit column list, with more than one `VALUES` row,
   with a value that is not a placeholder, or built from a `SELECT`; and an
   `UPDATE` assignment that is not a single placeholder.
@@ -569,9 +601,9 @@ them:
 - `ON CONFLICT`, `UPDATE ... FROM`, and `DELETE ... USING` on a non-returning
   `:exec` write.
 
-sqlcj itself provides no named parameters, macros, array operators such as
-`= ANY`, dynamic `IN` expansion, or query-building API. An array parameter is
-one whole list bound at one placeholder, not a placeholder list.
+sqlcj itself provides no macros, array operators such as `= ANY`, dynamic `IN`
+expansion, or query-building API. An array parameter is one whole list bound at
+one placeholder, not a placeholder list.
 
 Unsupported schema input and unsupported column types are listed in
 [PostgreSQL Support](postgresql.md#unsupported-types-and-ddl).
@@ -659,8 +691,8 @@ Reads:
   `QueryAnalyzerTest.shouldResolveRangeBoundParameterBesideLiteralBound`,
   `QueryAnalyzerTest.shouldNotCreateParameterForLiteralRange`,
   `QueryAnalyzerTest.shouldRejectUnknownColumnInRangePredicate`, and
-  `QueryAnalyzerTest.shouldRejectNamedRangeBound` cover the range predicates,
-  and
+  `QueryAnalyzerTest.shouldResolveNamedRangeBoundParameters` cover the range
+  predicates, and
   `PostgresIntegrationTest.shouldExecuteGeneratedRangePredicatesAgainstPostgres`
   executes a `BETWEEN` read and a `NOT BETWEEN` read whose bounds use
   out-of-order placeholder indexes against PostgreSQL 16.
@@ -668,7 +700,7 @@ Reads:
   `QueryAnalyzerTest.shouldResolvePaginationParametersInTextualBindingOrder`,
   `QueryAnalyzerTest.shouldResolveOffsetParameterBesideUnanalyzedRowCount`,
   `QueryAnalyzerTest.shouldNotCreateParametersForLiteralPagination`,
-  `QueryAnalyzerTest.shouldRejectNamedPaginationValue`, and
+  `QueryAnalyzerTest.shouldNameNamedPaginationParameterAfterItsPlaceholder`, and
   `QueryAnalyzerTest.shouldRejectPlaceholderInUnsupportedPaginationValue` cover
   pagination, and
   `PostgresIntegrationTest.shouldExecuteGeneratedPaginationAgainstPostgres`
@@ -731,10 +763,36 @@ Parameters:
   `QueryAnalyzerTest.shouldRejectGappedParameterIndexes`,
   `QueryAnalyzerTest.shouldRejectZeroParameterIndex`,
   `QueryAnalyzerTest.shouldRejectPlaceholderInUnsupportedLocation`,
-  `QueryAnalyzerTest.shouldRejectAnonymousParameter`,
-  `QueryAnalyzerTest.shouldRejectNamedParameter`, and
+  `QueryAnalyzerTest.shouldRejectAnonymousParameter`, and
   `QueryAnalyzerTest.shouldKeepPlaceholderTextThatIsNotAParameter` cover
   ordering, repetition, and rejection.
+- `SqlParserTest.shouldCompileNamedParametersByFirstOccurrence`,
+  `SqlParserTest.shouldCompileNamesThatDifferInCaseAsDistinctParameters`,
+  `SqlParserTest.shouldReportBothPlaceholderFormsOfOneSource`,
+  `SqlParserTest.shouldNotCompileUnsupportedNamedPlaceholderForms`,
+  `SqlParserTest.shouldPreserveNamedPlaceholderTextThatIsNotAParameter`,
+  `SqlParameterCompilerTest.shouldReplaceReportedNamedParameterSpans`,
+  `SqlParameterCompilerTest.shouldIgnoreNameSeparatedFromItsColon`, and
+  `SqlParameterCompilerTest.shouldRejectNamedSpanThatDoesNotHoldTheParameterImage`
+  cover the compiled named form, its numbering, and its span guards.
+- `QueryAnalyzerTest.shouldResolveNamedParameter`,
+  `QueryAnalyzerTest.shouldNumberNamedParametersByFirstOccurrence`,
+  `QueryAnalyzerTest.shouldResolveNamedParametersOfUpdate`,
+  `QueryAnalyzerTest.shouldResolveNamedParametersOfInsert`,
+  `QueryAnalyzerTest.shouldResolveNamedParametersInInList`,
+  `QueryAnalyzerTest.shouldResolveNamedLikePatternParameter`,
+  `QueryAnalyzerTest.shouldResolveNamedParametersSpelledLikeKeywords`,
+  `QueryAnalyzerTest.shouldRejectMixedPlaceholderForms`,
+  `QueryAnalyzerTest.shouldRejectUnsupportedNamedPlaceholderForm`,
+  `QueryAnalyzerTest.shouldRejectNamedPlaceholderInUnanalyzedLocation`, and
+  `QueryAnalyzerTest.shouldRejectNamedPlaceholderWithConflictingTypes` cover the
+  analyzed named locations, the generated parameter names, and the named
+  rejections.
+- `SqlcjCompilerIntegrationTest.shouldExecuteGeneratedQueryWithNamedPlaceholders`
+  and
+  `PostgresIntegrationTest.shouldExecuteGeneratedNamedPlaceholdersAgainstPostgres`
+  compile and execute a named query that repeats a name and orders its
+  parameters by first occurrence.
 - `SqlcjCompilerIntegrationTest.shouldExecuteGeneratedQueryWithOutOfOrderPlaceholders`,
   `SqlcjCompilerIntegrationTest.shouldExecuteGeneratedQueryWithRepeatedPlaceholder`,
   `SqlcjCompilerIntegrationTest.shouldExecuteGeneratedUpdateWithOutOfOrderPlaceholders`,

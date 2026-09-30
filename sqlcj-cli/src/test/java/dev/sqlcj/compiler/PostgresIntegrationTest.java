@@ -833,6 +833,56 @@ class PostgresIntegrationTest {
     }
 
     /**
+     * Covers named placeholders end to end: a read whose placeholders are named
+     * and whose first name repeats is generated, compiled, and executed against
+     * PostgreSQL, so its method parameters follow first-occurrence order while
+     * each occurrence binds at its own textual position.
+     */
+    @Test
+    void shouldExecuteGeneratedNamedPlaceholdersAgainstPostgres() throws Exception {
+        Path classesDirectory = generateAndCompile("""
+            -- name: ListUsersByTerm :many
+            SELECT id, name
+            FROM users
+            WHERE (name = :term OR bio = :term)
+              AND id > :minId
+            ORDER BY id
+            OFFSET :skip LIMIT :pageSize;
+            """);
+
+        execute("""
+            INSERT INTO users (id, code, name, bio)
+            VALUES
+                (1, 1, 'Alice', NULL),
+                (2, 2, 'Alice', NULL),
+                (3, 3, 'Bob', 'Alice'),
+                (4, 4, 'Bob', NULL)
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method listUsersByTerm = repository.getClass().getMethod(
+                "listUsersByTerm",
+                String.class,
+                Long.class,
+                Integer.class,
+                Integer.class
+            );
+
+            assertEquals(
+                List.of("Alice", "Bob"),
+                names(listUsersByTerm.invoke(repository, "Alice", 0L, 1, 2))
+            );
+
+            assertEquals(
+                List.of("Bob"),
+                names(listUsersByTerm.invoke(repository, "Alice", 2L, 0, 1))
+            );
+        }
+    }
+
+    /**
      * Covers the scalar count end to end: a {@code :one} count read is
      * generated, compiled, and executed against PostgreSQL, so its result
      * record exposes one {@code Long} component that counts the matching rows
