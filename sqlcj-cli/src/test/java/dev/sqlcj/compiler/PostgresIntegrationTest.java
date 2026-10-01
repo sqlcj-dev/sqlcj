@@ -883,6 +883,50 @@ class PostgresIntegrationTest {
     }
 
     /**
+     * Covers the cast-typed optional filter end to end: one named placeholder
+     * typed by its cast both tests whether the filter is absent and compares
+     * the column, so a null argument returns every row and a value returns
+     * only the matching rows.
+     */
+    @Test
+    void shouldExecuteGeneratedCastTypedOptionalFilterAgainstPostgres() throws Exception {
+        Path classesDirectory = generateAndCompile("""
+            -- name: ListUsersByName :many
+            SELECT id, name
+            FROM users
+            WHERE (:name::text IS NULL OR name = :name)
+            ORDER BY id;
+            """);
+
+        execute("""
+            INSERT INTO users (id, code, name)
+            VALUES
+                (1, 1, 'Alice'),
+                (2, 2, 'Bob'),
+                (3, 3, 'Alice')
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method listUsersByName = repository.getClass().getMethod(
+                "listUsersByName",
+                String.class
+            );
+
+            assertEquals(
+                List.of("Alice", "Bob", "Alice"),
+                names(listUsersByName.invoke(repository, new Object[] { null }))
+            );
+
+            assertEquals(
+                List.of("Alice", "Alice"),
+                names(listUsersByName.invoke(repository, "Alice"))
+            );
+        }
+    }
+
+    /**
      * Covers the scalar count end to end: a {@code :one} count read is
      * generated, compiled, and executed against PostgreSQL, so its result
      * record exposes one {@code Long} component that counts the matching rows

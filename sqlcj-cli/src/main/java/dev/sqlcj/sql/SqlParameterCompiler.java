@@ -1,5 +1,7 @@
 package dev.sqlcj.sql;
 
+import net.sf.jsqlparser.expression.CastExpression;
+import net.sf.jsqlparser.expression.Expression;
 import net.sf.jsqlparser.expression.JdbcNamedParameter;
 import net.sf.jsqlparser.parser.CCJSqlParserConstants;
 import net.sf.jsqlparser.parser.Node;
@@ -153,21 +155,46 @@ final class SqlParameterCompiler {
     /**
      * Collects the named placeholders of the parse tree that this compiler did
      * not replace, written as the source spells them, so that an accepted query
-     * never keeps such a placeholder in its executable SQL. A placeholder the
-     * parser reports without a parse-tree node of its own, such as one under a
-     * cast, has no node to collect here.
+     * never keeps such a placeholder in its executable SQL.
+     *
+     * <p>The parser gives the operand of a {@code ::} cast no parse-tree node
+     * of its own, so a cast reports the placeholder it casts, through any
+     * further cast of the same operand.
      */
     private void collectUncompiledPlaceholders(Node node, List<String> names, List<String> uncompiled) {
-        if (node.jjtGetValue() instanceof JdbcNamedParameter named && !isCompiled(named, names)) {
-            String placeholder = named.getParameterCharacter() + named.getName();
+        collectUncompiledPlaceholder(node.jjtGetValue(), names, uncompiled);
 
-            if (!uncompiled.contains(placeholder)) {
-                uncompiled.add(placeholder);
-            }
+        if (node.jjtGetValue() instanceof CastExpression cast) {
+            collectUncompiledPlaceholder(castOperand(cast), names, uncompiled);
         }
 
         for (int child = 0; child < node.jjtGetNumChildren(); child++) {
             collectUncompiledPlaceholders(node.jjtGetChild(child), names, uncompiled);
+        }
+    }
+
+    /** The operand a cast casts, which is the operand of a chained cast. */
+    private Expression castOperand(CastExpression cast) {
+        Expression operand = cast.getLeftExpression();
+
+        return operand instanceof CastExpression chained
+            ? castOperand(chained)
+            : operand;
+    }
+
+    /**
+     * Collects one parse-tree value when it is a named placeholder this
+     * compiler did not replace, once per placeholder as the source spells it.
+     */
+    private void collectUncompiledPlaceholder(Object value, List<String> names, List<String> uncompiled) {
+        if (!(value instanceof JdbcNamedParameter named) || isCompiled(named, names)) {
+            return;
+        }
+
+        String placeholder = named.getParameterCharacter() + named.getName();
+
+        if (!uncompiled.contains(placeholder)) {
+            uncompiled.add(placeholder);
         }
     }
 

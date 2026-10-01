@@ -603,6 +603,37 @@ class SqlcjCompilerIntegrationTest {
     }
 
     /**
+     * A repository generated from a cast placeholder compiles: the cast types
+     * its placeholder, the compared column names it, and the cast reaches the
+     * executable SQL as written beside its {@code ?} marker.
+     */
+    @Test
+    void shouldGenerateCompilableJavaForCastPlaceholders() throws IOException {
+        generateAndCompile(
+            """
+                -- name: FindUsers :many
+                SELECT id, name
+                FROM users
+                WHERE name = $1::text OR name = $2;
+                """
+        );
+
+        String source = Files.readString(
+            tempDir.resolve("generated/generated/UsersRepository.java")
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<FindUsersResult> findUsers(String name1, String name2)"
+            ),
+            source
+        );
+
+        assertTrue(source.contains("WHERE name = ?::text OR name = ?"), source);
+        assertTrue(source.contains("java.util.Arrays.asList(name1, name2)"), source);
+    }
+
+    /**
      * A repository generated from named placeholders compiles and executes: its
      * method parameters follow first-occurrence order and carry the placeholder
      * names, while a repeated name binds at each of its textual positions.
