@@ -1,8 +1,12 @@
 package dev.sqlcj.sql;
 
+import net.sf.jsqlparser.expression.CastExpression;
+import net.sf.jsqlparser.expression.Expression;
+import net.sf.jsqlparser.expression.JdbcNamedParameter;
 import net.sf.jsqlparser.parser.CCJSqlParserConstants;
 import net.sf.jsqlparser.parser.Node;
 import net.sf.jsqlparser.parser.Token;
+import net.sf.jsqlparser.statement.create.table.ColDataType;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -152,7 +156,75 @@ class SqlParameterCompilerTest {
         );
     }
 
+    /**
+     * The parser gives the operand of a {@code ::} cast no parse-tree node of
+     * its own, so the cast reports the placeholder it casts, through a chained
+     * cast of the same operand.
+     */
+    @Test
+    void shouldReportNamedParametersThatAreCastOperands() {
+        String sql = "SELECT * FROM users WHERE id = :\"x\"::bigint AND code = &y::int::bigint";
+
+        SqlParameters parameters = compile(
+            sql,
+            new Token[] { token(CCJSqlParserConstants.S_IDENTIFIER, "SELECT", 0) },
+            cast(namedParameter(":", "\"x\"")),
+            cast(cast(namedParameter("&", "y")))
+        );
+
+        assertEquals(sql, parameters.executableSql());
+        assertTrue(parameters.indexes().isEmpty());
+
+        assertEquals(
+            List.of(":\"x\"", "&y"),
+            parameters.uncompiledPlaceholders()
+        );
+    }
+
+    /** A cast operand this compiler replaced is not reported again. */
+    @Test
+    void shouldNotReportCompiledNamedParameterThatIsACastOperand() {
+        String sql = "SELECT * FROM users WHERE id = :x::bigint";
+
+        SqlParameters parameters = compile(
+            sql,
+            new Token[] {
+                token(CCJSqlParserConstants.DOUBLE_COLON, ":", 31),
+                token(CCJSqlParserConstants.S_IDENTIFIER, "x", 32)
+            },
+            cast(namedParameter(":", "x"))
+        );
+
+        assertEquals("SELECT * FROM users WHERE id = ?::bigint", parameters.executableSql());
+        assertEquals(List.of(1), parameters.indexes());
+        assertEquals(List.of("x"), parameters.names());
+        assertTrue(parameters.uncompiledPlaceholders().isEmpty());
+    }
+
     private SqlParameters compile(String sql, Token... tokens) {
+        return compiler.compile(sql, node(tokens));
+    }
+
+    /**
+     * Compiles a source whose parse tree holds the given expressions beside its
+     * tokens, which is how the compiler sees a placeholder the parser reports
+     * without a parse-tree node of its own.
+     */
+    private SqlParameters compile(String sql, Token[] tokens, Expression... expressions) {
+        Node root = node(tokens);
+
+        for (int index = 0; index < expressions.length; index++) {
+            Node child = new Node(index + 1);
+
+            child.jjtSetValue(expressions[index]);
+
+            root.jjtAddChild(child, index);
+        }
+
+        return compiler.compile(sql, root);
+    }
+
+    private Node node(Token... tokens) {
         for (int index = 0; index + 1 < tokens.length; index++) {
             tokens[index].next = tokens[index + 1];
         }
@@ -161,7 +233,21 @@ class SqlParameterCompilerTest {
         node.jjtSetFirstToken(tokens[0]);
         node.jjtSetLastToken(tokens[tokens.length - 1]);
 
-        return compiler.compile(sql, node);
+        return node;
+    }
+
+    private CastExpression cast(Expression operand) {
+        CastExpression cast = new CastExpression();
+
+        cast.setLeftExpression(operand);
+        cast.setColDataType(new ColDataType("bigint"));
+
+        return cast;
+    }
+
+    private JdbcNamedParameter namedParameter(String parameterCharacter, String name) {
+        return new JdbcNamedParameter(name)
+            .setParameterCharacter(parameterCharacter);
     }
 
     /**

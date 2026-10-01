@@ -2770,8 +2770,8 @@ class QueryAnalyzerTest {
 
     /**
      * A qualified, quoted, or {@code &name} placeholder is rejected wherever it
-     * appears, including a clause this analyzer does not traverse, because the
-     * executable SQL would otherwise keep it.
+     * appears, including a clause this analyzer does not traverse and the
+     * operand of a cast, because the executable SQL would otherwise keep it.
      */
     @ParameterizedTest
     @CsvSource(
@@ -2785,7 +2785,12 @@ class QueryAnalyzerTest {
             "SELECT id FROM users WHERE id = :id ORDER BY &x|&x",
             "SELECT id FROM users WHERE id = abs(:\"x\")|:\"x\"",
             "SELECT id FROM users WHERE id = abs(&x)|&x",
-            "SELECT id FROM users WHERE id = abs(:a.b)|:a.b"
+            "SELECT id FROM users WHERE id = abs(:a.b)|:a.b",
+            "SELECT id FROM users WHERE id = :\"x\"::bigint|:\"x\"",
+            "SELECT id FROM users WHERE id = &x::bigint|&x",
+            "SELECT id FROM users WHERE id = :a.b::bigint|:a.b",
+            "SELECT id FROM users WHERE id = :\"x\"::int::bigint|:\"x\"",
+            "SELECT id FROM users WHERE id = :id ORDER BY &x::int|&x"
         }
     )
     void shouldRejectUnsupportedNamedPlaceholderForm(String sql, String placeholder) {
@@ -2843,6 +2848,392 @@ class QueryAnalyzerTest {
 
         assertEquals(
             "Placeholder :value has conflicting types: Long and String",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A cast types the placeholder it casts wherever that placeholder appears
+     * inside an analyzed clause, so the optional filter idiom is one parameter
+     * of the cast's type: the occurrence under the cast and the compared
+     * occurrence are one named placeholder.
+     */
+    @Test
+    void shouldResolveNamedCastParameterOfOptionalFilter() {
+        String sql = "SELECT id FROM users WHERE (:name::text IS NULL OR name = :name)";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "name", ColumnType.TEXT)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 1), model.bindingParameterIndexes());
+
+        assertEquals(
+            "SELECT id FROM users WHERE (?::text IS NULL OR name = ?)",
+            model.executableSql()
+        );
+    }
+
+    /**
+     * A computed {@code LIKE} pattern is not analyzed as a pattern, but the
+     * cast placeholder inside it is typed by its cast and named after itself.
+     */
+    @Test
+    void shouldResolveNamedCastParameterInsideComputedLikePattern() {
+        String sql = "SELECT id FROM users WHERE name LIKE '%' || :term::text || '%'";
+
+        QueryModel model = analyzer.analyze(
+            new Query("SearchUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "term", ColumnType.TEXT)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+
+        assertEquals(
+            "SELECT id FROM users WHERE name LIKE '%' || ?::text || '%'",
+            model.executableSql()
+        );
+    }
+
+    /**
+     * A cast placeholder inside a computed assignment is typed by its cast, and
+     * the parameters stay in first-occurrence order with the assignment bound
+     * before the predicate.
+     */
+    @Test
+    void shouldResolveNamedCastParameterInsideUpdateAssignment() {
+        String sql = "UPDATE users SET bio = COALESCE(:bio::text, bio) WHERE id = :id";
+
+        QueryModel model = analyzer.analyze(
+            new Query("UpdateUserBio", QueryType.EXEC, sql),
+            parser.parse(sql),
+            predicateSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "bio", ColumnType.TEXT),
+                new QueryParameter(2, "id", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+
+        assertEquals(
+            "UPDATE users SET bio = COALESCE(?::text, bio) WHERE id = ?",
+            model.executableSql()
+        );
+    }
+
+    /**
+     * The {@code CAST} spelling types a placeholder like {@code ::} does, and a
+     * cast placeholder compared with a column keeps that column's name.
+     */
+    @Test
+    void shouldResolveCastKeywordParameterNamedAfterItsComparedColumn() {
+        String sql = "SELECT id FROM users WHERE id = CAST($1 AS bigint)";
+
+        QueryModel model = analyzer.analyze(
+            new Query("FindUser", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            model.parameters()
+        );
+
+        assertEquals(
+            "SELECT id FROM users WHERE id = CAST(? AS bigint)",
+            model.executableSql()
+        );
+    }
+
+    /**
+     * A cast placeholder that is the direct value of a location that names an
+     * uncast placeholder after its column keeps that column's name and takes
+     * the cast's type.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "SELECT id FROM users WHERE name = $1::text",
+            "SELECT id FROM users WHERE $1::text = name",
+            "SELECT id FROM users WHERE name <> $1::text",
+            "SELECT id FROM users WHERE name IN ($1::text, 'a')",
+            "SELECT id FROM users WHERE name BETWEEN $1::text AND 'z'",
+            "SELECT id FROM users WHERE name LIKE $1::text"
+        }
+    )
+    void shouldNameCastParameterAfterItsColumn(String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("FindUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "name", ColumnType.TEXT)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A cast pattern is accepted in a pattern shape that rejects an uncast
+     * pattern placeholder, but no column names it there, so it is named after
+     * its own index while keeping the cast's type and its binding position.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "SELECT id FROM users WHERE name SIMILAR TO $1::text",
+            "SELECT id FROM users WHERE name NOT LIKE $1::text",
+            "SELECT id FROM users WHERE name NOT ILIKE $1::text",
+            "SELECT id FROM users WHERE name LIKE $1::text ESCAPE '!'"
+        }
+    )
+    void shouldNameCastPatternAfterItsPlaceholderInAnUntypedPatternShape(String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("FindUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "param1", ColumnType.TEXT)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+    }
+
+    /** A named cast pattern keeps its own name in every pattern shape. */
+    @Test
+    void shouldNameNamedCastPatternAfterItsPlaceholder() {
+        String sql = "SELECT id FROM users WHERE name NOT LIKE :p::text";
+
+        QueryModel model = analyzer.analyze(
+            new Query("FindUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "p", ColumnType.TEXT)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+
+        assertEquals(
+            "SELECT id FROM users WHERE name NOT LIKE ?::text",
+            model.executableSql()
+        );
+    }
+
+    /** A cast may name a declared enum type, which types its placeholder. */
+    @Test
+    void shouldResolveEnumCastParameter() {
+        String sql = "SELECT id FROM stages WHERE setting = $1::stage_setting";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListStages", QueryType.MANY, sql),
+            parser.parse(sql),
+            enumSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "setting", ColumnType.ENUM, "stage_setting")
+            ),
+            model.parameters()
+        );
+    }
+
+    /**
+     * A cast of a one-dimensional array types its placeholder as a list of the
+     * element type. The array overlap operator is not one of the supported
+     * comparisons, so its placeholder is named after itself rather than after
+     * the column.
+     */
+    @Test
+    void shouldResolveArrayCastParameterNamedAfterItsPlaceholder() {
+        String sql = "SELECT id FROM stages WHERE tags && $1::varchar[]";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListStagesByTags", QueryType.MANY, sql),
+            parser.parse(sql),
+            arraySchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "param1", ColumnType.VARCHAR, null, true)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(
+            "SELECT id FROM stages WHERE tags && ?::varchar[]",
+            model.executableSql()
+        );
+    }
+
+    /** A blank-padded character cast keeps PostgreSQL's own name of the type. */
+    @Test
+    void shouldResolveBlankPaddedCastParameter() {
+        String sql = "SELECT id FROM users WHERE bio = $1::char (3)";
+
+        QueryModel model = analyzer.analyze(
+            new Query("FindUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            predicateSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "bio", ColumnType.VARCHAR, null, false, true)
+            ),
+            model.parameters()
+        );
+    }
+
+    /**
+     * An indexed cast placeholder in a location that names no column is named
+     * after its own index, and a later occurrence of the index keeps that name
+     * and type.
+     */
+    @Test
+    void shouldNameIndexedCastParameterAfterItsIndex() {
+        String sql = "SELECT id FROM users WHERE ($1::text IS NULL OR name = $1)";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "param1", ColumnType.TEXT)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * An inserted value that is a cast placeholder keeps its column's name,
+     * while a cast placeholder inside a computed value is named after itself.
+     */
+    @Test
+    void shouldResolveCastParametersOfInsertValues() {
+        String sql = "INSERT INTO users (id, bio) VALUES ($1::bigint, COALESCE($2::text, ''))";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CreateUser", QueryType.EXEC, sql),
+            parser.parse(sql),
+            writeSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "param2", ColumnType.TEXT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A cast type sqlcj does not map, including an array of more than one
+     * dimension, is rejected naming the placeholder it would have typed and
+     * the declared type.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        value = {
+            "SELECT id FROM users WHERE id = $1::interval|$1|INTERVAL",
+            "SELECT id FROM users WHERE id = $1::int[][]|$1|INT[][]",
+            "SELECT id FROM users WHERE id = :value::interval|:value|INTERVAL"
+        }
+    )
+    void shouldRejectUnsupportedCastType(String sql, String placeholder, String type) {
+        Query query = new Query("FindUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(
+            "Placeholder %s has unsupported cast type %s".formatted(placeholder, type),
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * One placeholder whose cast occurrence and column occurrence resolve to
+     * different Java types is rejected like any other conflicting placeholder.
+     */
+    @Test
+    void shouldRejectCastOccurrenceWithConflictingType() {
+        String sql = "SELECT id FROM users WHERE (:value::text IS NULL OR id = :value)";
+
+        Query query = new Query("ListUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(
+            "Placeholder :value has conflicting types: String and Long",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A cast does not make a placeholder analyzable in a clause this analyzer
+     * does not traverse, so such a placeholder stays rejected by the
+     * placeholder accounting.
+     */
+    @Test
+    void shouldRejectCastPlaceholderInUnanalyzedLocation() {
+        String sql = "SELECT id FROM users WHERE id = $1 ORDER BY $2::int";
+
+        Query query = new Query("ListUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(
+            "SQL placeholders [1, 2] are not the analyzed parameters [1]; "
+                + "a placeholder is in an unsupported location",
             exception.getMessage()
         );
     }

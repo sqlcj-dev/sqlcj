@@ -1,7 +1,6 @@
 package dev.sqlcj.schema.parser;
 
 import dev.sqlcj.schema.Column;
-import dev.sqlcj.schema.ColumnType;
 import dev.sqlcj.schema.Constraint;
 import dev.sqlcj.schema.ConstraintType;
 import dev.sqlcj.schema.EnumType;
@@ -51,9 +50,6 @@ import java.util.regex.Pattern;
 
 public class DefaultSchemaParser implements SchemaParser {
 
-    /** One parenthesized type argument group, such as {@code (10, 2)}. */
-    private static final Pattern TYPE_ARGUMENTS = Pattern.compile("\\([^)]*\\)");
-
     /**
      * The opening words of an {@code ALTER INDEX} statement, which the parser
      * reports only as an opaque unsupported statement.
@@ -62,6 +58,9 @@ public class DefaultSchemaParser implements SchemaParser {
         "^ALTER\\s+INDEX\\b",
         Pattern.CASE_INSENSITIVE
     );
+
+    /** Resolves the type a column declaration states. */
+    private final ColumnTypeMapping columnTypeMapping = new ColumnTypeMapping();
 
     @Override
     public Schema parse(Schema schema, String sql) {
@@ -817,111 +816,25 @@ public class DefaultSchemaParser implements SchemaParser {
     }
 
     /**
-     * Parses one column, recording a column sqlcj cannot map with its declared
-     * type text instead of failing the schema. A column declared with exactly
-     * one array dimension is an array of its declared element type; a column of
-     * more dimensions, and an array whose element type has no array mapping, is
-     * recorded like any other unmapped column.
+     * Parses one column, whose declared type the shared column type mapping
+     * resolves or records with its declared type text instead of failing the
+     * schema.
      */
     private Column parseColumn(ColumnDefinition definition, List<EnumType> enums) {
-        String typeName = typeName(definition);
-        int arrayDimensions = arrayDimensions(definition);
-        boolean nullable = !isSerial(typeName) && isNullable(definition);
-        boolean array = arrayDimensions == 1;
-
-        ColumnType type = arrayDimensions <= 1
-            ? columnType(typeName)
-            : null;
-
-        if (type != null) {
-            if (!array || isArrayElementType(type)) {
-                return new Column(
-                    columnName(definition),
-                    type,
-                    nullable,
-                    null,
-                    null,
-                    array,
-                    isBlankPadded(typeName)
-                );
-            }
-        } else if (arrayDimensions <= 1) {
-            EnumType enumType = declaredEnum(definition, enums);
-
-            if (enumType != null) {
-                return new Column(
-                    columnName(definition),
-                    ColumnType.ENUM,
-                    nullable,
-                    null,
-                    enumType.name(),
-                    array
-                );
-            }
-        }
+        ColumnTypeMapping.MappedType mappedType = columnTypeMapping.map(
+            definition.getColDataType(),
+            enums
+        );
 
         return new Column(
             columnName(definition),
-            null,
-            nullable,
-            typeName + "[]".repeat(arrayDimensions)
+            mappedType.type(),
+            !isSerial(mappedType.typeName()) && isNullable(definition),
+            mappedType.unsupportedType(),
+            mappedType.enumType(),
+            mappedType.array(),
+            mappedType.blankPadded()
         );
-    }
-
-    /**
-     * Reports whether a declared spelling is the blank-padded character type,
-     * which PostgreSQL names {@code bpchar} and maps like {@code VARCHAR}. The
-     * distinction is kept because the two names are not interchangeable where
-     * PostgreSQL resolves an array type from its element's name.
-     */
-    private boolean isBlankPadded(String typeName) {
-        return switch (typeName) {
-            case "CHAR", "CHARACTER" -> true;
-            default -> false;
-        };
-    }
-
-    /**
-     * Reports whether an array of a mapped type is mapped as well.
-     * {@code BYTEA}, {@code JSON}, and {@code JSONB} arrays are recorded with
-     * their declared type instead, because their elements are bound and read as
-     * text or bytes rather than as a value of a mapped element type.
-     */
-    private boolean isArrayElementType(ColumnType type) {
-        return type != ColumnType.BYTEA
-            && type != ColumnType.JSON
-            && type != ColumnType.JSONB;
-    }
-
-    /**
-     * The enum type a column of an unmapped type names, or {@code null} when
-     * the schema declares no such type. The declared type is matched without
-     * its SQL identifier delimiters and case-insensitively, as PostgreSQL
-     * resolves an unquoted type name.
-     */
-    private EnumType declaredEnum(ColumnDefinition definition, List<EnumType> enums) {
-        String declaredType = MultiPartName.unquote(
-            definition.getColDataType().getDataType()
-        );
-
-        int index = indexOfEnum(enums, declaredType);
-
-        return index < 0
-            ? null
-            : enums.get(index);
-    }
-
-    /**
-     * Reports how many array dimensions a column declares. The parser reports
-     * an array's dimensions separately from its element type, so a column with
-     * any dimension is an array of the reported type.
-     */
-    private int arrayDimensions(ColumnDefinition definition) {
-        List<Integer> arrayData = definition.getColDataType().getArrayData();
-
-        return arrayData == null
-            ? 0
-            : arrayData.size();
     }
 
     /**
@@ -929,47 +842,6 @@ public class DefaultSchemaParser implements SchemaParser {
      */
     private String columnName(ColumnDefinition definition) {
         return MultiPartName.unquote(definition.getColumnName());
-    }
-
-    /**
-     * Returns the canonical spelling of a declared SQL type: upper case,
-     * without type arguments such as a length or a precision, and with single
-     * spaces between the remaining words.
-     */
-    private String typeName(ColumnDefinition definition) {
-        String dataType = definition.getColDataType()
-            .getDataType()
-            .toUpperCase(Locale.ROOT);
-
-        return TYPE_ARGUMENTS
-            .matcher(dataType)
-            .replaceAll(" ")
-            .replaceAll("\\s+", " ")
-            .trim();
-    }
-
-    /** The mapped type of declared spelling, or {@code null} if unmapped. */
-    private ColumnType columnType(String typeName) {
-        return switch (typeName) {
-            case "INTEGER", "INT", "INT4", "SERIAL", "SERIAL4" -> ColumnType.INTEGER;
-            case "BIGINT", "INT8", "BIGSERIAL", "SERIAL8" -> ColumnType.BIGINT;
-            case "SMALLINT", "INT2", "SMALLSERIAL", "SERIAL2" -> ColumnType.SMALLINT;
-            case "BOOLEAN", "BOOL" -> ColumnType.BOOLEAN;
-            case "VARCHAR", "CHARACTER VARYING", "CHAR", "CHARACTER" -> ColumnType.VARCHAR;
-            case "TEXT" -> ColumnType.TEXT;
-            case "DATE" -> ColumnType.DATE;
-            case "TIME", "TIME WITHOUT TIME ZONE" -> ColumnType.TIME;
-            case "TIMESTAMP", "TIMESTAMP WITHOUT TIME ZONE" -> ColumnType.TIMESTAMP;
-            case "TIMESTAMP WITH TIME ZONE", "TIMESTAMPTZ" -> ColumnType.TIMESTAMP_WITH_TIME_ZONE;
-            case "DECIMAL", "NUMERIC" -> ColumnType.DECIMAL;
-            case "REAL", "FLOAT4" -> ColumnType.REAL;
-            case "DOUBLE PRECISION", "FLOAT8" -> ColumnType.DOUBLE_PRECISION;
-            case "UUID" -> ColumnType.UUID;
-            case "BYTEA" -> ColumnType.BYTEA;
-            case "JSON" -> ColumnType.JSON;
-            case "JSONB" -> ColumnType.JSONB;
-            default -> null;
-        };
     }
 
     /**

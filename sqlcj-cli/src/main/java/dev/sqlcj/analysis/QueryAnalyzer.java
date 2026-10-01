@@ -4,11 +4,14 @@ import dev.sqlcj.parser.Query;
 import dev.sqlcj.parser.QueryType;
 import dev.sqlcj.schema.ColumnType;
 import dev.sqlcj.schema.Schema;
+import dev.sqlcj.schema.parser.ColumnTypeMapping;
 import dev.sqlcj.sql.ParsedSql;
 import dev.sqlcj.type.DefaultTypeResolver;
 import dev.sqlcj.type.TypeResolver;
 import net.sf.jsqlparser.expression.Alias;
+import net.sf.jsqlparser.expression.CastExpression;
 import net.sf.jsqlparser.expression.Expression;
+import net.sf.jsqlparser.expression.ExpressionVisitorAdapter;
 import net.sf.jsqlparser.expression.Function;
 import net.sf.jsqlparser.expression.JdbcNamedParameter;
 import net.sf.jsqlparser.expression.JdbcParameter;
@@ -18,9 +21,14 @@ import net.sf.jsqlparser.expression.operators.relational.Between;
 import net.sf.jsqlparser.expression.operators.relational.ComparisonOperator;
 import net.sf.jsqlparser.expression.operators.relational.EqualsTo;
 import net.sf.jsqlparser.expression.operators.relational.ExpressionList;
+import net.sf.jsqlparser.expression.operators.relational.GreaterThan;
+import net.sf.jsqlparser.expression.operators.relational.GreaterThanEquals;
 import net.sf.jsqlparser.expression.operators.relational.InExpression;
 import net.sf.jsqlparser.expression.operators.relational.IsNullExpression;
 import net.sf.jsqlparser.expression.operators.relational.LikeExpression;
+import net.sf.jsqlparser.expression.operators.relational.MinorThan;
+import net.sf.jsqlparser.expression.operators.relational.MinorThanEquals;
+import net.sf.jsqlparser.expression.operators.relational.NotEqualsTo;
 import net.sf.jsqlparser.expression.operators.relational.ParenthesedExpressionList;
 import net.sf.jsqlparser.schema.Table;
 import net.sf.jsqlparser.statement.ReturningClause;
@@ -75,10 +83,19 @@ public final class QueryAnalyzer {
     private static final String OFFSET_PARAMETER_NAME = "offset";
 
     /**
+     * The prefix of the name an indexed placeholder takes where no column of
+     * the query names it, which a cast types wherever it appears.
+     */
+    private static final String INDEXED_PARAMETER_NAME_PREFIX = "param";
+
+    /**
      * Resolves the Java type of parameter occurrence, which decides whether a
      * repeated placeholder index can share one generated parameter.
      */
     private final TypeResolver typeResolver = new DefaultTypeResolver();
+
+    /** Resolves the type a cast states, as a schema column declares its own. */
+    private final ColumnTypeMapping columnTypeMapping = new ColumnTypeMapping();
 
     /**
      * One query source and the name it exposes to column references, which is
@@ -109,6 +126,19 @@ public final class QueryAnalyzer {
                 ? clauseName
                 : name;
         }
+
+        /** The placeholder as the query spells it. */
+        private String spelled() {
+            return name == null
+                ? "$" + index
+                : NAME_PREFIX + name;
+        }
+    }
+
+    /**
+     * One placeholder occurrence a cast types, and the type that cast states.
+     */
+    private record CastPlaceholder(Placeholder placeholder, ColumnTypeMapping.MappedType type) {
     }
 
     /**
@@ -121,10 +151,22 @@ public final class QueryAnalyzer {
         /** The compiled placeholder names in logical parameter order. */
         private final List<String> names;
 
+        /** The schema whose declared enum types a cast may name. */
+        private final Schema schema;
+
+        /** Resolves the type a cast states. */
+        private final ColumnTypeMapping columnTypeMapping;
+
         private final List<QueryParameter> occurrences = new ArrayList<>();
 
-        private Placeholders(List<String> names) {
+        private Placeholders(
+            List<String> names,
+            Schema schema,
+            ColumnTypeMapping columnTypeMapping
+        ) {
             this.names = names;
+            this.schema = schema;
+            this.columnTypeMapping = columnTypeMapping;
         }
 
         /**
@@ -148,6 +190,43 @@ public final class QueryAnalyzer {
             }
 
             return null;
+        }
+
+        /**
+         * Reports the placeholder a cast types, which is the placeholder the
+         * cast states as its direct operand, and {@code null} when the
+         * expression is not such a cast. A cast that declares a row type
+         * instead of a type name states no column type, so it types no
+         * placeholder.
+         *
+         * <p>The cast states the parameter's type, so a type the schema's
+         * column type mapping does not map is rejected here, where the
+         * placeholder it would have typed is known.
+         */
+        private CastPlaceholder ofCast(Expression expression) {
+            if (!(expression instanceof CastExpression cast) || cast.getColDataType() == null) {
+                return null;
+            }
+
+            Placeholder placeholder = of(cast.getLeftExpression());
+
+            if (placeholder == null) {
+                return null;
+            }
+
+            ColumnTypeMapping.MappedType type = columnTypeMapping.map(
+                cast.getColDataType(),
+                schema.enums()
+            );
+
+            if (!type.mapped()) {
+                throw new UnsupportedOperationException(
+                    "Placeholder %s has unsupported cast type %s"
+                        .formatted(placeholder.spelled(), type.unsupportedType())
+                );
+            }
+
+            return new CastPlaceholder(placeholder, type);
         }
 
         private int requireCompiledName(JdbcNamedParameter named) {
@@ -211,7 +290,7 @@ public final class QueryAnalyzer {
 
         List<QueryColumn> columns = resolveColumns(plainSelect, sources);
 
-        Placeholders placeholders = toPlaceholders(parsedSql);
+        Placeholders placeholders = toPlaceholders(parsedSql, schema);
 
         resolveBindingParameters(plainSelect, sources, placeholders);
 
@@ -243,7 +322,7 @@ public final class QueryAnalyzer {
             rowTable = resolveReturningRowTable(returningClause, source);
         }
 
-        Placeholders placeholders = toPlaceholders(parsedSql);
+        Placeholders placeholders = toPlaceholders(parsedSql, schema);
 
         resolveInsertParameters(insert, source.table(), placeholders);
 
@@ -275,7 +354,7 @@ public final class QueryAnalyzer {
             rowTable = resolveReturningRowTable(returningClause, source);
         }
 
-        Placeholders placeholders = toPlaceholders(parsedSql);
+        Placeholders placeholders = toPlaceholders(parsedSql, schema);
 
         resolveUpdateSetParameters(update, source.table(), placeholders);
 
@@ -311,7 +390,7 @@ public final class QueryAnalyzer {
             rowTable = resolveReturningRowTable(returningClause, source);
         }
 
-        Placeholders placeholders = toPlaceholders(parsedSql);
+        Placeholders placeholders = toPlaceholders(parsedSql, schema);
 
         if (delete.getWhere() != null) {
             resolveParameters(delete.getWhere(), List.of(source), placeholders);
@@ -512,8 +591,8 @@ public final class QueryAnalyzer {
     /**
      * Resolves the {@code INSERT} parameters by pairing the explicit column
      * list with the single values row, which is also their textual order. A
-     * value that is not a placeholder binds nothing and reaches the database as
-     * written, so only its target column must exist.
+     * value that binds no placeholder reaches the database as written, so only
+     * its target column must exist.
      */
     private void resolveInsertParameters(
         Insert insert,
@@ -536,14 +615,12 @@ public final class QueryAnalyzer {
 
         for (int index = 0; index < columns.size(); index++) {
             String columnName = columns.get(index).getUnquotedColumnName();
-            Placeholder placeholder = placeholders.of(values.get(index));
 
-            if (placeholder == null) {
-                findColumn(table, columnName);
-                continue;
-            }
-
-            addParameter(placeholder, columnName, table, placeholders);
+            resolveColumnValue(
+                values.get(index),
+                findColumn(table, columnName),
+                placeholders
+            );
         }
     }
 
@@ -562,8 +639,8 @@ public final class QueryAnalyzer {
     /**
      * Resolves the {@code UPDATE} assignment parameters in source order, which
      * precedes any parameter in the {@code WHERE} expression. An assigned value
-     * that is not a placeholder binds nothing and reaches the database as
-     * written, so only its target column must exist.
+     * that binds no placeholder reaches the database as written, so only its
+     * target column must exist.
      */
     private void resolveUpdateSetParameters(
         Update update,
@@ -578,14 +655,12 @@ public final class QueryAnalyzer {
             }
 
             String columnName = updateSet.getColumn(0).getUnquotedColumnName();
-            Placeholder placeholder = placeholders.of(updateSet.getValue(0));
 
-            if (placeholder == null) {
-                findColumn(table, columnName);
-                continue;
-            }
-
-            addParameter(placeholder, columnName, table, placeholders);
+            resolveColumnValue(
+                updateSet.getValue(0),
+                findColumn(table, columnName),
+                placeholders
+            );
         }
     }
 
@@ -1061,7 +1136,7 @@ public final class QueryAnalyzer {
         }
 
         if (expression instanceof IsNullExpression isNull) {
-            resolveIsNullExpression(isNull, sources);
+            resolveIsNullExpression(isNull, sources, placeholders);
             return;
         }
 
@@ -1071,17 +1146,18 @@ public final class QueryAnalyzer {
         }
 
         if (expression instanceof ComparisonOperator comparison) {
-            resolveParameterComparison(
-                comparison.getLeftExpression(),
-                comparison.getRightExpression(),
-                sources,
-                placeholders
-            );
+            resolveParameterComparison(comparison, sources, placeholders);
+            return;
         }
+
+        resolveCastPlaceholders(expression, placeholders);
     }
 
     private void resolveInExpression(InExpression in, List<Source> sources, Placeholders placeholders) {
         if (!(in.getLeftExpression() instanceof net.sf.jsqlparser.schema.Column column)) {
+            resolveCastPlaceholders(in.getLeftExpression(), placeholders);
+            resolveCastPlaceholders(in.getRightExpression(), placeholders);
+
             return;
         }
 
@@ -1091,11 +1167,7 @@ public final class QueryAnalyzer {
 
         if (rightExpression instanceof ExpressionList<?> expressionList) {
             for (Expression expression : expressionList) {
-                Placeholder placeholder = placeholders.of(expression);
-
-                if (placeholder != null) {
-                    addParameter(placeholder, schemaColumn, placeholders);
-                }
+                resolveColumnValue(expression, schemaColumn, placeholders);
             }
 
             return;
@@ -1172,7 +1244,18 @@ public final class QueryAnalyzer {
                     );
                 }
             }
+
+            return;
         }
+
+        CastPlaceholder cast = placeholders.ofCast(expression);
+
+        if (cast != null) {
+            addCastParameter(cast, schemaColumn.name(), placeholders);
+            return;
+        }
+
+        resolveCastPlaceholders(expression, placeholders);
     }
 
     /**
@@ -1180,6 +1263,13 @@ public final class QueryAnalyzer {
      * {@code <column> ILIKE $N}, typed from the tested text column. A pattern
      * that binds no placeholder reaches the database as written, so a literal
      * pattern stays unanalyzed.
+     *
+     * <p>A cast pattern states its own type, so the pattern shape and the
+     * tested column's type restrict only an uncast pattern, which takes the
+     * tested column's type. A cast pattern keeps the tested column's name only
+     * in the shape that accepts an uncast pattern, because only there would an
+     * uncast pattern be named after that column; in every other shape it is
+     * named after its own placeholder.
      */
     private void resolveLikeExpression(
         LikeExpression like,
@@ -1197,25 +1287,44 @@ public final class QueryAnalyzer {
 
         Placeholder pattern = placeholders.of(right);
 
-        if (pattern == null) {
+        if (pattern != null) {
+            requireSupportedLikePattern(like);
+
+            if (!(left instanceof net.sf.jsqlparser.schema.Column column)) {
+                return;
+            }
+
+            dev.sqlcj.schema.Column schemaColumn = resolveColumn(column, sources).column();
+
+            requireSupportedType(schemaColumn);
+
+            addParameter(
+                pattern,
+                requireTextColumn(schemaColumn),
+                placeholders
+            );
+
             return;
         }
 
-        requireSupportedLikePattern(like);
+        CastPlaceholder castPattern = placeholders.ofCast(right);
 
-        if (!(left instanceof net.sf.jsqlparser.schema.Column column)) {
+        if (
+            castPattern != null
+                && unsupportedLikePatternReason(like) == null
+                && left instanceof net.sf.jsqlparser.schema.Column column
+        ) {
+            addCastParameter(
+                castPattern,
+                resolveColumn(column, sources).column().name(),
+                placeholders
+            );
+
             return;
         }
 
-        dev.sqlcj.schema.Column schemaColumn = resolveColumn(column, sources).column();
-
-        requireSupportedType(schemaColumn);
-
-        addParameter(
-            pattern,
-            requireTextColumn(schemaColumn),
-            placeholders
-        );
+        resolveCastPlaceholders(left, placeholders);
+        resolveCastPlaceholders(right, placeholders);
     }
 
     /**
@@ -1224,31 +1333,39 @@ public final class QueryAnalyzer {
      * pattern match.
      */
     private void requireSupportedLikePattern(LikeExpression like) {
+        String reason = unsupportedLikePatternReason(like);
+
+        if (reason != null) {
+            throw new UnsupportedOperationException(reason);
+        }
+    }
+
+    /**
+     * Reports why a {@code LIKE} expression is not the pattern shape this
+     * subset types, and {@code null} when it is that shape. The reason is the
+     * rejection of an uncast pattern placeholder, and it is also what decides
+     * whether a cast pattern is named after the tested column.
+     */
+    private String unsupportedLikePatternReason(LikeExpression like) {
         if (like.isNot()) {
-            throw new UnsupportedOperationException(
-                "A negated LIKE pattern placeholder is not supported."
-            );
+            return "A negated LIKE pattern placeholder is not supported.";
         }
 
         LikeExpression.KeyWord keyword = like.getLikeKeyWord();
 
         if (keyword != LikeExpression.KeyWord.LIKE && keyword != LikeExpression.KeyWord.ILIKE) {
-            throw new UnsupportedOperationException(
-                "Only LIKE and ILIKE pattern placeholders are supported, but was: " + keyword
-            );
+            return "Only LIKE and ILIKE pattern placeholders are supported, but was: " + keyword;
         }
 
         if (like.getEscape() != null) {
-            throw new UnsupportedOperationException(
-                "A LIKE pattern placeholder must not have an ESCAPE clause."
-            );
+            return "A LIKE pattern placeholder must not have an ESCAPE clause.";
         }
 
         if (like.isUseBinary()) {
-            throw new UnsupportedOperationException(
-                "A binary LIKE pattern placeholder is not supported."
-            );
+            return "A binary LIKE pattern placeholder is not supported.";
         }
+
+        return null;
     }
 
     /**
@@ -1275,13 +1392,23 @@ public final class QueryAnalyzer {
 
     /**
      * Resolves the tested column of {@code IS NULL} and {@code IS NOT NULL}
-     * against the query sources. The predicate binds no placeholder, so it
-     * contributes no parameter and reaches the database as written.
+     * against the query sources. The predicate names no parameter after its
+     * tested value, so a tested value that is not a direct column contributes
+     * only the parameters its own cast placeholders state.
      */
-    private void resolveIsNullExpression(IsNullExpression isNull, List<Source> sources) {
-        if (isNull.getLeftExpression() instanceof net.sf.jsqlparser.schema.Column column) {
+    private void resolveIsNullExpression(
+        IsNullExpression isNull,
+        List<Source> sources,
+        Placeholders placeholders
+    ) {
+        Expression tested = isNull.getLeftExpression();
+
+        if (tested instanceof net.sf.jsqlparser.schema.Column column) {
             resolveColumn(column, sources);
+            return;
         }
+
+        resolveCastPlaceholders(tested, placeholders);
     }
 
     /**
@@ -1297,36 +1424,45 @@ public final class QueryAnalyzer {
         Placeholders placeholders
     ) {
         Expression left = between.getLeftExpression();
+        Expression start = between.getBetweenExpressionStart();
+        Expression end = between.getBetweenExpressionEnd();
 
-        Placeholder tested = placeholders.of(left);
-        Placeholder start = placeholders.of(between.getBetweenExpressionStart());
-        Placeholder end = placeholders.of(between.getBetweenExpressionEnd());
-
-        if (tested != null || (start == null && end == null)) {
+        if (placeholders.of(left) != null) {
             return;
         }
 
-        if (!(left instanceof net.sf.jsqlparser.schema.Column column)) {
+        if (
+            left instanceof net.sf.jsqlparser.schema.Column column
+                && (bindsValue(start, placeholders) || bindsValue(end, placeholders))
+        ) {
+            dev.sqlcj.schema.Column schemaColumn = resolveColumn(column, sources).column();
+
+            resolveColumnValue(start, schemaColumn, placeholders);
+            resolveColumnValue(end, schemaColumn, placeholders);
+
             return;
         }
 
-        dev.sqlcj.schema.Column schemaColumn = resolveColumn(column, sources).column();
-
-        if (start != null) {
-            addParameter(start, schemaColumn, placeholders);
-        }
-
-        if (end != null) {
-            addParameter(end, schemaColumn, placeholders);
-        }
+        resolveCastPlaceholders(left, placeholders);
+        resolveCastPlaceholders(start, placeholders);
+        resolveCastPlaceholders(end, placeholders);
     }
 
+    /**
+     * Resolves the operands of one comparison, which names a parameter after
+     * the column it compares. A placeholder compared with a column takes that
+     * column's type, and a cast placeholder states its own type and keeps the
+     * column's name. Every other operand contributes only the parameters its
+     * own cast placeholders state.
+     */
     private void resolveParameterComparison(
-        Expression left,
-        Expression right,
+        ComparisonOperator comparison,
         List<Source> sources,
         Placeholders placeholders
     ) {
+        Expression left = comparison.getLeftExpression();
+        Expression right = comparison.getRightExpression();
+
         Placeholder leftPlaceholder = placeholders.of(left);
         Placeholder rightPlaceholder = placeholders.of(right);
 
@@ -1345,18 +1481,156 @@ public final class QueryAnalyzer {
                 resolveColumn(column, sources).column(),
                 placeholders
             );
+            return;
         }
+
+        if (isColumnTypedComparison(comparison)) {
+            if (left instanceof net.sf.jsqlparser.schema.Column column) {
+                CastPlaceholder cast = placeholders.ofCast(right);
+
+                if (cast != null) {
+                    addCastParameter(
+                        cast,
+                        resolveColumn(column, sources).column().name(),
+                        placeholders
+                    );
+                    return;
+                }
+            } else if (right instanceof net.sf.jsqlparser.schema.Column column) {
+                CastPlaceholder cast = placeholders.ofCast(left);
+
+                if (cast != null) {
+                    addCastParameter(
+                        cast,
+                        resolveColumn(column, sources).column().name(),
+                        placeholders
+                    );
+                    return;
+                }
+            }
+        }
+
+        resolveCastPlaceholders(left, placeholders);
+        resolveCastPlaceholders(right, placeholders);
     }
 
-    private void addParameter(
-        Placeholder placeholder,
-        String columnName,
-        dev.sqlcj.schema.Table table,
+    /**
+     * Reports whether a comparison is one of the supported predicate
+     * comparisons, whose operand is a value of the compared column's type and
+     * therefore names its parameter after that column. Another operator the
+     * parser reports as a comparison, such as the array overlap {@code &&},
+     * compares something other than one column value, so a cast placeholder
+     * there is named after itself.
+     */
+    private boolean isColumnTypedComparison(ComparisonOperator comparison) {
+        return comparison instanceof EqualsTo
+            || comparison instanceof NotEqualsTo
+            || comparison instanceof GreaterThan
+            || comparison instanceof GreaterThanEquals
+            || comparison instanceof MinorThan
+            || comparison instanceof MinorThanEquals;
+    }
+
+    /**
+     * Resolves one value of a clause that names its parameter after a column: a
+     * placeholder typed from the column, a cast placeholder that states its own
+     * type and keeps the column's name, or an expression that is neither, which
+     * contributes only the parameters its own cast placeholders state.
+     */
+    private void resolveColumnValue(
+        Expression value,
+        dev.sqlcj.schema.Column column,
         Placeholders placeholders
     ) {
+        Placeholder placeholder = placeholders.of(value);
+
+        if (placeholder != null) {
+            addParameter(placeholder, column, placeholders);
+            return;
+        }
+
+        CastPlaceholder cast = placeholders.ofCast(value);
+
+        if (cast != null) {
+            addCastParameter(cast, column.name(), placeholders);
+            return;
+        }
+
+        resolveCastPlaceholders(value, placeholders);
+    }
+
+    /**
+     * Reports whether an expression is itself the value of one parameter, which
+     * is a placeholder or a cast of one.
+     */
+    private boolean bindsValue(Expression value, Placeholders placeholders) {
+        return placeholders.of(value) != null || placeholders.ofCast(value) != null;
+    }
+
+    /**
+     * Binds every cast placeholder an expression contains that no clause of the
+     * query names, each after its own placeholder, in textual order. The
+     * expression visitor reports an expression's parts in the order the query
+     * writes them and does not descend into a subquery, whose placeholders are
+     * not analyzed.
+     */
+    private void resolveCastPlaceholders(Expression expression, Placeholders placeholders) {
+        if (expression == null) {
+            return;
+        }
+
+        expression.accept(
+            new ExpressionVisitorAdapter<Void>() {
+
+                @Override
+                public <S> Void visit(CastExpression cast, S context) {
+                    CastPlaceholder castPlaceholder = placeholders.ofCast(cast);
+
+                    if (castPlaceholder == null) {
+                        return super.visit(cast, context);
+                    }
+
+                    addCastParameter(
+                        castPlaceholder,
+                        indexedParameterName(castPlaceholder.placeholder()),
+                        placeholders
+                    );
+
+                    return null;
+                }
+            },
+            null
+        );
+    }
+
+    /**
+     * The name an indexed placeholder takes where no column of the query names
+     * it, which is the placeholder's own index. A named placeholder states its
+     * name itself, so this name is used only for an indexed one.
+     */
+    private String indexedParameterName(Placeholder placeholder) {
+        return INDEXED_PARAMETER_NAME_PREFIX + placeholder.index();
+    }
+
+    /**
+     * Records one parameter occurrence a cast types, named after the column
+     * whose value it is where a clause names one, and otherwise after the
+     * placeholder itself.
+     */
+    private void addCastParameter(
+        CastPlaceholder cast,
+        String name,
+        Placeholders placeholders
+    ) {
+        ColumnTypeMapping.MappedType type = cast.type();
+
         addParameter(
-            placeholder,
-            findColumn(table, columnName),
+            cast.placeholder(),
+            name,
+            type.type(),
+            type.enumType(),
+            type.array(),
+            type.blankPadded(),
             placeholders
         );
     }
@@ -1442,8 +1716,12 @@ public final class QueryAnalyzer {
      * The compiled placeholders of one query, against which every analyzed
      * placeholder occurrence resolves to its logical parameter.
      */
-    private Placeholders toPlaceholders(ParsedSql parsedSql) {
-        return new Placeholders(parsedSql.parameters().names());
+    private Placeholders toPlaceholders(ParsedSql parsedSql, Schema schema) {
+        return new Placeholders(
+            parsedSql.parameters().names(),
+            schema,
+            columnTypeMapping
+        );
     }
 
     /**
