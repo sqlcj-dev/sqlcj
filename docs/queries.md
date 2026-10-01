@@ -179,6 +179,38 @@ its placeholder, while a placeholder as the tested value, as in
 A comparison that binds no placeholder, such as `active = TRUE`, contributes no
 generated parameter and reaches the database as written.
 
+A placeholder written as the direct operand of `::type` or `CAST(... AS type)`
+is typed by that cast instead of by the clause it appears in, anywhere inside
+the `WHERE` clause: beside a compared column, as the tested value of `IS NULL`,
+inside a concatenation, as a function argument, as an `IN` element, as a range
+bound, as a pattern, or as the operand of another operator such as the array
+overlap `&&`. This makes the optional filter and the computed pattern idioms
+compile:
+
+```sql
+-- name: ListUsersByName :many
+SELECT id, name
+FROM users
+WHERE (:name::text IS NULL OR name = :name)
+ORDER BY id;
+
+-- name: SearchUsers :many
+SELECT id, name
+FROM users
+WHERE name LIKE '%' || :term::text || '%';
+```
+
+`ListUsersByName` generates `listUsersByName(String name)`, which returns every
+row for a null argument, and `SearchUsers` generates
+`searchUsers(String term)`. The cast itself reaches the database as written. A
+cast pattern states its own type, so the pattern restrictions above apply only
+to an uncast pattern: `name NOT LIKE $1::text`, `name SIMILAR TO $1::text`, and
+`name LIKE $1::text ESCAPE '!'` are accepted and typed `text`, whatever the
+tested column's type is. Such a pattern is named after its placeholder rather
+than after the tested column, so an indexed one is `param<N>`, as in `param1`
+for `$1`. [Parameters](#parameters) states the accepted cast types and the name
+a cast placeholder takes.
+
 ### Ordering
 
 `ORDER BY` over direct columns is supported for a stable list order, as in
@@ -272,6 +304,22 @@ value binds no placeholder, such as
 `UPDATE authors SET version = version + 1`, generates a method without
 parameters.
 
+An `INSERT` value or an `UPDATE` assignment may also compute a value from a cast
+placeholder, which is typed by its cast wherever it appears inside the value:
+
+```sql
+-- name: UpdateAuthorBioOrKeep :exec
+UPDATE authors
+SET bio = COALESCE(:bio::text, bio)
+WHERE id = :id;
+```
+
+`UpdateAuthorBioOrKeep` generates `updateAuthorBioOrKeep(String bio, Long id)`
+and keeps the assignment bound before the predicate. A cast placeholder that is
+the whole value, as in `SET bio = :bio::text`, is typed by its cast as well and
+named after its column. A value that contains an uncast placeholder, such as
+`COALESCE($2, bio)`, stays rejected.
+
 ### `RETURNING`
 
 A supported `INSERT`, `UPDATE`, or `DELETE` declared `:one`, `:optional`, or
@@ -314,6 +362,26 @@ string literal, a quoted identifier, or a comment is not a parameter.
   `pageSize` rather than `limit`.
 - The Java type of a placeholder is the type of the column it is compared with,
   assigned to, or inserted into.
+- A placeholder written as the direct operand of `::type` or
+  `CAST(... AS type)` is typed by that cast instead, wherever it appears inside
+  a `WHERE` clause, an `INSERT` value, or an `UPDATE` assignment. The cast type
+  may be any type a column may declare and sqlcj maps, including a declared
+  enum name, written unquoted and matched case-insensitively, and a
+  one-dimensional array, which binds a `List`. A cast type sqlcj does not map,
+  such as `INTERVAL` or a multi-dimensional `INT[][]`, is rejected naming the
+  placeholder and the type.
+- A named cast placeholder keeps its own name. An indexed cast placeholder
+  keeps the name of the column whose value it is — a compared column, the
+  tested column of `IN` or `BETWEEN`, the tested column of a plain `LIKE` or
+  `ILIKE` pattern, which is the shape that accepts an uncast pattern, or an
+  inserted or assigned column — so `name = $1::text` names `name` as
+  `name = $1` does. Every other indexed cast placeholder is named `param<N>`
+  after its own index, as in `param1` for `$1`, and colliding names take the
+  usual numeric suffix.
+- Occurrences of one placeholder may mix a cast and an uncast location, and the
+  parameter keeps the name and type of its first occurrence, so
+  `(:name::text IS NULL OR name = :name)` is one `String` parameter named
+  `name`.
 - Mixing `$N` and `:name` placeholders in one query is rejected, as are
   anonymous `?` placeholders, a qualified name such as `:a.b`, a quoted name
   such as `:"x"`, and an `&name` placeholder.
@@ -586,22 +654,30 @@ name, and its header line.
   is not a plain inner or left join, a join predicate that is not one qualified
   equality, and a set operation such as `UNION`.
 - A placeholder in a location sqlcj does not analyze, including `ORDER BY $1`, a
-  named placeholder under a function such as `lower(name) = :name` or under a
-  cast such as `:name::text`, a computed `LIKE` pattern such as
+  named placeholder under a function such as `lower(name) = :name`, a computed
+  `LIKE` pattern such as
   `'%' || $1 || '%'`, a placeholder as the
   tested value of a range such as `$1 BETWEEN id AND id`, a computed range
   bound such as `id BETWEEN $1 + 1 AND $2`, a computed pagination value such as
   `LIMIT $1 + 1` or `OFFSET $1 + 1`, a `LIMIT a, b` row count such as
   `LIMIT 5, $1`, a placeholder inside a write value such as
   `COALESCE($2, bio)`, and a `FETCH FIRST $1 ROWS ONLY` clause, so dynamic `IN`
-  expansion is unavailable.
+  expansion is unavailable. A cast does not widen these locations: a cast
+  placeholder in a projection, `ORDER BY`, a join condition, or a pagination
+  value, such as `ORDER BY $1::int`, stays rejected, as does a placeholder that
+  is not the direct operand of its cast, such as `(:x)::int`.
+- A cast type sqlcj does not map, such as `$1::interval` or a
+  multi-dimensional `$1::int[][]`, which is rejected naming the placeholder and
+  the declared type.
 - A `LIKE`-family pattern placeholder that is negated, uses another keyword such
   as `SIMILAR TO`, carries an `ESCAPE` clause or a `BINARY` modifier, tests a
-  non-text column, or stands as the tested value.
+  non-text column, or stands as the tested value. These restrict the uncast
+  pattern placeholder; a cast pattern states its own type.
 - Anonymous `?` placeholders, `$N` and `:name` placeholders mixed in one query,
   a qualified name such as `:a.b`, a quoted name such as `:"x"`, an `&name`
-  placeholder, one name whose occurrences have conflicting types, and
-  non-contiguous or non-positive placeholder indexes.
+  placeholder, each of them also as the operand of a cast, such as
+  `:"x"::text`, `&x::text`, or `:a.b::text`, one name whose occurrences have
+  conflicting types, and non-contiguous or non-positive placeholder indexes.
 - An `INSERT` without an explicit column list, with more than one `VALUES` row,
   or built from a `SELECT`; an `UPDATE` assignment that sets a column list, such
   as `SET (name, active) = ('a', TRUE)`; and a written column that the table does
@@ -841,6 +917,35 @@ Parameters:
   and
   `SqlcjCompilerIntegrationTest.shouldExecuteGeneratedQueryWithProtectedPlaceholderText`
   execute the compiled binding order.
+- `QueryAnalyzerTest.shouldResolveNamedCastParameterOfOptionalFilter`,
+  `QueryAnalyzerTest.shouldResolveNamedCastParameterInsideComputedLikePattern`,
+  `QueryAnalyzerTest.shouldResolveNamedCastParameterInsideUpdateAssignment`,
+  `QueryAnalyzerTest.shouldResolveCastKeywordParameterNamedAfterItsComparedColumn`,
+  `QueryAnalyzerTest.shouldNameCastParameterAfterItsColumn`,
+  `QueryAnalyzerTest.shouldNameCastPatternAfterItsPlaceholderInAnUntypedPatternShape`,
+  `QueryAnalyzerTest.shouldNameNamedCastPatternAfterItsPlaceholder`,
+  `QueryAnalyzerTest.shouldResolveEnumCastParameter`,
+  `QueryAnalyzerTest.shouldResolveArrayCastParameterNamedAfterItsPlaceholder`,
+  `QueryAnalyzerTest.shouldResolveBlankPaddedCastParameter`,
+  `QueryAnalyzerTest.shouldNameIndexedCastParameterAfterItsIndex`, and
+  `QueryAnalyzerTest.shouldResolveCastParametersOfInsertValues` cover the cast
+  types, the analyzed cast locations, and the name a cast placeholder takes,
+  while `QueryAnalyzerTest.shouldRejectUnsupportedCastType`,
+  `QueryAnalyzerTest.shouldRejectCastOccurrenceWithConflictingType`,
+  `QueryAnalyzerTest.shouldRejectCastPlaceholderInUnanalyzedLocation`, and the
+  cast rows of
+  `QueryAnalyzerTest.shouldRejectUnsupportedNamedPlaceholderForm` cover the
+  cast rejections.
+- `SqlParameterCompilerTest.shouldReportNamedParametersThatAreCastOperands` and
+  `SqlParameterCompilerTest.shouldNotReportCompiledNamedParameterThatIsACastOperand`
+  cover the cast operand the parser reports without a parse-tree node of its
+  own.
+- `SqlcjCompilerIntegrationTest.shouldGenerateCompilableJavaForCastPlaceholders`
+  compiles a repository whose cast and uncast placeholders of one column
+  generate two disambiguated parameters, and
+  `PostgresIntegrationTest.shouldExecuteGeneratedCastTypedOptionalFilterAgainstPostgres`
+  executes a named cast-typed optional filter against PostgreSQL 16 with a null
+  and a non-null argument.
 
 Generated Java:
 
