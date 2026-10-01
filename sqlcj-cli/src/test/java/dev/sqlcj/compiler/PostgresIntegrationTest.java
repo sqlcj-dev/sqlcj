@@ -985,6 +985,98 @@ class PostgresIntegrationTest {
     }
 
     /**
+     * Covers write values that bind no placeholder: {@code DEFAULT}, a literal,
+     * {@code NULL}, {@code now()}, and {@code code + 1} contribute no method
+     * parameter and reach PostgreSQL as written, while the placeholders beside
+     * them keep their own numbering and textual binding order.
+     */
+    @Test
+    void shouldExecuteGeneratedNonBindingWriteValuesAgainstPostgres() throws Exception {
+        Path classesDirectory = generateAndCompile("""
+            -- name: InsertUserWithDefaults :exec
+            INSERT INTO users (id, code, name, bio, serial_id, updated_at)
+            VALUES ($1, $2, 'Anonymous', NULL, DEFAULT, now());
+
+            -- name: CreateUser :one
+            INSERT INTO users (bio, id, code, name, updated_at, serial_id)
+            VALUES (:bio, :id, 1, 'Interleaved', now(), DEFAULT)
+            RETURNING id, code, name, bio, serial_id, updated_at;
+
+            -- name: TouchUser :exec
+            UPDATE users
+            SET code = code + 1,
+                name = 'Touched',
+                updated_at = now(),
+                serial_id = DEFAULT,
+                bio = $2
+            WHERE id = $1;
+
+            -- name: GetUser :one
+            SELECT id, code, name, bio, serial_id, updated_at
+            FROM users
+            WHERE id = $1;
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method insertWithDefaults = repository.getClass().getMethod(
+                "insertUserWithDefaults",
+                Long.class,
+                Integer.class
+            );
+
+            assertEquals(1, insertWithDefaults.invoke(repository, 1L, 42));
+
+            Method getUser = repository.getClass().getMethod("getUser", Long.class);
+
+            Object inserted = getUser.invoke(repository, 1L);
+
+            assertEquals(42, component(inserted, "code"));
+            assertEquals("Anonymous", component(inserted, "name"));
+            assertNull(component(inserted, "bio"));
+            assertNotNull(component(inserted, "serialId"));
+            assertInstanceOf(OffsetDateTime.class, component(inserted, "updatedAt"));
+
+            Method createUser = repository.getClass().getMethod(
+                "createUser",
+                String.class,
+                Long.class
+            );
+
+            Object returned = createUser.invoke(repository, "first note", 2L);
+
+            assertNotNull(returned);
+
+            assertEquals(
+                List.of("id", "code", "name", "bio", "serialId", "updatedAt"),
+                recordComponentNames(returned)
+            );
+
+            assertEquals(2L, component(returned, "id"));
+            assertEquals(1, component(returned, "code"));
+            assertEquals("Interleaved", component(returned, "name"));
+            assertEquals("first note", component(returned, "bio"));
+            assertNotNull(component(returned, "serialId"));
+            assertInstanceOf(OffsetDateTime.class, component(returned, "updatedAt"));
+
+            Method touchUser = repository.getClass().getMethod(
+                "touchUser",
+                Long.class,
+                String.class
+            );
+
+            assertEquals(1, touchUser.invoke(repository, 1L, "touched"));
+
+            Object touched = getUser.invoke(repository, 1L);
+
+            assertEquals(43, component(touched, "code"));
+            assertEquals("Touched", component(touched, "name"));
+            assertEquals("touched", component(touched, "bio"));
+        }
+    }
+
+    /**
      * Covers null parameter binding and null result reading for every nullable
      * column type of the schema snapshot: the row is written through the
      * generated write method with null arguments and read back through the

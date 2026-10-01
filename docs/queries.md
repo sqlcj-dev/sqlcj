@@ -227,8 +227,8 @@ A write targets exactly one table of its entry's schema.
 
 | Statement | Accepted shape |
 | --- | --- |
-| `INSERT` | an explicit column list and a single `VALUES` row whose values are all placeholders |
-| `UPDATE` | `SET` assignments that each assign one direct column a single placeholder, with an optional `WHERE` using the read predicate forms |
+| `INSERT` | an explicit column list and a single `VALUES` row, each value a placeholder or an expression that binds none |
+| `UPDATE` | `SET` assignments that each assign one direct column a placeholder or an expression that binds none, with an optional `WHERE` using the read predicate forms |
 | `DELETE` | one target table with an optional `WHERE` using the read predicate forms |
 
 ```sql
@@ -247,6 +247,30 @@ DELETE
 FROM authors
 WHERE id = $1;
 ```
+
+### Values that bind no placeholder
+
+An `INSERT` value or an `UPDATE` assignment that contains no placeholder — such
+as `DEFAULT`, a literal, `NULL`, `now()`, or `version + 1` — contributes no
+generated parameter and reaches the database exactly as written. Its target
+column must exist in the written table, but nothing binds it, so its type need
+not be one sqlcj maps. The placeholders beside it keep their own `$N` or `:name`
+numbering and textual binding order:
+
+```sql
+-- name: TouchAuthor :exec
+UPDATE authors
+SET bio = $2,
+    updated_at = now(),
+    version = version + 1
+WHERE id = $1;
+```
+
+`TouchAuthor` generates `touchAuthor(Long id, String bio)` and binds `(bio, id)`,
+exactly as it would without the two non-binding assignments. A write whose every
+value binds no placeholder, such as
+`UPDATE authors SET version = version + 1`, generates a method without
+parameters.
 
 ### `RETURNING`
 
@@ -568,7 +592,8 @@ name, and its header line.
   tested value of a range such as `$1 BETWEEN id AND id`, a computed range
   bound such as `id BETWEEN $1 + 1 AND $2`, a computed pagination value such as
   `LIMIT $1 + 1` or `OFFSET $1 + 1`, a `LIMIT a, b` row count such as
-  `LIMIT 5, $1`, and a `FETCH FIRST $1 ROWS ONLY` clause, so dynamic `IN`
+  `LIMIT 5, $1`, a placeholder inside a write value such as
+  `COALESCE($2, bio)`, and a `FETCH FIRST $1 ROWS ONLY` clause, so dynamic `IN`
   expansion is unavailable.
 - A `LIKE`-family pattern placeholder that is negated, uses another keyword such
   as `SIMILAR TO`, carries an `ESCAPE` clause or a `BINARY` modifier, tests a
@@ -578,8 +603,9 @@ name, and its header line.
   placeholder, one name whose occurrences have conflicting types, and
   non-contiguous or non-positive placeholder indexes.
 - An `INSERT` without an explicit column list, with more than one `VALUES` row,
-  with a value that is not a placeholder, or built from a `SELECT`; and an
-  `UPDATE` assignment that is not a single placeholder.
+  or built from a `SELECT`; an `UPDATE` assignment that sets a column list, such
+  as `SET (name, active) = ('a', TRUE)`; and a written column that the table does
+  not declare.
 - An aliased, computed, qualified-wildcard, or unknown `RETURNING` item;
   `RETURNING` on `:exec`; and `ON CONFLICT`, `UPDATE ... FROM`,
   `DELETE ... USING`, or a common table expression in a returning write.
@@ -745,6 +771,18 @@ Writes and `RETURNING`:
   `QueryAnalyzerTest.shouldRejectUnknownReturningColumn`, and
   `QueryAnalyzerTest.shouldRejectExcludedReturningWriteForm` cover the write
   shapes.
+- `QueryAnalyzerTest.shouldAnalyzeInsertWithNonBindingValues`,
+  `QueryAnalyzerTest.shouldAnalyzeNamedInsertWithNonBindingValues`,
+  `QueryAnalyzerTest.shouldAnalyzeReturningInsertWithNonBindingValues`,
+  `QueryAnalyzerTest.shouldAnalyzeUpdateWithNonBindingAssignments`,
+  `QueryAnalyzerTest.shouldAnalyzeWriteWithoutAnyPlaceholder`,
+  `QueryAnalyzerTest.shouldAnalyzeNonBindingValueOnAnUnsupportedTypeColumn`,
+  `QueryAnalyzerTest.shouldRejectAnUnknownNonBindingTargetColumn`,
+  `QueryAnalyzerTest.shouldRejectAPlaceholderInsideAnInsertValue`,
+  `QueryAnalyzerTest.shouldRejectAPlaceholderInsideAnUpdateAssignment`, and
+  `QueryAnalyzerTest.shouldRejectExcludedWriteValueForm` cover the values that
+  bind no placeholder, their numbering and binding order, and the nearby
+  rejections.
 - `QueryAnalyzerTest.shouldResolveRowTableForReturningAllColumns` covers the
   returning writes that produce a complete table row.
 - `PostgresIntegrationTest.shouldExecuteGeneratedWriteAgainstPostgres`,
@@ -754,6 +792,10 @@ Writes and `RETURNING`:
   and
   `PostgresIntegrationTest.shouldExecuteGeneratedDeleteReturningAgainstPostgres`
   execute them against PostgreSQL 16.
+- `PostgresIntegrationTest.shouldExecuteGeneratedNonBindingWriteValuesAgainstPostgres`
+  executes `DEFAULT`, a literal, `NULL`, `now()`, and `code + 1` in an `:exec`
+  insert, a returning named insert, and an `:exec` update against
+  PostgreSQL 16.
 
 Parameters:
 

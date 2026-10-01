@@ -511,7 +511,9 @@ public final class QueryAnalyzer {
 
     /**
      * Resolves the {@code INSERT} parameters by pairing the explicit column
-     * list with the single values row, which is also their textual order.
+     * list with the single values row, which is also their textual order. A
+     * value that is not a placeholder binds nothing and reaches the database as
+     * written, so only its target column must exist.
      */
     private void resolveInsertParameters(
         Insert insert,
@@ -533,20 +535,15 @@ public final class QueryAnalyzer {
         }
 
         for (int index = 0; index < columns.size(); index++) {
+            String columnName = columns.get(index).getUnquotedColumnName();
             Placeholder placeholder = placeholders.of(values.get(index));
 
             if (placeholder == null) {
-                throw new UnsupportedOperationException(
-                    "INSERT values must be indexed placeholders."
-                );
+                findColumn(table, columnName);
+                continue;
             }
 
-            addParameter(
-                placeholder,
-                columns.get(index).getUnquotedColumnName(),
-                table,
-                placeholders
-            );
+            addParameter(placeholder, columnName, table, placeholders);
         }
     }
 
@@ -564,7 +561,9 @@ public final class QueryAnalyzer {
 
     /**
      * Resolves the {@code UPDATE} assignment parameters in source order, which
-     * precedes any parameter in the {@code WHERE} expression.
+     * precedes any parameter in the {@code WHERE} expression. An assigned value
+     * that is not a placeholder binds nothing and reaches the database as
+     * written, so only its target column must exist.
      */
     private void resolveUpdateSetParameters(
         Update update,
@@ -572,23 +571,21 @@ public final class QueryAnalyzer {
         Placeholders placeholders
     ) {
         for (UpdateSet updateSet : update.getUpdateSets()) {
-            Placeholder placeholder = updateSet.getColumns().size() == 1
-                && updateSet.getValues().size() == 1
-                    ? placeholders.of(updateSet.getValue(0))
-                    : null;
-
-            if (placeholder == null) {
+            if (updateSet.getColumns().size() != 1 || updateSet.getValues().size() != 1) {
                 throw new UnsupportedOperationException(
-                    "UPDATE assignments must set one column to an indexed placeholder."
+                    "UPDATE assignments must set one column at a time."
                 );
             }
 
-            addParameter(
-                placeholder,
-                updateSet.getColumn(0).getUnquotedColumnName(),
-                table,
-                placeholders
-            );
+            String columnName = updateSet.getColumn(0).getUnquotedColumnName();
+            Placeholder placeholder = placeholders.of(updateSet.getValue(0));
+
+            if (placeholder == null) {
+                findColumn(table, columnName);
+                continue;
+            }
+
+            addParameter(placeholder, columnName, table, placeholders);
         }
     }
 

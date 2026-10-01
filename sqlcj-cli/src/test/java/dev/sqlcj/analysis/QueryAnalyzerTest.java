@@ -123,6 +123,28 @@ class QueryAnalyzerTest {
         )
     );
 
+    /**
+     * A schema whose {@code users} table carries the columns a non-binding
+     * write value targets beside the bound ones.
+     */
+    private static final Schema writeSchema = new Schema(
+        List.of(
+            new Table(
+                "users",
+                List.of(
+                    new Column("id", ColumnType.BIGINT, false),
+                    new Column("name", ColumnType.VARCHAR, true),
+                    new Column("nickname", ColumnType.VARCHAR, true),
+                    new Column("bio", ColumnType.TEXT, true),
+                    new Column("active", ColumnType.BOOLEAN, true),
+                    new Column("version", ColumnType.INTEGER, false),
+                    new Column("updated_at", ColumnType.TIMESTAMP, true)
+                ),
+                List.of()
+            )
+        )
+    );
+
     private static final Schema joinSchema = new Schema(
         List.of(
             new Table(
@@ -3569,5 +3591,285 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(List.of(1, 1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * An {@code INSERT} value that binds no placeholder contributes no
+     * parameter and reaches the database as written, while the placeholders
+     * beside it keep their own numbering and textual binding order.
+     */
+    @Test
+    void shouldAnalyzeInsertWithNonBindingValues() {
+        String sql = "INSERT INTO users (version, name, id) VALUES ($2, now(), $1)";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CreateUser", QueryType.EXEC, sql),
+            parser.parse(sql),
+            writeSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "version", ColumnType.INTEGER)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(2, 1), model.bindingParameterIndexes());
+
+        assertEquals(
+            "INSERT INTO users (version, name, id) VALUES (?, now(), ?)",
+            model.executableSql()
+        );
+    }
+
+    /** The same insert written with named placeholders. */
+    @Test
+    void shouldAnalyzeNamedInsertWithNonBindingValues() {
+        String sql = "INSERT INTO users (version, name, id) VALUES (:b, now(), :a)";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CreateUser", QueryType.EXEC, sql),
+            parser.parse(sql),
+            writeSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "b", ColumnType.INTEGER),
+                new QueryParameter(2, "a", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+
+        assertEquals(
+            "INSERT INTO users (version, name, id) VALUES (?, now(), ?)",
+            model.executableSql()
+        );
+    }
+
+    /**
+     * A returning insert accepts non-binding values without changing the
+     * columns it returns.
+     */
+    @Test
+    void shouldAnalyzeReturningInsertWithNonBindingValues() {
+        String sql = """
+            INSERT INTO users (id, version, name, updated_at)
+            VALUES ($1, DEFAULT, 'anon', now())
+            RETURNING id, name""";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CreateUser", QueryType.ONE, sql),
+            parser.parse(sql),
+            writeSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+
+        assertEquals(
+            """
+                INSERT INTO users (id, version, name, updated_at)
+                VALUES (?, DEFAULT, 'anon', now())
+                RETURNING id, name""",
+            model.executableSql()
+        );
+    }
+
+    /**
+     * Non-binding assignments of every listed form are accepted, and the
+     * assignment placeholder still binds before the predicate placeholder.
+     */
+    @Test
+    void shouldAnalyzeUpdateWithNonBindingAssignments() {
+        String sql = """
+            UPDATE users
+            SET nickname = $2,
+                version = version + 1,
+                updated_at = now(),
+                name = 'anon',
+                active = DEFAULT,
+                bio = NULL
+            WHERE id = $1""";
+
+        QueryModel model = analyzer.analyze(
+            new Query("TouchUser", QueryType.EXEC, sql),
+            parser.parse(sql),
+            writeSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "nickname", ColumnType.VARCHAR)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(2, 1), model.bindingParameterIndexes());
+
+        assertEquals(
+            """
+                UPDATE users
+                SET nickname = ?,
+                    version = version + 1,
+                    updated_at = now(),
+                    name = 'anon',
+                    active = DEFAULT,
+                    bio = NULL
+                WHERE id = ?""",
+            model.executableSql()
+        );
+    }
+
+    /** A write whose every value binds nothing has no parameter at all. */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "INSERT INTO users (id, version, updated_at) VALUES (DEFAULT, 1, now())",
+            "UPDATE users SET version = version + 1, updated_at = now()"
+        }
+    )
+    void shouldAnalyzeWriteWithoutAnyPlaceholder(String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("TouchUsers", QueryType.EXEC, sql),
+            parser.parse(sql),
+            writeSchema
+        );
+
+        assertTrue(model.parameters().isEmpty());
+        assertTrue(model.bindingParameterIndexes().isEmpty());
+        assertEquals(sql, model.executableSql());
+    }
+
+    /**
+     * Nothing binds a non-binding value, so its target column's type need not
+     * be mapped.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "INSERT INTO users (id, tags) VALUES ($1, DEFAULT)",
+            "UPDATE users SET tags = NULL WHERE id = $1"
+        }
+    )
+    void shouldAnalyzeNonBindingValueOnAnUnsupportedTypeColumn(String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("ClearTags", QueryType.EXEC, sql),
+            parser.parse(sql),
+            unsupportedTypeSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+    }
+
+    /** The target column of a non-binding value must exist in the table. */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "INSERT INTO users (id, missing) VALUES ($1, now())",
+            "UPDATE users SET missing = now() WHERE id = $1"
+        }
+    )
+    void shouldRejectAnUnknownNonBindingTargetColumn(String sql) {
+        Query query = new Query("TouchUser", QueryType.EXEC, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, parsedSql, writeSchema)
+        );
+
+        assertEquals(
+            "Column not found in table users: missing",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A write value that contains a placeholder without being one leaves that
+     * placeholder unanalyzed, which the placeholder accounting rejects.
+     */
+    @Test
+    void shouldRejectAPlaceholderInsideAnInsertValue() {
+        String sql = "INSERT INTO users (id, name) VALUES ($1, $2 || 'x')";
+
+        Query query = new Query("CreateUser", QueryType.EXEC, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, writeSchema)
+        );
+
+        assertEquals(
+            "SQL placeholders [1, 2] are not the analyzed parameters [1];"
+                + " a placeholder is in an unsupported location",
+            exception.getMessage()
+        );
+    }
+
+    @Test
+    void shouldRejectAPlaceholderInsideAnUpdateAssignment() {
+        String sql = "UPDATE users SET name = :n || name WHERE id = :id";
+
+        Query query = new Query("TouchUser", QueryType.EXEC, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, writeSchema)
+        );
+
+        assertEquals(
+            "SQL placeholders [:n, :id] are not the analyzed parameters [:id];"
+                + " a placeholder is in an unsupported location",
+            exception.getMessage()
+        );
+    }
+
+    /** A row assignment and a multi-row insert stay rejected. */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "UPDATE users SET (name, active) = ('a', true)|"
+                + "UPDATE assignments must set one column at a time.",
+            "INSERT INTO users (id, name) VALUES (1, 'a'), (2, 'b')|"
+                + "INSERT requires a single VALUES row."
+        }
+    )
+    void shouldRejectExcludedWriteValueForm(String sql, String message) {
+        Query query = new Query("TouchUsers", QueryType.EXEC, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, writeSchema)
+        );
+
+        assertEquals(message, exception.getMessage());
     }
 }
