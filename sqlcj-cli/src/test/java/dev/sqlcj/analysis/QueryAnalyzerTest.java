@@ -1378,6 +1378,204 @@ class QueryAnalyzerTest {
         );
     }
 
+    /**
+     * A grouped count stands beside a direct column and keeps its own
+     * position, while the grouped result is no longer one complete table row.
+     */
+    @Test
+    void shouldResolveScalarCountBesideDirectColumn() {
+        String sql = "SELECT name, COUNT(*) AS n FROM users GROUP BY name";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CountUsersByName", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("name", ColumnType.VARCHAR, true),
+                new QueryColumn("n", ColumnType.BIGINT, false)
+            ),
+            model.columns()
+        );
+
+        assertTrue(model.parameters().isEmpty());
+        assertNull(model.rowTable());
+    }
+
+    /** A count written before the grouped column keeps that position. */
+    @Test
+    void shouldResolveScalarCountBeforeDirectColumn() {
+        String sql = "SELECT COUNT(*) AS n, name FROM users GROUP BY name";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CountUsersByName", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("n", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+    }
+
+    /** A grouped count keeps the parameters of its predicate. */
+    @Test
+    void shouldResolveGroupedCountBesidePredicateParameter() {
+        String sql = "SELECT name, COUNT(*) AS n FROM users WHERE active = $1 GROUP BY name";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CountActiveUsersByName", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("name", ColumnType.VARCHAR, true),
+                new QueryColumn("n", ColumnType.BIGINT, false)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "active", ColumnType.BOOLEAN)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * An aliased cast projection is a nullable result column of the cast type,
+     * in either cast spelling and with or without {@code AS}. Its operand is
+     * not analyzed and reaches the database as written.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "SELECT SUM(id)::numeric AS total FROM users",
+            "SELECT CAST(SUM(id) AS numeric) AS total FROM users",
+            "SELECT SUM(id)::numeric total FROM users"
+        }
+    )
+    void shouldResolveCastProjectionColumnFromItsAlias(String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("SumUserIds", QueryType.ONE, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("total", ColumnType.DECIMAL, true)),
+            model.columns()
+        );
+
+        assertTrue(model.parameters().isEmpty());
+        assertNull(model.rowTable());
+    }
+
+    /** A cast projection may name a declared enum type. */
+    @Test
+    void shouldResolveEnumCastProjectionColumn() {
+        String sql = "SELECT handle::stage_setting AS s FROM stages";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListStageSettings", QueryType.MANY, sql),
+            parser.parse(sql),
+            enumSchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("s", ColumnType.ENUM, true, "stage_setting")),
+            model.columns()
+        );
+    }
+
+    /** A cast projection of a one-dimensional array is an array column. */
+    @Test
+    void shouldResolveArrayCastProjectionColumn() {
+        String sql = "SELECT handle::text[] AS labels FROM stages";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListStageLabels", QueryType.MANY, sql),
+            parser.parse(sql),
+            arraySchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("labels", ColumnType.TEXT, true, null, true)),
+            model.columns()
+        );
+    }
+
+    /**
+     * A cast projection without an alias names no result column, and a cast
+     * type sqlcj does not map is rejected naming the result column and the
+     * declared type.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "SELECT SUM(id)::numeric FROM users"
+                + "|A cast projection requires a result alias,"
+                + " such as SUM(amount)::numeric AS total.",
+            "SELECT CAST(SUM(id) AS numeric) FROM users"
+                + "|A cast projection requires a result alias,"
+                + " such as SUM(amount)::numeric AS total.",
+            "SELECT id::interval AS i FROM users"
+                + "|Result column 'i' has unsupported cast type INTERVAL"
+        }
+    )
+    void shouldRejectUnsupportedCastProjectionForm(String sql, String message) {
+        Query query = new Query("SumUserIds", QueryType.ONE, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(message, exception.getMessage());
+    }
+
+    /**
+     * A cast does not make a projected placeholder analyzable, so it stays
+     * rejected by the placeholder accounting in either spelling.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "SELECT $1::int AS x FROM users|[1]",
+            "SELECT :n::int AS x FROM users|[:n]"
+        }
+    )
+    void shouldRejectCastPlaceholderProjection(String sql, String compiled) {
+        Query query = new Query("ListUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(
+            "SQL placeholders %s are not the analyzed parameters []; "
+                .formatted(compiled)
+                + "a placeholder is in an unsupported location",
+            exception.getMessage()
+        );
+    }
+
     @ParameterizedTest
     @CsvSource(
         delimiter = '|',
@@ -1385,10 +1583,8 @@ class QueryAnalyzerTest {
         value = {
             "SELECT COUNT(*) FROM users"
                 + "|COUNT(*) requires a result alias, such as COUNT(*) AS total.",
-            "SELECT COUNT(*) AS n, id FROM users"
-                + "|COUNT(*) must be the only SELECT item.",
-            "SELECT id, COUNT(*) AS n FROM users"
-                + "|COUNT(*) must be the only SELECT item.",
+            "SELECT name, COUNT(*) FROM users GROUP BY name"
+                + "|COUNT(*) requires a result alias, such as COUNT(*) AS total.",
             "SELECT COUNT(id) AS n FROM users"
                 + "|Unsupported SELECT expression: Function",
             "SELECT COUNT(DISTINCT id) AS n FROM users"
