@@ -1215,6 +1215,160 @@ class PostgresIntegrationTest {
     }
 
     /**
+     * Covers the accepted upsert shapes end to end: an {@code ON CONFLICT}
+     * target of column names with a {@code DO NOTHING} and a {@code DO UPDATE}
+     * action, with and without {@code RETURNING}, each executed over a new row
+     * and then over a conflicting one.
+     *
+     * <p>{@code DO NOTHING} writes no row on conflict, so its {@code :exec}
+     * form reports no affected row and its returning form finds none, while
+     * {@code DO UPDATE} writes the proposed {@code EXCLUDED} value, the bound
+     * placeholder, and the computed expression into the stored row.
+     */
+    @Test
+    void shouldExecuteGeneratedUpsertsAgainstPostgres() throws Exception {
+        Path classesDirectory = generateAndCompile("""
+            -- name: InsertUserOrIgnore :exec
+            INSERT INTO users (id, code, name)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (id) DO NOTHING;
+
+            -- name: InsertUserOrFind :optional
+            INSERT INTO users (id, code, name)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (id) DO NOTHING
+            RETURNING id, name;
+
+            -- name: UpsertUser :exec
+            INSERT INTO users (id, code, name)
+            VALUES (:id, :code, :name)
+            ON CONFLICT (id) DO UPDATE
+            SET name = EXCLUDED.name,
+                bio = :bio,
+                code = users.code + 1;
+
+            -- name: UpsertUserReturning :one
+            INSERT INTO users (id, code, name)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (id) DO UPDATE
+            SET name = EXCLUDED.name,
+                bio = $4
+            RETURNING id, code, name, bio;
+
+            -- name: GetUser :one
+            SELECT id, code, name, bio
+            FROM users
+            WHERE id = $1;
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method getUser = repository.getClass().getMethod("getUser", Long.class);
+
+            Method insertOrIgnore = repository.getClass().getMethod(
+                "insertUserOrIgnore",
+                Long.class,
+                Integer.class,
+                String.class
+            );
+
+            assertEquals(1, insertOrIgnore.invoke(repository, 1L, 10, "New"));
+            assertEquals(0, insertOrIgnore.invoke(repository, 1L, 11, "Ignored"));
+
+            Object kept = getUser.invoke(repository, 1L);
+
+            assertEquals(10, component(kept, "code"));
+            assertEquals("New", component(kept, "name"));
+
+            Method insertOrFind = repository.getClass().getMethod(
+                "insertUserOrFind",
+                Long.class,
+                Integer.class,
+                String.class
+            );
+
+            Optional<?> inserted = assertInstanceOf(
+                Optional.class,
+                insertOrFind.invoke(repository, 2L, 20, "Returned")
+            );
+
+            assertEquals(2L, component(inserted.orElseThrow(), "id"));
+            assertEquals("Returned", component(inserted.orElseThrow(), "name"));
+
+            assertTrue(
+                assertInstanceOf(
+                    Optional.class,
+                    insertOrFind.invoke(repository, 2L, 21, "Ignored")
+                ).isEmpty()
+            );
+
+            Method upsertUser = repository.getClass().getMethod(
+                "upsertUser",
+                Long.class,
+                Integer.class,
+                String.class,
+                String.class
+            );
+
+            assertEquals(1, upsertUser.invoke(repository, 3L, 30, "First", "first note"));
+
+            Object created = getUser.invoke(repository, 3L);
+
+            assertEquals(30, component(created, "code"));
+            assertEquals("First", component(created, "name"));
+            assertNull(component(created, "bio"));
+
+            assertEquals(1, upsertUser.invoke(repository, 3L, 99, "Second", "second note"));
+
+            Object updated = getUser.invoke(repository, 3L);
+
+            assertEquals(31, component(updated, "code"));
+            assertEquals("Second", component(updated, "name"));
+            assertEquals("second note", component(updated, "bio"));
+
+            Method upsertReturning = repository.getClass().getMethod(
+                "upsertUserReturning",
+                Long.class,
+                Integer.class,
+                String.class,
+                String.class
+            );
+
+            Object returnedInsert = upsertReturning.invoke(
+                repository,
+                4L,
+                40,
+                "Fourth",
+                "fourth note"
+            );
+
+            assertEquals(
+                List.of("id", "code", "name", "bio"),
+                recordComponentNames(returnedInsert)
+            );
+
+            assertEquals(4L, component(returnedInsert, "id"));
+            assertEquals(40, component(returnedInsert, "code"));
+            assertEquals("Fourth", component(returnedInsert, "name"));
+            assertNull(component(returnedInsert, "bio"));
+
+            Object returnedUpdate = upsertReturning.invoke(
+                repository,
+                4L,
+                99,
+                "Fourth Again",
+                "fifth note"
+            );
+
+            assertEquals(4L, component(returnedUpdate, "id"));
+            assertEquals(40, component(returnedUpdate, "code"));
+            assertEquals("Fourth Again", component(returnedUpdate, "name"));
+            assertEquals("fifth note", component(returnedUpdate, "bio"));
+        }
+    }
+
+    /**
      * Covers null parameter binding and null result reading for every nullable
      * column type of the schema snapshot: the row is written through the
      * generated write method with null arguments and read back through the

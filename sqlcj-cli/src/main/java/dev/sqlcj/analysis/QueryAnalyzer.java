@@ -30,11 +30,16 @@ import net.sf.jsqlparser.expression.operators.relational.MinorThan;
 import net.sf.jsqlparser.expression.operators.relational.MinorThanEquals;
 import net.sf.jsqlparser.expression.operators.relational.NotEqualsTo;
 import net.sf.jsqlparser.expression.operators.relational.ParenthesedExpressionList;
+import net.sf.jsqlparser.schema.MultiPartName;
 import net.sf.jsqlparser.schema.Table;
 import net.sf.jsqlparser.statement.ReturningClause;
 import net.sf.jsqlparser.statement.Statement;
+import net.sf.jsqlparser.statement.create.table.Index;
 import net.sf.jsqlparser.statement.delete.Delete;
+import net.sf.jsqlparser.statement.insert.ConflictActionType;
 import net.sf.jsqlparser.statement.insert.Insert;
+import net.sf.jsqlparser.statement.insert.InsertConflictAction;
+import net.sf.jsqlparser.statement.insert.InsertConflictTarget;
 import net.sf.jsqlparser.statement.select.AllColumns;
 import net.sf.jsqlparser.statement.select.AllTableColumns;
 import net.sf.jsqlparser.statement.select.Join;
@@ -87,6 +92,13 @@ public final class QueryAnalyzer {
      * the query names it, which a cast types wherever it appears.
      */
     private static final String INDEXED_PARAMETER_NAME_PREFIX = "param";
+
+    /**
+     * The qualifier an {@code ON CONFLICT DO UPDATE} assignment writes to read
+     * a column of the row the insert proposed, compared ignoring case as
+     * PostgreSQL resolves it.
+     */
+    private static final String EXCLUDED_QUALIFIER = "EXCLUDED";
 
     /**
      * Resolves the Java type of parameter occurrence, which decides whether a
@@ -325,6 +337,7 @@ public final class QueryAnalyzer {
         Placeholders placeholders = toPlaceholders(parsedSql, schema);
 
         resolveInsertParameters(insert, source.table(), placeholders);
+        resolveConflictParameters(insert, source.table(), placeholders);
 
         return toQueryModel(
             query,
@@ -356,7 +369,7 @@ public final class QueryAnalyzer {
 
         Placeholders placeholders = toPlaceholders(parsedSql, schema);
 
-        resolveUpdateSetParameters(update, source.table(), placeholders);
+        resolveUpdateSetParameters(update.getUpdateSets(), source.table(), placeholders);
 
         if (update.getWhere() != null) {
             resolveParameters(update.getWhere(), List.of(source), placeholders);
@@ -545,12 +558,6 @@ public final class QueryAnalyzer {
             );
         }
 
-        if (insert.getConflictTarget() != null || insert.getConflictAction() != null) {
-            throw new UnsupportedOperationException(
-                "INSERT ... ON CONFLICT is not supported."
-            );
-        }
-
         requireNoCommonTableExpressions(insert.getWithItemsList());
     }
 
@@ -637,17 +644,18 @@ public final class QueryAnalyzer {
     }
 
     /**
-     * Resolves the {@code UPDATE} assignment parameters in source order, which
-     * precedes any parameter in the {@code WHERE} expression. An assigned value
-     * that binds no placeholder reaches the database as written, so only its
-     * target column must exist.
+     * Resolves the assignment parameters of an {@code UPDATE} or of an
+     * {@code ON CONFLICT DO UPDATE} action in source order, which precedes any
+     * parameter in the {@code WHERE} expression. An assigned value that binds
+     * no placeholder reaches the database as written, so only its target
+     * column must exist.
      */
     private void resolveUpdateSetParameters(
-        Update update,
+        List<UpdateSet> updateSets,
         dev.sqlcj.schema.Table table,
         Placeholders placeholders
     ) {
-        for (UpdateSet updateSet : update.getUpdateSets()) {
+        for (UpdateSet updateSet : updateSets) {
             if (updateSet.getColumns().size() != 1 || updateSet.getValues().size() != 1) {
                 throw new UnsupportedOperationException(
                     "UPDATE assignments must set one column at a time."
@@ -661,6 +669,97 @@ public final class QueryAnalyzer {
                 findColumn(table, columnName),
                 placeholders
             );
+        }
+    }
+
+    /**
+     * Resolves the conflict clause of an insert, whose placeholders are written
+     * after the {@code VALUES} placeholders and therefore bind after them. Only
+     * a target of plain column names of the inserted table is modelled;
+     * PostgreSQL still decides which unique index that target matches.
+     */
+    private void resolveConflictParameters(
+        Insert insert,
+        dev.sqlcj.schema.Table table,
+        Placeholders placeholders
+    ) {
+        InsertConflictTarget target = insert.getConflictTarget();
+        InsertConflictAction action = insert.getConflictAction();
+
+        if (target == null && action == null) {
+            return;
+        }
+
+        resolveConflictTarget(target, table);
+
+        if (action == null || action.getConflictActionType() != ConflictActionType.DO_UPDATE) {
+            return;
+        }
+
+        if (action.getWhereExpression() != null) {
+            throw new UnsupportedOperationException(
+                "ON CONFLICT DO UPDATE ... WHERE is not supported."
+            );
+        }
+
+        List<UpdateSet> updateSets = action.getUpdateSets();
+
+        resolveUpdateSetParameters(updateSets, table, placeholders);
+        resolveExcludedColumns(updateSets, table);
+    }
+
+    /**
+     * Resolves the conflict target against the inserted table. A target this
+     * subset does not model — an absent one, a named constraint, or an element
+     * that is an expression or carries a collation or an operator class —
+     * decides the conflict by something the analyzed model does not describe.
+     */
+    private void resolveConflictTarget(
+        InsertConflictTarget target,
+        dev.sqlcj.schema.Table table
+    ) {
+        boolean columnNames = target != null
+            && target.getConstraintName() == null
+            && target.getIndexElements().stream().noneMatch(
+                element -> element.isExpression()
+                    || element.getCollation() != null
+                    || element.getOperatorClass() != null
+            );
+
+        if (!columnNames) {
+            throw new UnsupportedOperationException(
+                "ON CONFLICT requires a target of column names, such as ON CONFLICT (id)."
+            );
+        }
+
+        if (target.getWhereExpression() != null) {
+            throw new UnsupportedOperationException(
+                "ON CONFLICT target predicates are not supported."
+            );
+        }
+
+        for (Index.ColumnParams element : target.getIndexElements()) {
+            findColumn(table, MultiPartName.unquote(element.getColumnName()));
+        }
+    }
+
+    /**
+     * Resolves the column each {@code DO UPDATE} value that is exactly
+     * {@code EXCLUDED.column} reads from the row the insert proposed, which is
+     * a column of the inserted table. A value that merely contains such a
+     * reference is not analyzed, as no other computed write value is.
+     */
+    private void resolveExcludedColumns(
+        List<UpdateSet> updateSets,
+        dev.sqlcj.schema.Table table
+    ) {
+        for (UpdateSet updateSet : updateSets) {
+            if (
+                updateSet.getValue(0) instanceof net.sf.jsqlparser.schema.Column column
+                    && EXCLUDED_QUALIFIER.equalsIgnoreCase(qualifier(column))
+            ) {
+                findColumn(table, column.getUnquotedColumnName());
+            }
         }
     }
 
