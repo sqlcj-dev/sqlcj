@@ -972,6 +972,100 @@ class PostgresIntegrationTest {
         }
     }
 
+    /**
+     * Covers a grouped count end to end: a {@code :many} read whose projection
+     * is a direct column beside an aliased {@code COUNT(*)} is generated,
+     * compiled, and executed against PostgreSQL, so its result record exposes
+     * the grouped column and the count in projection order.
+     */
+    @Test
+    void shouldExecuteGeneratedGroupedCountAgainstPostgres() throws Exception {
+        Path classesDirectory = generateAndCompile("""
+            -- name: CountUsersByActive :many
+            SELECT active, COUNT(*) AS users
+            FROM users
+            GROUP BY active
+            ORDER BY active;
+            """);
+
+        execute("""
+            INSERT INTO users (id, code, name, active)
+            VALUES
+                (1, 1, 'Alice', TRUE),
+                (2, 2, 'Amy', TRUE),
+                (3, 3, 'Bob', FALSE)
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Object result = repository
+                .getClass()
+                .getMethod("countUsersByActive")
+                .invoke(repository);
+
+            List<?> groups = (List<?>) result;
+
+            assertEquals(2, groups.size());
+
+            assertEquals(
+                List.of("active", "users"),
+                recordComponentNames(groups.getFirst())
+            );
+
+            assertEquals(
+                List.of(Boolean.class, Long.class),
+                recordComponentTypes(groups.getFirst())
+            );
+
+            assertEquals(Boolean.FALSE, component(groups.get(0), "active"));
+            assertEquals(1L, component(groups.get(0), "users"));
+            assertEquals(Boolean.TRUE, component(groups.get(1), "active"));
+            assertEquals(2L, component(groups.get(1), "users"));
+        }
+    }
+
+    /**
+     * Covers a cast projection end to end: a {@code :one} read whose single
+     * projection is a cast aggregate is generated, compiled, and executed
+     * against PostgreSQL, so its result record exposes one nullable
+     * {@code BigDecimal} component that is {@code null} when no row matches.
+     */
+    @Test
+    void shouldExecuteGeneratedCastProjectionAgainstPostgres() throws Exception {
+        Path classesDirectory = generateAndCompile("""
+            -- name: SumBalanceByName :one
+            SELECT SUM(balance)::numeric AS total
+            FROM users
+            WHERE name LIKE $1;
+            """);
+
+        execute("""
+            INSERT INTO users (id, code, name, balance)
+            VALUES
+                (1, 1, 'Alice', 10.50),
+                (2, 2, 'Amy', 2.25),
+                (3, 3, 'Bob', 100.00)
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method sum = repository.getClass().getMethod(
+                "sumBalanceByName",
+                String.class
+            );
+
+            Object matching = sum.invoke(repository, "A%");
+
+            assertEquals(List.of("total"), recordComponentNames(matching));
+            assertEquals(List.of(BigDecimal.class), recordComponentTypes(matching));
+            assertEquals(new BigDecimal("12.75"), component(matching, "total"));
+
+            assertNull(component(sum.invoke(repository, "Z%"), "total"));
+        }
+    }
+
     @Test
     void shouldExecuteGeneratedWriteAgainstPostgres() throws Exception {
         Path classesDirectory = generateAndCompile("""

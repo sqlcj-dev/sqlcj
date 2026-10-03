@@ -288,7 +288,7 @@ public final class QueryAnalyzer {
 
         List<Source> sources = resolveSources(plainSelect, table, schema);
 
-        List<QueryColumn> columns = resolveColumns(plainSelect, sources);
+        List<QueryColumn> columns = resolveColumns(plainSelect, sources, schema);
 
         Placeholders placeholders = toPlaceholders(parsedSql, schema);
 
@@ -1730,8 +1730,15 @@ public final class QueryAnalyzer {
      * {@code qualifier.*} across one source, each in schema column order. A
      * column of a left-joined source is nullable even when its schema
      * declaration is not, because an unmatched row reads it as {@code NULL}.
+     *
+     * <p>An aliased scalar count and an aliased cast each resolve to one column
+     * in their own position, so either may stand beside any other item.
      */
-    private List<QueryColumn> resolveColumns(PlainSelect plainSelect, List<Source> sources) {
+    private List<QueryColumn> resolveColumns(
+        PlainSelect plainSelect,
+        List<Source> sources,
+        Schema schema
+    ) {
         List<QueryColumn> columns = new ArrayList<>();
 
         for (SelectItem<?> selectItem : plainSelect.getSelectItems()) {
@@ -1776,12 +1783,13 @@ public final class QueryAnalyzer {
             }
 
             if (expression instanceof Function function && isScalarCount(function)) {
-                columns.add(
-                    scalarCountColumn(
-                        selectItem.getAlias(),
-                        plainSelect.getSelectItems().size()
-                    )
-                );
+                columns.add(scalarCountColumn(selectItem.getAlias()));
+
+                continue;
+            }
+
+            if (expression instanceof CastExpression cast && cast.getColDataType() != null) {
+                columns.add(castColumn(cast, selectItem.getAlias(), schema));
 
                 continue;
             }
@@ -1826,13 +1834,7 @@ public final class QueryAnalyzer {
      * {@code count(*)} returns {@code bigint}, and it is non-null because a
      * count is always a number, {@code 0} when no row matches.
      */
-    private QueryColumn scalarCountColumn(Alias alias, int selectItemCount) {
-        if (selectItemCount > 1) {
-            throw new UnsupportedOperationException(
-                "COUNT(*) must be the only SELECT item."
-            );
-        }
-
+    private QueryColumn scalarCountColumn(Alias alias) {
         if (alias == null) {
             throw new UnsupportedOperationException(
                 "COUNT(*) requires a result alias, such as COUNT(*) AS total."
@@ -1840,6 +1842,39 @@ public final class QueryAnalyzer {
         }
 
         return new QueryColumn(alias.getUnquotedName(), ColumnType.BIGINT, false);
+    }
+
+    /**
+     * Resolves a cast projection into its single result column, which is named
+     * after the required alias and typed by the cast, as a cast types a
+     * placeholder. The column is nullable because the cast operand is not
+     * analyzed, so whether it can read as {@code NULL} is unknown here.
+     *
+     * <p>The operand itself reaches the database as written, as a non-binding
+     * write value does, so PostgreSQL rather than sqlcj checks it.
+     */
+    private QueryColumn castColumn(CastExpression cast, Alias alias, Schema schema) {
+        if (alias == null) {
+            throw new UnsupportedOperationException(
+                "A cast projection requires a result alias, such as SUM(amount)::numeric AS total."
+            );
+        }
+
+        String name = alias.getUnquotedName();
+
+        ColumnTypeMapping.MappedType type = columnTypeMapping.map(
+            cast.getColDataType(),
+            schema.enums()
+        );
+
+        if (!type.mapped()) {
+            throw new UnsupportedOperationException(
+                "Result column '%s' has unsupported cast type %s"
+                    .formatted(name, type.unsupportedType())
+            );
+        }
+
+        return new QueryColumn(name, type.type(), true, type.enumType(), type.array());
     }
 
     /**
