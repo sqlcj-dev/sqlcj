@@ -104,22 +104,27 @@ configuration entry.
   positional row mapper.
 - An unqualified column must be found in exactly one source; an ambiguous or
   unknown column is rejected.
-- A result expression that is not a direct column, a wildcard, or the scalar
-  count below — such as another function call, an arithmetic expression, or a
-  literal — is rejected.
+- A result expression that is not a direct column, a wildcard, the scalar count
+  below, or the cast projection below — such as another function call, an
+  arithmetic expression, or a literal — is rejected.
 - An explicit alias names the result column, so `SELECT id AS author_id`
   generates the record component `authorId` while the component's type still
   comes from the column and its nullability from the column and its source.
   sqlcj itself resolves an alias only in the projection; every other clause
   reaches the database as written.
 
-A read may count its matching rows with an aliased `COUNT(*)` as its only
-projection:
+A read may count its matching rows with an aliased `COUNT(*)`:
 
 ```sql
 -- name: CountAuthors :one
 SELECT COUNT(*) AS total
 FROM authors;
+
+-- name: CountAuthorsByCountry :many
+SELECT country, COUNT(*) AS total
+FROM authors
+GROUP BY country
+ORDER BY country;
 ```
 
 - The alias is required and may be written with or without `AS`, so both
@@ -128,15 +133,46 @@ FROM authors;
 - The component is a non-null `Long`: the count is typed `BIGINT` because
   `count(*)` returns `bigint`, and it is never null because a count is `0` when
   no row matches.
+- The count is one result column in its own position, so it may stand beside
+  direct columns, a wildcard, a cast projection, or another count, in either
+  order. `GROUP BY` itself is not analyzed and reaches the database as written,
+  so PostgreSQL rather than sqlcj checks that the grouping is valid.
 - The count is accepted over any supported source, predicate, ordering, and
   pagination shape, and under any annotation.
 - `COUNT(*)` without an alias is rejected with
-  `COUNT(*) requires a result alias, such as COUNT(*) AS total.`, and a
-  `COUNT(*)` beside another projection item is rejected with
-  `COUNT(*) must be the only SELECT item.`
+  `COUNT(*) requires a result alias, such as COUNT(*) AS total.`
 - Every other count is still an unsupported result expression, including
   `COUNT(column)`, `COUNT(DISTINCT column)`, `COUNT(t.*)`, a qualified
   `pg_catalog.count(*)`, and the `FILTER` and `OVER` forms.
+
+A read may also project a computed value by stating its type in a cast:
+
+```sql
+-- name: SumRoyaltiesByAuthor :one
+SELECT SUM(amount)::numeric AS total
+FROM royalties
+WHERE author_id = $1;
+```
+
+- Both cast spellings are the same projection, so
+  `SUM(amount)::numeric AS total` and `CAST(SUM(amount) AS numeric) AS total`
+  are equivalent.
+- The alias is required and may be written with or without `AS`, so
+  `SUM(amount)::numeric total` is equivalent as well. A cast projection without
+  an alias is rejected with
+  `A cast projection requires a result alias, such as SUM(amount)::numeric AS total.`
+- The result column takes the type the cast states, mapped exactly as a schema
+  column's declared type is, so a cast may name a declared enum type or a
+  one-dimensional array such as `::text[]`. A cast type sqlcj does not map is
+  rejected with
+  `Result column 'total' has unsupported cast type INTERVAL`, naming the result
+  column and the declared type.
+- The component is always nullable, because the cast operand is not analyzed
+  and so whether it can read as `NULL` is unknown at compile time.
+- The operand itself is not analyzed and reaches the database as written, so
+  PostgreSQL rather than sqlcj checks its column references and its functions.
+  A placeholder in a projection is still rejected, including a cast placeholder
+  such as `$1::int AS x`.
 
 ### Predicates
 
@@ -644,12 +680,14 @@ the documented shapes are contract, tested, and safe to rely on.
 Rejection stops the run with a diagnostic naming the query source, the query
 name, and its header line.
 
-- A result expression that is not a direct column, a wildcard, or an aliased
-  sole `COUNT(*)`, including another function call, another aggregate, and a
-  literal. A `COUNT(*)` without an alias and a `COUNT(*)` beside another
-  projection item each fail with their own diagnostic, while `COUNT(column)`,
-  `COUNT(DISTINCT column)`, `COUNT(t.*)`, `pg_catalog.count(*)`, and the
-  `FILTER` and `OVER` forms keep the unsupported-expression rejection.
+- A result expression that is not a direct column, a wildcard, an aliased
+  `COUNT(*)`, or an aliased cast, including another function call, another
+  aggregate, and a literal. A `COUNT(*)` without an alias, a cast projection
+  without an alias, and a cast projection whose type sqlcj does not map each
+  fail with their own diagnostic, while `COUNT(column)`,
+  `COUNT(DISTINCT column)`, `COUNT(t.*)`, `pg_catalog.count(*)`,
+  `lower(name) AS n`, and the `FILTER` and `OVER` forms keep the
+  unsupported-expression rejection.
 - A `FROM` item that is not a table, a comma-separated source list, a join that
   is not a plain inner or left join, a join predicate that is not one qualified
   equality, and a set operation such as `UNION`.
@@ -668,7 +706,8 @@ name, and its header line.
   is not the direct operand of its cast, such as `(:x)::int`.
 - A cast type sqlcj does not map, such as `$1::interval` or a
   multi-dimensional `$1::int[][]`, which is rejected naming the placeholder and
-  the declared type.
+  the declared type, or the result column and the declared type when the cast
+  is a projection such as `id::interval AS i`.
 - A `LIKE`-family pattern placeholder that is negated, uses another keyword such
   as `SIMILAR TO`, carries an `ESCAPE` clause or a `BINARY` modifier, tests a
   non-text column, or stands as the tested value. These restrict the uncast
@@ -809,13 +848,31 @@ Reads:
   executes a `LIMIT ... OFFSET ...` page and the same page written as
   `OFFSET ... LIMIT ...` against PostgreSQL 16.
 - `QueryAnalyzerTest.shouldResolveScalarCountColumnFromItsAlias`,
-  `QueryAnalyzerTest.shouldResolveScalarCountBesidePredicateParameter`, and
+  `QueryAnalyzerTest.shouldResolveScalarCountBesidePredicateParameter`,
+  `QueryAnalyzerTest.shouldResolveScalarCountBesideDirectColumn`,
+  `QueryAnalyzerTest.shouldResolveScalarCountBeforeDirectColumn`,
+  `QueryAnalyzerTest.shouldResolveGroupedCountBesidePredicateParameter`, and
   `QueryAnalyzerTest.shouldRejectUnsupportedCountProjectionForm` cover the
-  aliased sole `COUNT(*)`, its focused diagnostics, and the count and function
-  forms that stay rejected, and
+  aliased `COUNT(*)` alone and beside a grouped column in either position, its
+  focused diagnostic, and the count and function forms that stay rejected, and
   `PostgresIntegrationTest.shouldExecuteGeneratedScalarCountAgainstPostgres`
   compiles a `:one` count into a result record with one `Long` component and
-  executes it against PostgreSQL 16 for a matching and a non-matching pattern.
+  executes it against PostgreSQL 16 for a matching and a non-matching pattern,
+  while
+  `PostgresIntegrationTest.shouldExecuteGeneratedGroupedCountAgainstPostgres`
+  executes a `:many` grouped count whose result record carries the grouped
+  `Boolean` column and the `Long` count in projection order.
+- `QueryAnalyzerTest.shouldResolveCastProjectionColumnFromItsAlias`,
+  `QueryAnalyzerTest.shouldResolveEnumCastProjectionColumn`,
+  `QueryAnalyzerTest.shouldResolveArrayCastProjectionColumn`,
+  `QueryAnalyzerTest.shouldRejectUnsupportedCastProjectionForm`, and
+  `QueryAnalyzerTest.shouldRejectCastPlaceholderProjection` cover both cast
+  spellings and both alias spellings, the nullable column of the cast type
+  including a declared enum and an array, the missing alias and the unmapped
+  cast type, and the projected placeholder that stays rejected, and
+  `PostgresIntegrationTest.shouldExecuteGeneratedCastProjectionAgainstPostgres`
+  executes a `:one` cast `SUM` against PostgreSQL 16 whose `BigDecimal`
+  component is the sum and `null` when no row matches.
 - `QueryAnalyzerTest.shouldAnalyzeLeftJoinWithNullableJoinedColumns`,
   `QueryAnalyzerTest.shouldExpandAllColumnsOfLeftJoinedSourceAsNullable`,
   `QueryAnalyzerTest.shouldExpandQualifiedAllColumnsOfLeftJoinedSourceAsNullable`,
