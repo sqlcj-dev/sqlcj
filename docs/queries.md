@@ -295,7 +295,7 @@ A write targets exactly one table of its entry's schema.
 
 | Statement | Accepted shape |
 | --- | --- |
-| `INSERT` | an explicit column list and a single `VALUES` row, each value a placeholder or an expression that binds none |
+| `INSERT` | an explicit column list and a single `VALUES` row, each value a placeholder or an expression that binds none, with an optional `ON CONFLICT` clause |
 | `UPDATE` | `SET` assignments that each assign one direct column a placeholder or an expression that binds none, with an optional `WHERE` using the read predicate forms |
 | `DELETE` | one target table with an optional `WHERE` using the read predicate forms |
 
@@ -356,6 +356,53 @@ the whole value, as in `SET bio = :bio::text`, is typed by its cast as well and
 named after its column. A value that contains an uncast placeholder, such as
 `COALESCE($2, bio)`, stays rejected.
 
+### Upsert with `ON CONFLICT`
+
+An `INSERT` may end with one conflict clause whose target is a parenthesized
+list of plain column names of the inserted table, followed by one action:
+
+| Action | Accepted shape |
+| --- | --- |
+| `DO NOTHING` | no assignment, so the statement binds only its `VALUES` row |
+| `DO UPDATE SET` | assignments analyzed exactly as `UPDATE` assignments are, where a value may also be `EXCLUDED.column` |
+
+```sql
+-- name: UpsertAuthor :one
+INSERT INTO authors (id, name, bio)
+VALUES (:id, :name, :bio)
+ON CONFLICT (id) DO UPDATE
+SET name = EXCLUDED.name,
+    bio = :bio,
+    version = authors.version + 1,
+    updated_at = now()
+RETURNING *;
+```
+
+`UpsertAuthor` generates `upsertAuthor(Long id, String name, String bio)` and
+returns the `AuthorsRow` it inserted or updated.
+
+A `DO UPDATE` placeholder is written after the `VALUES` placeholders, so it
+binds after them: on a two-value insert,
+`ON CONFLICT (id) DO UPDATE SET active = $3` binds `$1`, `$2`, and `$3` in that
+order, and the repeated `:bio` above is bound at both of its positions. A
+`DO UPDATE` placeholder is typed by its assigned column, or by its own cast
+wherever a cast appears inside the assigned value.
+
+`EXCLUDED.column` reads the proposed row, and that column must exist in the
+inserted table. An `EXCLUDED` reference inside a larger expression is not
+resolved, as no other computed write value is, so PostgreSQL checks it. sqlcj
+does not match the conflict target against a unique index; PostgreSQL does.
+
+A `DO NOTHING` action writes no row when a conflict occurs, so
+`DO NOTHING ... RETURNING` returns no row on conflict and suits `:optional` or
+`:many` rather than `:one`. A `DO UPDATE ... RETURNING` always returns the row
+it inserted or updated.
+
+Every other conflict form is rejected on every insert, whether `:exec` or
+returning: a missing target, `ON CONFLICT ON CONSTRAINT`, a target element that
+is an expression or carries a collation or an operator class, a conflict-target
+predicate, and `DO UPDATE ... WHERE`.
+
 ### `RETURNING`
 
 A supported `INSERT`, `UPDATE`, or `DELETE` declared `:one`, `:optional`, or
@@ -372,9 +419,10 @@ the target table's shared `<TableName>Row` record, while a `RETURNING` column
 list keeps the query's own `<QueryName>Result` record.
 
 An aliased or computed `RETURNING` item, a qualified `table.*`, an unknown
-column, and `RETURNING` on `:exec` are rejected. `ON CONFLICT`, multi-row
-`VALUES`, `INSERT ... SELECT`, `UPDATE ... FROM`, `DELETE ... USING`, and common
-table expressions are rejected in a returning write.
+column, and `RETURNING` on `:exec` are rejected. Multi-row `VALUES`,
+`INSERT ... SELECT`, `UPDATE ... FROM`, `DELETE ... USING`, and common table
+expressions are rejected in a returning write, while an accepted `ON CONFLICT`
+clause is analyzed the same way with and without `RETURNING`.
 
 ## Parameters
 
@@ -721,9 +769,16 @@ name, and its header line.
   or built from a `SELECT`; an `UPDATE` assignment that sets a column list, such
   as `SET (name, active) = ('a', TRUE)`; and a written column that the table does
   not declare.
+- A conflict clause outside the accepted upsert shape, on an `:exec` and on a
+  returning insert alike: `ON CONFLICT` without a target, `ON CONFLICT ON
+  CONSTRAINT`, a target element that is an expression or carries a collation or
+  an operator class, a conflict-target predicate such as
+  `ON CONFLICT (id) WHERE active`, and `DO UPDATE ... WHERE`. A `DO UPDATE`
+  assignment that sets a column list, and an unknown target, assigned, or
+  `EXCLUDED` column, are rejected as the write forms above are.
 - An aliased, computed, qualified-wildcard, or unknown `RETURNING` item;
-  `RETURNING` on `:exec`; and `ON CONFLICT`, `UPDATE ... FROM`,
-  `DELETE ... USING`, or a common table expression in a returning write.
+  `RETURNING` on `:exec`; and `UPDATE ... FROM`, `DELETE ... USING`, or a common
+  table expression in a returning write.
 - Any annotation other than `:one`, `:optional`, `:many`, and `:exec`.
 
 ### Not analyzed
@@ -739,8 +794,9 @@ them:
   literal pattern, a range whose bounds are both literal such as
   `id BETWEEN 1 AND 10`, or `IN` with a subquery,
 - common table expressions, and subqueries outside the `FROM` item,
-- `ON CONFLICT`, `UPDATE ... FROM`, and `DELETE ... USING` on a non-returning
-  `:exec` write.
+- `UPDATE ... FROM` and `DELETE ... USING` on a non-returning `:exec` write,
+- the unique index an accepted `ON CONFLICT` target matches, and the column
+  references of an `EXCLUDED` value that is not exactly `EXCLUDED.column`.
 
 sqlcj itself provides no macros, array operators such as `= ANY`, dynamic `IN`
 expansion, or query-building API. An array parameter is one whole list bound at
@@ -916,6 +972,24 @@ Writes and `RETURNING`:
   `QueryAnalyzerTest.shouldRejectExcludedWriteValueForm` cover the values that
   bind no placeholder, their numbering and binding order, and the nearby
   rejections.
+- `QueryAnalyzerTest.shouldAnalyzeUpsertThatUpdatesOnConflict`,
+  `QueryAnalyzerTest.shouldAnalyzeReturningUpsertThatUpdatesOnConflict`,
+  `QueryAnalyzerTest.shouldAnalyzeNamedUpsertThatUpdatesOnConflict`,
+  `QueryAnalyzerTest.shouldAnalyzeUpsertThatDoesNothingOnConflict`,
+  `QueryAnalyzerTest.shouldResolveRowTableForUpsertThatDoesNothingOnConflict`,
+  `QueryAnalyzerTest.shouldRejectAConflictTargetThatIsNotColumnNames`,
+  `QueryAnalyzerTest.shouldRejectExcludedConflictForm`,
+  `QueryAnalyzerTest.shouldRejectAnUncastPlaceholderInsideAConflictUpdateValue`,
+  and `QueryAnalyzerTest.shouldRejectAnUnknownConflictColumn` cover the accepted
+  conflict target, both actions, the `EXCLUDED`, placeholder, cast, and
+  computed assignments, the binding order after the `VALUES` placeholders, the
+  returning row type, and the conflict forms, unaccounted placeholder, and
+  unknown target, assigned, and `EXCLUDED` columns that are rejected on an
+  `:exec` and on a returning insert alike, and
+  `PostgresIntegrationTest.shouldExecuteGeneratedUpsertsAgainstPostgres`
+  executes a `DO NOTHING` and a `DO UPDATE` action, each with and without
+  `RETURNING`, over a new row and then a conflicting one against
+  PostgreSQL 16.
 - `QueryAnalyzerTest.shouldResolveRowTableForReturningAllColumns` covers the
   returning writes that produce a complete table row.
 - `PostgresIntegrationTest.shouldExecuteGeneratedWriteAgainstPostgres`,

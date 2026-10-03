@@ -3724,7 +3724,7 @@ class QueryAnalyzerTest {
         delimiter = '|',
         value = {
             "INSERT INTO users (id) VALUES ($1) ON CONFLICT DO NOTHING RETURNING id"
-                + "|INSERT ... ON CONFLICT is not supported.",
+                + "|ON CONFLICT requires a target of column names, such as ON CONFLICT (id).",
             "INSERT INTO users (id) SELECT id FROM users RETURNING id"
                 + "|RETURNING requires an INSERT with a single VALUES row.",
             "INSERT INTO users (id) VALUES ($1), ($2) RETURNING id"
@@ -4458,5 +4458,293 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(message, exception.getMessage());
+    }
+
+    /**
+     * A {@code DO UPDATE} action assigns its columns as an {@code UPDATE} does:
+     * {@code EXCLUDED.column} and a computed value bind nothing, while the
+     * assigned placeholder binds after the {@code VALUES} placeholders, in the
+     * textual order the query writes them.
+     */
+    @Test
+    void shouldAnalyzeUpsertThatUpdatesOnConflict() {
+        String sql = """
+            INSERT INTO users (id, name)
+            VALUES ($1, $2)
+            ON CONFLICT (id) DO UPDATE
+            SET name = EXCLUDED.name,
+                active = $3,
+                version = users.version + 1,
+                updated_at = now()""";
+
+        QueryModel model = analyzer.analyze(
+            new Query("UpsertUser", QueryType.EXEC, sql),
+            parser.parse(sql),
+            writeSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR),
+                new QueryParameter(3, "active", ColumnType.BOOLEAN)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2, 3), model.bindingParameterIndexes());
+
+        assertEquals(
+            """
+                INSERT INTO users (id, name)
+                VALUES (?, ?)
+                ON CONFLICT (id) DO UPDATE
+                SET name = EXCLUDED.name,
+                    active = ?,
+                    version = users.version + 1,
+                    updated_at = now()""",
+            model.executableSql()
+        );
+    }
+
+    /** The same upsert returns the row the action wrote. */
+    @Test
+    void shouldAnalyzeReturningUpsertThatUpdatesOnConflict() {
+        String sql = """
+            INSERT INTO users (id, name)
+            VALUES ($1, $2)
+            ON CONFLICT (id) DO UPDATE
+            SET name = EXCLUDED.name,
+                active = $3,
+                version = users.version + 1,
+                updated_at = now()
+            RETURNING id""";
+
+        QueryModel model = analyzer.analyze(
+            new Query("UpsertUser", QueryType.ONE, sql),
+            parser.parse(sql),
+            writeSchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR),
+                new QueryParameter(3, "active", ColumnType.BOOLEAN)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2, 3), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A named upsert numbers its parameters by first occurrence, so a name
+     * repeated by the action binds the parameter the {@code VALUES} row
+     * introduced, and a cast placeholder inside an assigned expression is typed
+     * by its cast.
+     */
+    @Test
+    void shouldAnalyzeNamedUpsertThatUpdatesOnConflict() {
+        String sql = """
+            INSERT INTO users (id, name)
+            VALUES (:id, :name)
+            ON CONFLICT (id) DO UPDATE
+            SET name = :name,
+                bio = COALESCE(:bio::text, bio)""";
+
+        QueryModel model = analyzer.analyze(
+            new Query("UpsertUser", QueryType.EXEC, sql),
+            parser.parse(sql),
+            writeSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR),
+                new QueryParameter(3, "bio", ColumnType.TEXT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2, 2, 3), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A {@code DO NOTHING} action binds nothing, so the insert keeps exactly
+     * the parameters of its {@code VALUES} row, and a quoted target column
+     * resolves by its unquoted name.
+     */
+    @Test
+    void shouldAnalyzeUpsertThatDoesNothingOnConflict() {
+        String sql = "INSERT INTO users (id, name) VALUES ($1, $2) ON CONFLICT (\"id\", name) DO NOTHING";
+
+        QueryModel model = analyzer.analyze(
+            new Query("UpsertUser", QueryType.EXEC, sql),
+            parser.parse(sql),
+            writeSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+
+        assertEquals(
+            "INSERT INTO users (id, name) VALUES (?, ?) ON CONFLICT (\"id\", name) DO NOTHING",
+            model.executableSql()
+        );
+    }
+
+    /** A returning upsert that does nothing still returns one complete row. */
+    @Test
+    void shouldResolveRowTableForUpsertThatDoesNothingOnConflict() {
+        String sql = "INSERT INTO users (id, name) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING RETURNING *";
+
+        QueryModel model = analyzer.analyze(
+            new Query("UpsertUser", QueryType.OPTIONAL, sql),
+            parser.parse(sql),
+            writeSchema
+        );
+
+        assertEquals("users", model.rowTable());
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR)
+            ),
+            model.parameters()
+        );
+    }
+
+    /**
+     * A conflict target that is anything other than plain column names — an
+     * absent target, a named constraint, an expression, a collated column, or a
+     * column with an operator class — decides the conflict by something the
+     * analyzed model does not describe.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "ON CONFLICT DO NOTHING",
+            "ON CONFLICT ON CONSTRAINT users_pkey DO NOTHING",
+            "ON CONFLICT (lower(name)) DO NOTHING",
+            "ON CONFLICT (name COLLATE \"C\") DO NOTHING",
+            "ON CONFLICT (name text_pattern_ops) DO NOTHING"
+        }
+    )
+    void shouldRejectAConflictTargetThatIsNotColumnNames(String conflictClause) {
+        assertConflictRejection(
+            conflictClause,
+            "ON CONFLICT requires a target of column names, such as ON CONFLICT (id)."
+        );
+    }
+
+    /** The remaining conflict forms outside the subset and their messages. */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "ON CONFLICT (id) WHERE active DO NOTHING|"
+                + "ON CONFLICT target predicates are not supported.",
+            "ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name WHERE users.active|"
+                + "ON CONFLICT DO UPDATE ... WHERE is not supported.",
+            "ON CONFLICT (id) DO UPDATE SET (name, active) = ('a', TRUE)|"
+                + "UPDATE assignments must set one column at a time."
+        }
+    )
+    void shouldRejectExcludedConflictForm(String conflictClause, String message) {
+        assertConflictRejection(conflictClause, message);
+    }
+
+    /**
+     * Asserts that one conflict clause is rejected with the same message on an
+     * {@code :exec} insert and on a returning insert.
+     */
+    private void assertConflictRejection(String conflictClause, String message) {
+        String insert = "INSERT INTO users (id, name) VALUES ($1, $2) " + conflictClause;
+
+        assertEquals(message, conflictRejection(QueryType.EXEC, insert).getMessage());
+
+        assertEquals(
+            message,
+            conflictRejection(QueryType.ONE, insert + " RETURNING id").getMessage()
+        );
+    }
+
+    private UnsupportedOperationException conflictRejection(QueryType type, String sql) {
+        Query query = new Query("UpsertUser", type, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        return assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, writeSchema)
+        );
+    }
+
+    /**
+     * A placeholder inside a {@code DO UPDATE} value is analyzed only through
+     * its own cast, so an uncast one stays unaccounted.
+     */
+    @Test
+    void shouldRejectAnUncastPlaceholderInsideAConflictUpdateValue() {
+        String sql = """
+            INSERT INTO users (id, name)
+            VALUES ($1, $2)
+            ON CONFLICT (id) DO UPDATE SET version = version + $3""";
+
+        Query query = new Query("UpsertUser", QueryType.EXEC, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, writeSchema)
+        );
+
+        assertEquals(
+            "SQL placeholders [1, 2, 3] are not the analyzed parameters [1, 2];"
+                + " a placeholder is in an unsupported location",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A target column, an assigned column, and a column read from
+     * {@code EXCLUDED} must each exist in the inserted table.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "INSERT INTO users (id) VALUES ($1) ON CONFLICT (missing) DO NOTHING",
+            "INSERT INTO users (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET missing = 'a'",
+            "INSERT INTO users (id) VALUES ($1) ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.missing"
+        }
+    )
+    void shouldRejectAnUnknownConflictColumn(String sql) {
+        Query query = new Query("UpsertUser", QueryType.EXEC, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, parsedSql, writeSchema)
+        );
+
+        assertEquals(
+            "Column not found in table users: missing",
+            exception.getMessage()
+        );
     }
 }
