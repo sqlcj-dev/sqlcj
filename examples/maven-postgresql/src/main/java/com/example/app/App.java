@@ -21,22 +21,26 @@ import java.util.Optional;
  * code: create, read, optional read, list, update, a missing-row read, a
  * committed transaction, a rolled back transaction, a case-insensitive search,
  * a count, a page, a book insert, a left-joined projection, a cataloged book
- * insert, a read by enum value, and delete.
+ * insert, a read by enum value, an optional filter by name, a read by id list,
+ * a grouped book count, a rename, an upsert, and delete.
  *
- * <p>All thirteen named queries are methods of one generated
+ * <p>All eighteen named queries are methods of one generated
  * {@link AuthorRepository}. The repository is constructed once per execution
  * context: once from the {@code DataSource}-backed executor, and once more per
  * transaction from a caller-owned connection.
  *
- * <p>Create, read, optional read, list, search, and page each return one
- * complete {@code authors} row, so all six share the single top-level
- * {@link AuthorsRow} record of the generated package, and the two queries that
- * return a complete {@code books} row share the top-level {@link BooksRow}
- * record. A query with its own result shape generates its own nested record:
- * {@link AuthorRepository.CountAuthorsResult} carries the non-null
- * {@code Long} count, and {@link AuthorRepository.ListAuthorBooksResult}
- * carries an author name beside the title of the left-joined {@code books} row,
- * which is {@code null} for an author without a book.
+ * <p>Create, read, optional read, list, search, page, filter, upsert, and the
+ * read by id list each return one complete {@code authors} row, so all nine
+ * share the single top-level {@link AuthorsRow} record of the generated
+ * package, and the two queries that return a complete {@code books} row share
+ * the top-level {@link BooksRow} record. A query with its own result shape
+ * generates its own nested record: {@link AuthorRepository.CountAuthorsResult}
+ * carries the non-null {@code Long} count,
+ * {@link AuthorRepository.ListAuthorBooksResult} carries an author name beside
+ * the title of the left-joined {@code books} row, which is {@code null} for an
+ * author without a book, and
+ * {@link AuthorRepository.CountBooksByAuthorResult} carries an author id beside
+ * the non-null {@code Long} number of that author's books.
  *
  * <p>Row absence is expressed by the {@code :optional} {@code FindAuthor}
  * query, which returns an empty {@link Optional}, while the {@code :one}
@@ -48,6 +52,16 @@ import java.util.Optional;
  * the generated Java enum, a {@code List<String>} of tags, and the
  * {@code JSONB} document as JSON text, which PostgreSQL returns normalized.
  * The enum is also bound as a query parameter to select books by format.
+ *
+ * <p>The fourth migration adds the nullable {@code updated_at} column to
+ * {@code authors}, so {@link AuthorsRow} carries it as a
+ * {@link java.time.LocalDateTime}. The rename and the upsert set it with
+ * {@code now()} without binding a parameter for it, and the upsert targets the
+ * existing author of the conflicting id, so the {@code BIGSERIAL} key is never
+ * given an explicit new value. The filter binds its one {@code :name}
+ * parameter to both of its occurrences, so a {@code null} argument returns
+ * every author and a name returns only that author, and the read by id list
+ * binds one {@code List} as one server array, so an empty list matches no row.
  *
  * <p>Every step is checked, so the process exits non-zero as soon as one
  * generated operation returns an unexpected result.
@@ -217,6 +231,71 @@ public final class App {
             "cataloged book: " + cataloged.id() + " " + cataloged.format()
                 + " " + cataloged.tags() + " " + cataloged.details()
         );
+
+        List<AuthorsRow> unfiltered = authors.filterAuthors(null);
+
+        checkEquals(2, unfiltered.size(), "FilterAuthors row count without a name");
+        checkEquals(created.id(), unfiltered.get(0).id(), "FilterAuthors first unfiltered id");
+        checkEquals(committedId, unfiltered.get(1).id(), "FilterAuthors second unfiltered id");
+
+        List<AuthorsRow> filtered = authors.filterAuthors("Ada Lovelace");
+
+        checkEquals(1, filtered.size(), "FilterAuthors row count for one name");
+        checkEquals(created.id(), filtered.get(0).id(), "FilterAuthors filtered id");
+        checkEquals("Ada Lovelace", filtered.get(0).name(), "FilterAuthors filtered name");
+
+        System.out.println(
+            "filtered: " + unfiltered.size() + " without a name, "
+                + filtered.get(0).name() + " by name"
+        );
+
+        List<AuthorsRow> byIds = authors.listAuthorsByIds(List.of(created.id(), committedId));
+
+        checkEquals(2, byIds.size(), "ListAuthorsByIds row count for two ids");
+        checkEquals(created.id(), byIds.get(0).id(), "ListAuthorsByIds first id");
+        checkEquals(committedId, byIds.get(1).id(), "ListAuthorsByIds second id");
+        checkEquals(
+            0,
+            authors.listAuthorsByIds(List.of()).size(),
+            "ListAuthorsByIds row count for an empty list"
+        );
+
+        System.out.println("by ids: " + byIds.get(0).id() + " " + byIds.get(1).id());
+
+        List<AuthorRepository.CountBooksByAuthorResult> bookCounts = authors.countBooksByAuthor();
+
+        checkEquals(1, bookCounts.size(), "CountBooksByAuthor row count");
+        checkEquals(committedId, bookCounts.get(0).authorId(), "CountBooksByAuthor author id");
+        checkEquals(2L, bookCounts.get(0).books(), "CountBooksByAuthor count");
+
+        System.out.println(
+            "book counts: " + bookCounts.get(0).authorId() + " / " + bookCounts.get(0).books()
+        );
+
+        int renamedRows = authors.renameAuthor("Ada Byron", created.id());
+
+        checkEquals(1, renamedRows, "RenameAuthor affected rows");
+
+        AuthorsRow renamed = authors.getAuthor(created.id());
+
+        checkEquals("Ada Byron", renamed.name(), "name after rename");
+        check(renamed.updatedAt() != null, "RenameAuthor left updatedAt null");
+
+        System.out.println("renamed: " + renamed.name() + " at " + renamed.updatedAt());
+
+        AuthorsRow upserted = authors.upsertAuthor(
+            committedId,
+            "Grace Murray Hopper",
+            "Rear admiral"
+        );
+
+        check(upserted != null, "UpsertAuthor returned no row");
+        checkEquals(committedId, upserted.id(), "UpsertAuthor id");
+        checkEquals("Grace Murray Hopper", upserted.name(), "UpsertAuthor name");
+        checkEquals("Rear admiral", upserted.bio(), "UpsertAuthor bio");
+        check(upserted.updatedAt() != null, "UpsertAuthor left updatedAt null");
+
+        System.out.println("upserted: " + upserted.name() + " / " + upserted.bio());
 
         int deletedRows = authors.deleteAuthor(created.id());
 
