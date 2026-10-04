@@ -90,6 +90,32 @@ class QueryAnalyzerTest {
         List.of(new EnumType("stage_setting", List.of("indoor", "outdoor")))
     );
 
+    /**
+     * A schema whose {@code users} table carries two columns of one type, a
+     * blank-padded character column, an enum column, and a column of every kind
+     * an array parameter cannot carry, for the list predicate.
+     */
+    private static final Schema anyListSchema = new Schema(
+        List.of(
+            new Table(
+                "users",
+                List.of(
+                    new Column("id", ColumnType.BIGINT, false),
+                    new Column("parent_id", ColumnType.BIGINT, true),
+                    new Column("name", ColumnType.VARCHAR, true),
+                    new Column("code", ColumnType.VARCHAR, true, null, null, false, true),
+                    new Column("role", ColumnType.ENUM, true, null, "user_role"),
+                    new Column("tags", ColumnType.VARCHAR, true, null, null, true),
+                    new Column("avatar", ColumnType.BYTEA, true),
+                    new Column("payload", ColumnType.JSON, true),
+                    new Column("document", ColumnType.JSONB, true)
+                ),
+                List.of()
+            )
+        ),
+        List.of(new EnumType("user_role", List.of("admin", "member")))
+    );
+
     /** A schema with both text column types, for the text predicate forms. */
     private static final Schema predicateSchema = new Schema(
         List.of(
@@ -3794,6 +3820,7 @@ class QueryAnalyzerTest {
             "SELECT id FROM users WHERE tags = $1|MANY",
             "SELECT id FROM users WHERE tags IN ($1)|MANY",
             "SELECT id FROM users WHERE tags LIKE $1|MANY",
+            "SELECT id FROM users WHERE tags = ANY($1)|MANY",
             "INSERT INTO users (tags) VALUES ($1)|EXEC",
             "UPDATE users SET tags = $1|EXEC",
             "DELETE FROM users WHERE id = $1 RETURNING tags|MANY",
@@ -4744,6 +4771,271 @@ class QueryAnalyzerTest {
 
         assertEquals(
             "Column not found in table users: missing",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A placeholder that is the argument of {@code = ANY} is one list of the
+     * compared column's type, named after that column and bound at its own
+     * {@code ?} position, however the operator and the column are spelled. The
+     * rest of the statement, including the operator, reaches JDBC as written.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "SELECT id FROM users WHERE id = ANY($1)",
+            "SELECT id FROM users WHERE id = any($1)",
+            "SELECT u.id FROM users u WHERE u.id = ANY($1)"
+        }
+    )
+    void shouldResolveListParameterOfAnyFromItsComparedColumn(String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            anyListSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT, null, true)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+        assertEquals(sql.replace("$1", "?"), model.executableSql());
+    }
+
+    /**
+     * A named list placeholder keeps its own name, and one name used by two
+     * list predicates is one parameter bound at both of its positions.
+     */
+    @Test
+    void shouldResolveNamedListParameterOfAnyAtEveryOccurrence() {
+        String sql = "SELECT id FROM users WHERE id = ANY(:ids) OR parent_id = ANY(:ids)";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            anyListSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "ids", ColumnType.BIGINT, null, true)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A list parameter carries its column's enum type and blank-padded
+     * spelling, so that generation binds the labels of an enum list and the
+     * {@code bpchar} elements of a blank-padded character list.
+     */
+    @Test
+    void shouldCarryTheEnumTypeAndBlankPaddingOfAListParameterOfAny() {
+        String sql = "SELECT id FROM users WHERE role = ANY($1) OR code = ANY($2)";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            anyListSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "role", ColumnType.ENUM, "user_role", true),
+                new QueryParameter(2, "code", ColumnType.VARCHAR, null, true, true)
+            ),
+            model.parameters()
+        );
+    }
+
+    /**
+     * The {@code WHERE} clause of a write analyzes a list predicate as a read
+     * does, so the written value is bound before the list it selects rows by.
+     */
+    @Test
+    void shouldResolveListParameterOfAnyInWrites() {
+        String delete = "DELETE FROM users WHERE id = ANY($1)";
+
+        QueryModel deleted = analyzer.analyze(
+            new Query("DeleteUsers", QueryType.EXEC, delete),
+            parser.parse(delete),
+            anyListSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT, null, true)),
+            deleted.parameters()
+        );
+
+        assertEquals(List.of(1), deleted.bindingParameterIndexes());
+
+        String update = "UPDATE users SET name = $1 WHERE id = ANY($2)";
+
+        QueryModel updated = analyzer.analyze(
+            new Query("RenameUsers", QueryType.EXEC, update),
+            parser.parse(update),
+            anyListSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "name", ColumnType.VARCHAR),
+                new QueryParameter(2, "id", ColumnType.BIGINT, null, true)
+            ),
+            updated.parameters()
+        );
+
+        assertEquals(List.of(1, 2), updated.bindingParameterIndexes());
+    }
+
+    /**
+     * A cast that is the direct argument of {@code = ANY} states its own type
+     * and keeps the compared column's name, as a cast beside a compared column
+     * does, while a named one keeps its own name.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "SELECT id FROM users WHERE id = ANY($1::bigint[])|id",
+            "SELECT id FROM users WHERE id = ANY(CAST($1 AS bigint[]))|id",
+            "SELECT id FROM users WHERE id = ANY(:ids::bigint[])|ids"
+        }
+    )
+    void shouldNameTheCastArgumentOfAnyAfterItsComparedColumn(String sql, String name) {
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            anyListSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, name, ColumnType.BIGINT, null, true)),
+            model.parameters()
+        );
+    }
+
+    /**
+     * A cast placeholder under an operator that is not the list predicate is
+     * named after its own placeholder, as any other unnamed cast is.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "SELECT id FROM users WHERE id <> ANY($1::bigint[])|BIGINT",
+            "SELECT id FROM users WHERE tags && $1::varchar[]|VARCHAR"
+        }
+    )
+    void shouldNameACastArgumentOutsideTheListPredicateAfterItsPlaceholder(
+        String sql,
+        ColumnType type
+    ) {
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            anyListSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "param1", type, null, true)),
+            model.parameters()
+        );
+    }
+
+    /**
+     * A list parameter takes the compared column's type as its element type, so
+     * a column sqlcj binds no array of is rejected: an array column, whose own
+     * values are not elements of its type, and a {@code BYTEA}, {@code JSON},
+     * or {@code JSONB} column, which has no array element binding.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        {
+            "tags, VARCHAR[]",
+            "avatar, BYTEA",
+            "payload, JSON",
+            "document, JSONB"
+        }
+    )
+    void shouldRejectAListParameterOfAColumnWithoutAnArrayBinding(
+        String column,
+        String type
+    ) {
+        String sql = "SELECT id FROM users WHERE %s = ANY($1)".formatted(column);
+
+        Query query = new Query("ListUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, anyListSchema)
+        );
+
+        assertEquals(
+            ("An = ANY placeholder requires a non-array column of a type other than BYTEA, "
+                + "JSON, and JSONB, but %s is %s.").formatted(column, type),
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * Only the exact list-predicate shape binds a list, so another operator,
+     * another operand order, another quantifier, a modifier, and an argument
+     * that is not one placeholder leave their placeholders unaccounted.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "SELECT id FROM users WHERE id <> ANY($1)|[1]",
+            "SELECT id FROM users WHERE id = SOME($1)|[1]",
+            "SELECT id FROM users WHERE ANY($1) = id|[1]",
+            "SELECT id FROM users WHERE id = ANY(ARRAY[$1, $2])|[1, 2]",
+            "SELECT id FROM users WHERE id = ANY(DISTINCT $1)|[1]",
+            "SELECT id FROM users WHERE id = ANY($1 ORDER BY id)|[1]"
+        }
+    )
+    void shouldRejectAPlaceholderOutsideTheListPredicateShape(String sql, String compiled) {
+        Query query = new Query("ListUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, anyListSchema)
+        );
+
+        assertEquals(
+            "SQL placeholders %s are not the analyzed parameters []; ".formatted(compiled)
+                + "a placeholder is in an unsupported location",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A list and a value of its element type are two Java types, so one name
+     * used as both has no single type and is rejected.
+     */
+    @Test
+    void shouldRejectANameUsedAsBothAListAndItsElement() {
+        String sql = "SELECT id FROM users WHERE id = ANY(:ids) OR id = :ids";
+
+        Query query = new Query("ListUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, anyListSchema)
+        );
+
+        assertEquals(
+            "Placeholder :ids has conflicting types: List<Long> and Long",
             exception.getMessage()
         );
     }

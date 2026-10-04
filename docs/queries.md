@@ -186,7 +186,9 @@ A `WHERE` clause may combine:
   such as `name LIKE $1`,
 - `IS NULL` and `IS NOT NULL` on a direct column, such as `bio IS NULL`,
 - `BETWEEN` and `NOT BETWEEN` on a direct column, such as
-  `code BETWEEN $1 AND $2`.
+  `code BETWEEN $1 AND $2`,
+- `= ANY` between a direct column and one `$N` list placeholder, such as
+  `id = ANY($1)`.
 
 A `LIKE` or `ILIKE` pattern placeholder requires a `VARCHAR` or `TEXT` column
 and takes that column's type, so it is a `String` method parameter. sqlcj passes
@@ -211,6 +213,24 @@ bound such as `code BETWEEN :lo AND :hi` is typed the same way and named after
 its placeholder, while a placeholder as the tested value, as in
 `$1 BETWEEN code AND code`, and a placeholder inside a computed bound, as in
 `code BETWEEN $1 + 1 AND $2`, are rejected as unanalyzed placeholder locations.
+
+`<column> = ANY(<placeholder>)` is the id-list read. The placeholder is one
+whole list of the compared column's type, named after that column, so
+`WHERE id = ANY($1)` takes a `List<Long> id` and the runtime binds the list as
+one PostgreSQL array at one `?` position. A null list and an empty list contain
+no value, so each matches no row. A named list keeps its own name, and one name
+used by two list predicates, as in
+`id = ANY(:ids) OR parent_id = ANY(:ids)`, is one parameter bound at both
+positions.
+
+The compared column must be a non-array column of a declared enum type or of a
+mapped type other than `BYTEA`, `JSON`, and `JSONB`, which are the element
+types sqlcj binds no array of; any other column is rejected. Only this exact
+shape is analyzed: the operator is `=`, the column is its left operand, and
+`ANY` is written unquoted and unqualified with exactly one placeholder
+argument. `id <> ANY($1)`, `id = SOME($1)`, `ANY($1) = id`, and
+`id = ANY(ARRAY[$1, $2])` are therefore rejected as unanalyzed placeholder
+locations, and sqlcj expands no `IN` list of its own.
 
 A comparison that binds no placeholder, such as `active = TRUE`, contributes no
 generated parameter and reaches the database as written.
@@ -244,8 +264,13 @@ to an uncast pattern: `name NOT LIKE $1::text`, `name SIMILAR TO $1::text`, and
 `name LIKE $1::text ESCAPE '!'` are accepted and typed `text`, whatever the
 tested column's type is. Such a pattern is named after its placeholder rather
 than after the tested column, so an indexed one is `param<N>`, as in `param1`
-for `$1`. [Parameters](#parameters) states the accepted cast types and the name
-a cast placeholder takes.
+for `$1`. A cast that is the direct argument of an analyzed `= ANY` list, as in
+`id = ANY($1::bigint[])`, `id = ANY(CAST($1 AS bigint[]))`, or
+`id = ANY(:ids::bigint[])`, states its own type and keeps the compared column's
+name, while a cast under any other operator, such as `id <> ANY($1::bigint[])`
+or `tags && $1::varchar[]`, is named `param<N>`.
+[Parameters](#parameters) states the accepted cast types and the name a cast
+placeholder takes.
 
 ### Ordering
 
@@ -457,8 +482,9 @@ string literal, a quoted identifier, or a comment is not a parameter.
 - A named cast placeholder keeps its own name. An indexed cast placeholder
   keeps the name of the column whose value it is — a compared column, the
   tested column of `IN` or `BETWEEN`, the tested column of a plain `LIKE` or
-  `ILIKE` pattern, which is the shape that accepts an uncast pattern, or an
-  inserted or assigned column — so `name = $1::text` names `name` as
+  `ILIKE` pattern, which is the shape that accepts an uncast pattern, the
+  compared column of an analyzed `= ANY` list, or an inserted or assigned
+  column — so `name = $1::text` names `name` as
   `name = $1` does. Every other indexed cast placeholder is named `param<N>`
   after its own index, as in `param1` for `$1`, and colliding names take the
   usual numeric suffix.
@@ -760,6 +786,16 @@ name, and its header line.
   as `SIMILAR TO`, carries an `ESCAPE` clause or a `BINARY` modifier, tests a
   non-text column, or stands as the tested value. These restrict the uncast
   pattern placeholder; a cast pattern states its own type.
+- A `= ANY` list placeholder whose compared column is an array column or a
+  `BYTEA`, `JSON`, or `JSONB` column, because sqlcj binds no array of those
+  element types. Every form outside the analyzed shape — another operator such
+  as `id <> ANY($1)`, another quantifier such as `id = SOME($1)`, a reversed
+  `ANY($1) = id`, a quoted or qualified `"ANY"($1)` or `pg_catalog.any($1)`,
+  a modifier such as `ANY(DISTINCT $1)`, more than one argument, and an
+  argument that is not one placeholder, such as `id = ANY(ARRAY[$1, $2])` —
+  keeps the unanalyzed-placeholder rejection. A
+  cast does not widen them: `id <> ANY($1::bigint[])` is accepted only as any
+  other cast placeholder is, named after its own index.
 - Anonymous `?` placeholders, `$N` and `:name` placeholders mixed in one query,
   a qualified name such as `:a.b`, a quoted name such as `:"x"`, an `&name`
   placeholder, each of them also as the operand of a cast, such as
@@ -790,17 +826,18 @@ them:
 
 - `DISTINCT`, `GROUP BY`, and `HAVING`,
 - predicate forms other than the listed comparisons, `AND`/`OR`, fixed `IN`
-  lists, pattern placeholders, null tests, and ranges, such as `LIKE` with a
-  literal pattern, a range whose bounds are both literal such as
-  `id BETWEEN 1 AND 10`, or `IN` with a subquery,
+  lists, pattern placeholders, null tests, ranges, and list predicates, such as
+  `LIKE` with a literal pattern, a range whose bounds are both literal such as
+  `id BETWEEN 1 AND 10`, `IN` with a subquery, or `= ANY` over something other
+  than a placeholder, such as `id = ANY('{1,2}')`,
 - common table expressions, and subqueries outside the `FROM` item,
 - `UPDATE ... FROM` and `DELETE ... USING` on a non-returning `:exec` write,
 - the unique index an accepted `ON CONFLICT` target matches, and the column
   references of an `EXCLUDED` value that is not exactly `EXCLUDED.column`.
 
-sqlcj itself provides no macros, array operators such as `= ANY`, dynamic `IN`
-expansion, or query-building API. An array parameter is one whole list bound at
-one placeholder, not a placeholder list.
+sqlcj itself provides no macros, dynamic `IN` expansion, or query-building API.
+The `= ANY` list predicate is the only analyzed array operator. An array
+parameter is one whole list bound at one placeholder, not a placeholder list.
 
 Unsupported schema input and unsupported column types are listed in
 [PostgreSQL Support](postgresql.md#unsupported-types-and-ddl).
@@ -893,6 +930,24 @@ Reads:
   `PostgresIntegrationTest.shouldExecuteGeneratedRangePredicatesAgainstPostgres`
   executes a `BETWEEN` read and a `NOT BETWEEN` read whose bounds use
   out-of-order placeholder indexes against PostgreSQL 16.
+- `QueryAnalyzerTest.shouldResolveListParameterOfAnyFromItsComparedColumn`,
+  `QueryAnalyzerTest.shouldResolveNamedListParameterOfAnyAtEveryOccurrence`,
+  `QueryAnalyzerTest.shouldCarryTheEnumTypeAndBlankPaddingOfAListParameterOfAny`,
+  `QueryAnalyzerTest.shouldResolveListParameterOfAnyInWrites`,
+  `QueryAnalyzerTest.shouldNameTheCastArgumentOfAnyAfterItsComparedColumn`,
+  `QueryAnalyzerTest.shouldNameACastArgumentOutsideTheListPredicateAfterItsPlaceholder`,
+  `QueryAnalyzerTest.shouldRejectAListParameterOfAColumnWithoutAnArrayBinding`,
+  `QueryAnalyzerTest.shouldRejectAPlaceholderOutsideTheListPredicateShape`, and
+  `QueryAnalyzerTest.shouldRejectANameUsedAsBothAListAndItsElement` cover the
+  list predicate, its naming, its cast argument, and the forms that stay
+  rejected,
+  `SqlcjCompilerIntegrationTest.shouldGenerateCompilableRepositoryForAListPredicate`
+  compiles its `List` method parameter and its array binding, and
+  `PostgresIntegrationTest.shouldExecuteGeneratedListPredicateAgainstPostgres`
+  and
+  `PostgresIntegrationTest.shouldExecuteGeneratedEnumListPredicateAgainstPostgres`
+  execute an id list of no, one, and several ids and an enum-column list
+  against PostgreSQL 16.
 - `QueryAnalyzerTest.shouldResolvePaginationParametersAfterPredicateParameters`,
   `QueryAnalyzerTest.shouldResolvePaginationParametersInTextualBindingOrder`,
   `QueryAnalyzerTest.shouldResolveOffsetParameterBesideUnanalyzedRowCount`,

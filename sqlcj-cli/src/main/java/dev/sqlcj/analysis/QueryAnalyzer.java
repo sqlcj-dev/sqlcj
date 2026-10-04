@@ -1551,8 +1551,9 @@ public final class QueryAnalyzer {
      * Resolves the operands of one comparison, which names a parameter after
      * the column it compares. A placeholder compared with a column takes that
      * column's type, and a cast placeholder states its own type and keeps the
-     * column's name. Every other operand contributes only the parameters its
-     * own cast placeholders state.
+     * column's name. A placeholder inside the {@code = ANY(p)} form takes a
+     * list of the compared column's values. Every other operand contributes
+     * only the parameters its own cast placeholders state.
      */
     private void resolveParameterComparison(
         ComparisonOperator comparison,
@@ -1581,6 +1582,15 @@ public final class QueryAnalyzer {
                 placeholders
             );
             return;
+        }
+
+        if (comparison instanceof EqualsTo && left instanceof net.sf.jsqlparser.schema.Column column) {
+            Expression listArgument = anyListArgument(right, placeholders);
+
+            if (listArgument != null) {
+                resolveAnyListParameter(listArgument, column, sources, placeholders);
+                return;
+            }
         }
 
         if (isColumnTypedComparison(comparison)) {
@@ -1628,6 +1638,113 @@ public final class QueryAnalyzer {
             || comparison instanceof GreaterThanEquals
             || comparison instanceof MinorThan
             || comparison instanceof MinorThanEquals;
+    }
+
+    /**
+     * The argument of the {@code ANY(p)} operand whose parameter is the list a
+     * compared column's value is looked up in, and {@code null} when the
+     * expression is not that operand. The operand is an unquoted, unqualified,
+     * case-insensitive {@code ANY} with no modifier and with exactly one
+     * argument that is itself one parameter's value, which is a placeholder or
+     * a cast of one.
+     *
+     * <p>Every other spelling, modifier, and argument, such as a quoted
+     * {@code "ANY"}, {@code pg_catalog.any}, an array constructor, and a
+     * literal, is another expression, which binds no list here.
+     */
+    private Expression anyListArgument(Expression expression, Placeholders placeholders) {
+        if (!(expression instanceof Function function)) {
+            return null;
+        }
+
+        List<String> name = function.getMultipartName();
+
+        if (name == null || name.size() != 1 || !name.getFirst().equalsIgnoreCase("any")) {
+            return null;
+        }
+
+        if (function.isDistinct() || function.getOrderByElements() != null) {
+            return null;
+        }
+
+        ExpressionList<?> arguments = function.getParameters();
+
+        if (arguments == null || arguments.size() != 1) {
+            return null;
+        }
+
+        Expression argument = arguments.getFirst();
+
+        return bindsValue(argument, placeholders)
+            ? argument
+            : null;
+    }
+
+    /**
+     * Resolves the list parameter of {@code <column> = ANY(p)}, which is named
+     * after the compared column and is an array of that column's type, so that
+     * the generated method takes one list and the runtime binds it as one
+     * server array. A null list and an empty list match no row, as PostgreSQL
+     * compares a value with no element of either.
+     *
+     * <p>A cast argument states its own type, as a cast placeholder does
+     * anywhere else, and keeps the column's name, so only the column is
+     * resolved for it.
+     */
+    private void resolveAnyListParameter(
+        Expression argument,
+        net.sf.jsqlparser.schema.Column column,
+        List<Source> sources,
+        Placeholders placeholders
+    ) {
+        dev.sqlcj.schema.Column schemaColumn = resolveColumn(column, sources).column();
+        Placeholder placeholder = placeholders.of(argument);
+
+        if (placeholder == null) {
+            addCastParameter(
+                placeholders.ofCast(argument),
+                schemaColumn.name(),
+                placeholders
+            );
+            return;
+        }
+
+        ColumnType type = requireSupportedType(schemaColumn);
+
+        requireArrayElementColumn(schemaColumn);
+
+        addParameter(
+            placeholder,
+            schemaColumn.name(),
+            type,
+            schemaColumn.enumType(),
+            true,
+            schemaColumn.blankPadded(),
+            placeholders
+        );
+    }
+
+    /**
+     * Requires a column an array of whose values sqlcj binds, because the list
+     * parameter of {@code = ANY} takes the compared column's type as its
+     * element type. An array column's own values are not elements of its type,
+     * and the element types the schema maps no array of have no array binding.
+     */
+    private dev.sqlcj.schema.Column requireArrayElementColumn(dev.sqlcj.schema.Column column) {
+        if (column.array() || !columnTypeMapping.isArrayElementType(column.type())) {
+            throw new UnsupportedOperationException(
+                ("An = ANY placeholder requires a non-array column of a type other than BYTEA, "
+                    + "JSON, and JSONB, but %s is %s.")
+                    .formatted(
+                        column.name(),
+                        column.array()
+                            ? column.type() + "[]"
+                            : column.type()
+                    )
+            );
+        }
+
+        return column;
     }
 
     /**

@@ -126,8 +126,11 @@ public final class ColumnTypeMapping {
      * {@code BYTEA}, {@code JSON}, and {@code JSONB} arrays are recorded with
      * their declared type instead, because their elements are bound and read as
      * text or bytes rather than as a value of a mapped element type.
+     *
+     * <p>Query analysis asks the same question of a column whose type an array
+     * parameter carries, so the rule is stated once here.
      */
-    private boolean isArrayElementType(ColumnType type) {
+    public boolean isArrayElementType(ColumnType type) {
         return type != ColumnType.BYTEA
             && type != ColumnType.JSON
             && type != ColumnType.JSONB;
