@@ -302,7 +302,11 @@ generates `List<String> tags` and `List<StageSetting> past`.
   index.
 - A `LIKE`/`ILIKE` pattern placeholder still requires a scalar `VARCHAR` or
   `TEXT` column, so an array column is rejected there.
-- No array operator or function, such as `= ANY` or `&&`, is analyzed.
+- The `= ANY` list predicate is the one analyzed array operator: a placeholder
+  written as `<column> = ANY($1)` binds a list of the compared column's type,
+  which must be a non-array column of an element type above or of a declared
+  enum type. See [Queries](queries.md#predicates) for the shape and its
+  rejections. No other array operator or function, such as `&&`, is analyzed.
 
 An array argument is passed to the executor as
 `new dev.sqlcj.runtime.SqlArray("<element type>", <parameter>)`, written out in
@@ -640,6 +644,11 @@ Array types:
   `QueryAnalyzerTest.shouldRejectLikeOnAnArrayColumn` cover the rejections.
   `QueryAnalyzerTest.shouldCarryTheBlankPaddedSpellingOfAnArrayParameter` covers
   the spelling a character array parameter carries.
+  `QueryAnalyzerTest.shouldResolveListParameterOfAnyFromItsComparedColumn` and
+  `QueryAnalyzerTest.shouldRejectAListParameterOfAColumnWithoutAnArrayBinding`
+  cover the list a `= ANY` placeholder binds and the columns it rejects, and
+  `PostgresIntegrationTest.shouldExecuteGeneratedListPredicateAgainstPostgres`
+  executes it.
 - `JavaCodeGeneratorTest.shouldBindAndReadArrayColumnsPerElementType` covers the
   generated `List` type, the `SqlArray` argument, and the `getList` read of
   every element type;
