@@ -3144,6 +3144,52 @@ class SqlcjCompilerIntegrationTest {
         );
     }
 
+    /**
+     * A list predicate generates one {@code List} method parameter of the
+     * compared column's element type, bound as one server array, in compilable
+     * Java.
+     */
+    @Test
+    void shouldGenerateCompilableRepositoryForAListPredicate() throws IOException {
+        generateAndCompile(
+            """
+                CREATE TABLE users
+                (
+                    id   BIGINT NOT NULL,
+                    name VARCHAR(255)
+                );
+                """,
+            """
+                -- name: ListUsersByIds :many
+                SELECT id, name
+                FROM users
+                WHERE id = ANY($1)
+                ORDER BY id;
+                """
+        );
+
+        String repository = Files.readString(
+            tempDir
+                .resolve("generated")
+                .resolve("generated")
+                .resolve("UsersRepository.java")
+        );
+
+        assertTrue(
+            repository.contains(
+                "public List<ListUsersByIdsResult> listUsersByIds(List<Long> id)"
+            )
+        );
+
+        assertTrue(repository.contains("WHERE id = ANY(?)"));
+
+        assertTrue(
+            repository.contains(
+                "java.util.Arrays.asList(new dev.sqlcj.runtime.SqlArray(\"int8\", id))"
+            )
+        );
+    }
+
     /** Generates the one repository of the {@code Users} group. */
     private Path generateUsersRepository(
         List<String> schema,

@@ -775,6 +775,110 @@ class PostgresIntegrationTest {
     }
 
     /**
+     * Covers the list predicate end to end: one {@code List} argument is bound
+     * as one server array and PostgreSQL returns the rows whose id the list
+     * contains, in the queried order, while a null list and an empty list
+     * contain no id and match no row.
+     */
+    @Test
+    void shouldExecuteGeneratedListPredicateAgainstPostgres() throws Exception {
+        Path classesDirectory = generateAndCompile("""
+            -- name: ListUsersByIds :many
+            SELECT id, name
+            FROM users
+            WHERE id = ANY($1)
+            ORDER BY id;
+            """);
+
+        execute("""
+            INSERT INTO users (id, code, name)
+            VALUES
+                (1, 5, 'Alice'),
+                (2, 20, 'Bob'),
+                (3, 40, 'Cara')
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method listByIds = repository.getClass().getMethod(
+                "listUsersByIds",
+                List.class
+            );
+
+            List<Long> noIds = null;
+
+            assertEquals(List.of(), names(listByIds.invoke(repository, noIds)));
+            assertEquals(List.of(), names(listByIds.invoke(repository, List.of())));
+
+            assertEquals(
+                List.of("Bob"),
+                names(listByIds.invoke(repository, List.of(2L)))
+            );
+
+            assertEquals(
+                List.of("Alice", "Cara"),
+                names(listByIds.invoke(repository, List.of(3L, 1L)))
+            );
+        }
+    }
+
+    /**
+     * A list predicate over an enum column binds the labels of its generated
+     * constants as one server array of the declared enum type, so PostgreSQL
+     * returns the rows whose value the list contains.
+     */
+    @Test
+    void shouldExecuteGeneratedEnumListPredicateAgainstPostgres() throws Exception {
+        execute(STAGE_EVENT_SCHEMA);
+
+        Path classesDirectory = generateAndCompile(
+            STAGE_EVENT_SCHEMA,
+            """
+                -- name: ListStageEventsBySettings :many
+                SELECT id, setting, title
+                FROM stage_events
+                WHERE setting = ANY($1)
+                ORDER BY id;
+                """
+        );
+
+        execute("""
+            INSERT INTO stage_events (id, setting, title)
+            VALUES
+                (1, 'indoor', 'Indoor Stage'),
+                (2, 'covered', 'Covered Stage'),
+                (3, 'outdoor', 'Outdoor Stage')
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object[] constants = Class
+                .forName("generated.StageSetting", true, classLoader)
+                .getEnumConstants();
+
+            Object repository = newRepository(classLoader);
+
+            Method listBySettings = repository.getClass().getMethod(
+                "listStageEventsBySettings",
+                List.class
+            );
+
+            Object rows = listBySettings.invoke(
+                repository,
+                List.of(constants[0], constants[2])
+            );
+
+            List<Object> titles = new ArrayList<>();
+
+            for (Object row : (List<?>) rows) {
+                titles.add(component(row, "title"));
+            }
+
+            assertEquals(List.of("Indoor Stage", "Outdoor Stage"), titles);
+        }
+    }
+
+    /**
      * Covers pagination end to end: a {@code LIMIT ... OFFSET ...} page and the
      * same page written as {@code OFFSET ... LIMIT ...} are generated,
      * compiled, and executed against PostgreSQL, so a swapped binding order
