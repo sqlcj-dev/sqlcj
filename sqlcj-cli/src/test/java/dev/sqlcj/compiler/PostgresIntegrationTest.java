@@ -302,7 +302,9 @@ class PostgresIntegrationTest {
      * {@code CreateBook}, {@code UpdateBook}, and {@code UpdateBookISBN}: a
      * full-row read by key, a seven-column insert returning the full row, an
      * update of a text and an array column by key, and an update whose third
-     * assignment binds {@code $4} while the key binds {@code $3}.
+     * assignment binds {@code $4} while the key binds {@code $3}, together with
+     * a read of unqualified columns over a {@code LEFT JOIN} filtered by a cast
+     * array placeholder compared with {@code &&}.
      */
     private static final String CATALOG_QUERIES = """
         -- name: GetAlbum :one
@@ -334,6 +336,12 @@ class PostgresIntegrationTest {
         UPDATE albums
         SET title = $1, tags = $2, catalog_no = $4
         WHERE album_id = $3;
+
+        -- name: ListAlbumsByTags :many
+        SELECT album_id, title, name, catalog_no, tags
+        FROM albums
+        LEFT JOIN studios ON albums.studio_id = studios.studio_id
+        WHERE tags && $1::varchar[];
         """;
 
     /**
@@ -415,13 +423,21 @@ class PostgresIntegrationTest {
         ALTER TABLE stage ADD COLUMN opened_at TIMESTAMP NOT NULL DEFAULT now();
         """;
 
-    /** Queries over the tables the migration directory leaves. */
+    /**
+     * Queries over the tables the migration directory leaves, including an
+     * insert that writes {@code NOW()} between its placeholders before
+     * returning the generated key.
+     */
     private static final String MIGRATED_QUERIES = """
         -- name: CreateRegion :one
         INSERT INTO region (code, title) VALUES ($1, $2) RETURNING *;
 
         -- name: GetStage :one
         SELECT id, handle, title, region, opened_at FROM stage WHERE handle = $1 AND region = $2;
+
+        -- name: CreateStage :one
+        INSERT INTO stage (handle, title, region, opened_at, setting, past_settings, keywords)
+        VALUES ($1, $2, $3, NOW(), $4, $5, $6) RETURNING id;
         """;
 
     private static final UUID EXTERNAL_ID = UUID.fromString("3f2504e0-4f89-11d3-9a0c-0305e82c3301");
@@ -2297,6 +2313,13 @@ class PostgresIntegrationTest {
      * order, and the update whose assignments use {@code $1}, {@code $2}, and
      * {@code $4} around the {@code $3} key exposes its parameters in
      * placeholder order while binding them in textual order.
+     *
+     * <p>A read of unqualified columns over {@code albums LEFT JOIN studios}
+     * resolves each of them to its own table and takes one {@code List}
+     * parameter for the {@code varchar[]} cast placeholder its {@code &&}
+     * predicate compares with the array column, so an overlapping tag list
+     * returns the album beside its studio name and a non-overlapping one
+     * returns nothing.
      */
     @Test
     void shouldExecuteGeneratedCatalogQueriesOverBooktestSchemaConstructs() throws Exception {
@@ -2469,6 +2492,52 @@ class PostgresIntegrationTest {
             assertEquals(List.of("jazz", "reissue"), component(reissued, "tags"));
             assertEquals("BN-1002", component(reissued, "catalogNo"));
             assertEquals(live, component(reissued, "kind"));
+
+            Method listByTagsMethod = repository.getClass().getMethod(
+                "listAlbumsByTags",
+                List.class
+            );
+
+            assertEquals(
+                List.of(List.class),
+                List.of(listByTagsMethod.getParameterTypes())
+            );
+
+            List<?> overlapping = (List<?>) listByTagsMethod.invoke(
+                repository,
+                List.of("reissue", "classical")
+            );
+
+            assertEquals(1, overlapping.size());
+
+            Object tagged = overlapping.get(0);
+
+            assertEquals(
+                List.of("albumId", "title", "name", "catalogNo", "tags"),
+                recordComponentNames(tagged)
+            );
+
+            assertEquals(
+                List.of(
+                    Integer.class,
+                    String.class,
+                    String.class,
+                    String.class,
+                    List.class
+                ),
+                recordComponentTypes(tagged)
+            );
+
+            assertEquals(albumId, component(tagged, "albumId"));
+            assertEquals("Night Sessions, Vol. 2", component(tagged, "title"));
+            assertEquals("Blue Note", component(tagged, "name"));
+            assertEquals("BN-1002", component(tagged, "catalogNo"));
+            assertEquals(List.of("jazz", "reissue"), component(tagged, "tags"));
+
+            assertEquals(
+                List.of(),
+                listByTagsMethod.invoke(repository, List.of("classical"))
+            );
         }
     }
 
@@ -3034,6 +3103,12 @@ class PostgresIntegrationTest {
      * the compiler loads as its schema source, in file-name order, and the
      * generated code writes and reads the migrated tables through the renamed
      * table and its added column.
+     *
+     * <p>The insert whose {@code VALUES} list writes {@code NOW()} between its
+     * placeholders binds the remaining columns in placeholder order, with the
+     * generated enum and the two array columns among them, and returns the
+     * generated key, so PostgreSQL stores the bound values and its own
+     * timestamp.
      */
     @Test
     void shouldExecuteGeneratedCodeOverAMigratedSchemaAgainstPostgres() throws Exception {
@@ -3105,6 +3180,77 @@ class PostgresIntegrationTest {
             assertEquals("Main Hall", component(stage, "title"));
             assertEquals("north", component(stage, "region"));
             assertNotNull(component(stage, "openedAt"));
+
+            Class<?> stageSetting = Class.forName(
+                "generated.StageSetting",
+                true,
+                classLoader
+            );
+
+            Object[] settings = stageSetting.getEnumConstants();
+
+            Method createStageMethod = repository.getClass().getMethod(
+                "createStage",
+                String.class,
+                String.class,
+                String.class,
+                stageSetting,
+                List.class,
+                List.class
+            );
+
+            assertEquals(
+                List.of(
+                    String.class,
+                    String.class,
+                    String.class,
+                    stageSetting,
+                    List.class,
+                    List.class
+                ),
+                List.of(createStageMethod.getParameterTypes())
+            );
+
+            Object createdStage = createStageMethod.invoke(
+                repository,
+                "west-wing",
+                "West Wing",
+                "north",
+                settings[0],
+                List.of(settings[1], settings[0]),
+                List.of("seated", "historic")
+            );
+
+            assertNotNull(createdStage);
+
+            Object createdStageId = component(createdStage, "id");
+
+            assertNotNull(createdStageId);
+
+            try (
+                Connection connection = dataSource.getConnection();
+                Statement statement = connection.createStatement();
+                ResultSet stored = statement.executeQuery(
+                    "SELECT setting, past_settings, keywords, opened_at FROM stage WHERE id = "
+                        + createdStageId
+                )
+            ) {
+                assertTrue(stored.next());
+
+                assertEquals("indoor", stored.getString("setting"));
+
+                assertArrayEquals(
+                    new String[] { "outdoor", "indoor" },
+                    (Object[]) stored.getArray("past_settings").getArray()
+                );
+
+                assertArrayEquals(
+                    new String[] { "seated", "historic" },
+                    (Object[]) stored.getArray("keywords").getArray()
+                );
+
+                assertNotNull(stored.getTimestamp("opened_at"));
+            }
         }
     }
 

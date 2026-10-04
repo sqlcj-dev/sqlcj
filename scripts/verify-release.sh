@@ -20,9 +20,12 @@
 # generates. The final generation uses the sample's own 'sqlcj.yaml' from the
 # sample directory and must restore the first generated output byte for byte
 # before the sample is compiled and run. The sample's migrations declare an
-# enum type and add an enum, an array, and a 'JSONB' column to 'books', so the
-# generated package holds the shared 'AuthorsRow' and 'BooksRow' records, the
-# 'BookFormat' enum, and one repository.
+# enum type and add an enum, an array, and a 'JSONB' column to 'books' and an
+# 'updated_at' column to 'authors', so the generated package holds the shared
+# 'AuthorsRow' and 'BooksRow' records, the 'BookFormat' enum, and one
+# repository whose methods cover every named query, including the named
+# parameter filter, the 'now()' rename, the grouped book count, the upsert, and
+# the id-list read.
 #
 # Requirements: JDK 21, Maven, psql, and a reachable PostgreSQL server.
 #
@@ -246,13 +249,17 @@ generated_count=$(find "${generated_root}" -type f -name '*.java' | wc -l)
 
 for method in createAuthor getAuthor findAuthor listAuthors updateAuthorBio deleteAuthor \
     searchAuthors countAuthors listAuthorPage createBook listAuthorBooks \
-    createCatalogedBook listBooksByFormat; do
+    createCatalogedBook listBooksByFormat filterAuthors renameAuthor \
+    countBooksByAuthor upsertAuthor listAuthorsByIds; do
     grep -q " ${method}(" "${generated_package}/AuthorRepository.java" \
         || fail "the generated repository is missing the ${method} method"
 done
 
 grep -q "LocalDateTime createdAt" "${generated_package}/AuthorsRow.java" \
     || fail "the generated row is missing the column the second migration adds"
+
+grep -q "LocalDateTime updatedAt" "${generated_package}/AuthorsRow.java" \
+    || fail "the generated row is missing the column the fourth migration adds"
 
 diff -r "${first_generation}" "${generated_root}" \
     || fail "generating from the sample directory did not restore its first generated output"
@@ -287,6 +294,7 @@ PGPASSWORD="${db_password}" psql \
     --file "${sample_dir}/sql/migrations/V1__create_authors_and_books.sql" \
     --file "${sample_dir}/sql/migrations/V2__add_author_created_at_and_book_index.sql" \
     --file "${sample_dir}/sql/migrations/V3__add_book_format_tags_and_details.sql" \
+    --file "${sample_dir}/sql/migrations/V4__add_author_updated_at.sql" \
     "${jdbc_url#jdbc:}"
 
 log "Compiling the sample against the staged runtime"

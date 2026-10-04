@@ -64,3 +64,33 @@ SELECT *
 FROM books
 WHERE format = $1
 ORDER BY id;
+
+-- name: FilterAuthors :many
+SELECT *
+FROM authors
+WHERE (:name::text IS NULL OR name = :name)
+ORDER BY id;
+
+-- name: RenameAuthor :exec
+UPDATE authors
+SET name = :name, updated_at = now()
+WHERE id = :id;
+
+-- name: CountBooksByAuthor :many
+SELECT author_id, COUNT(*) AS books
+FROM books
+GROUP BY author_id
+ORDER BY author_id;
+
+-- name: UpsertAuthor :one
+INSERT INTO authors (id, name, bio)
+VALUES (:id, :name, :bio)
+ON CONFLICT (id) DO UPDATE
+    SET name = EXCLUDED.name, bio = EXCLUDED.bio, updated_at = now()
+RETURNING *;
+
+-- name: ListAuthorsByIds :many
+SELECT *
+FROM authors
+WHERE id = ANY(:ids)
+ORDER BY id;
