@@ -25,7 +25,7 @@ class DefaultQueryParserTest {
 
         assertEquals(1, queries.size());
 
-        Query query = queries.getFirst();
+        Query query = queries.get(0);
 
         assertEquals("GetUser", query.name());
         assertEquals(QueryType.ONE, query.type());
@@ -53,8 +53,8 @@ class DefaultQueryParserTest {
 
         assertEquals(2, queries.size());
 
-        assertEquals("GetUser", queries.getFirst().name());
-        assertEquals(QueryType.ONE, queries.getFirst().type());
+        assertEquals("GetUser", queries.get(0).name());
+        assertEquals(QueryType.ONE, queries.get(0).type());
 
         Query second = queries.get(1);
 
@@ -74,8 +74,8 @@ class DefaultQueryParserTest {
         List<Query> queries = parser.parse(source);
 
         assertEquals(1, queries.size());
-        assertEquals("FindUser", queries.getFirst().name());
-        assertEquals(QueryType.OPTIONAL, queries.getFirst().type());
+        assertEquals("FindUser", queries.get(0).name());
+        assertEquals(QueryType.OPTIONAL, queries.get(0).type());
     }
 
     @Test
@@ -89,7 +89,7 @@ class DefaultQueryParserTest {
         List<Query> queries = parser.parse(source);
 
         assertEquals(1, queries.size());
-        assertEquals(QueryType.EXEC, queries.getFirst().type());
+        assertEquals(QueryType.EXEC, queries.get(0).type());
     }
 
     @Test
@@ -222,7 +222,7 @@ class DefaultQueryParserTest {
 
         List<Query> queries = parser.parse(source);
 
-        assertEquals(3, queries.getFirst().line());
+        assertEquals(3, queries.get(0).line());
         assertEquals(8, queries.get(1).line());
     }
 }

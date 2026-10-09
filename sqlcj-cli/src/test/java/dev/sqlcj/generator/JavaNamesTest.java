@@ -193,12 +193,12 @@ class JavaNamesTest {
     void shouldKeepTheSameQueryNameInTwoRepositoriesIndependent() {
         assertEquals(
             "getUser",
-            names("Author", "GetUser").queries().getFirst().methodName()
+            names("Author", "GetUser").queries().get(0).methodName()
         );
 
         assertEquals(
             "getUser",
-            names("Book", "GetUser").queries().getFirst().methodName()
+            names("Book", "GetUser").queries().get(0).methodName()
         );
     }
 
@@ -273,7 +273,7 @@ class JavaNamesTest {
 
         assertEquals(
             List.of("listUsersRowMapper1"),
-            names.queries().getFirst().parameterNames()
+            names.queries().get(0).parameterNames()
         );
     }
 
@@ -316,7 +316,7 @@ class JavaNamesTest {
             )
         )
             .queries()
-            .getFirst();
+            .get(0);
     }
 
     private QueryModel query(

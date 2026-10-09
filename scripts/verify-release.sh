@@ -27,7 +27,8 @@
 # parameter filter, the 'now()' rename, the grouped book count, the upsert, and
 # the id-list read.
 #
-# Requirements: JDK 21, Maven, psql, and a reachable PostgreSQL server.
+# Requirements: JDK 17 or later, Maven, psql, and a reachable PostgreSQL
+# server.
 #
 # Connection settings, defaulting to the values used by docs/quickstart.md:
 #

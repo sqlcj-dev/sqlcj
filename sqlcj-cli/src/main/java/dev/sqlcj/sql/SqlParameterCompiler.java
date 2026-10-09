@@ -67,12 +67,12 @@ final class SqlParameterCompiler {
     private static final int SOURCE_OFFSET = 1;
 
     SqlParameters compile(String sql, Node astRoot) {
-        if (!(astRoot instanceof Node node)) {
+        if (astRoot == null) {
             throw new SqlParseException("SQL parse tree is unavailable.");
         }
 
-        Token firstToken = node.jjtGetFirstToken();
-        Token lastToken = node.jjtGetLastToken();
+        Token firstToken = astRoot.jjtGetFirstToken();
+        Token lastToken = astRoot.jjtGetLastToken();
 
         if (firstToken == null || lastToken == null) {
             throw new SqlParseException("SQL parse tree has no tokens.");
@@ -140,7 +140,7 @@ final class SqlParameterCompiler {
 
         List<String> uncompiled = new ArrayList<>();
 
-        collectUncompiledPlaceholders(node, names, uncompiled);
+        collectUncompiledPlaceholders(astRoot, names, uncompiled);
 
         return new SqlParameters(
             executableSql.toString(),

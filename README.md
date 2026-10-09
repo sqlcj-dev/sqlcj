@@ -49,7 +49,7 @@ or release procedure yet either.
 
 ## Requirements
 
-- Java 21 for the CLI and for applications that use the generated code.
+- Java 17 or later for the CLI and for applications that use the generated code.
 - Maven, to build sqlcj and to build a consuming project.
 - PostgreSQL, reached through the application's own PostgreSQL JDBC driver.
   sqlcj does not ship a driver. Behavior is verified against PostgreSQL 16.

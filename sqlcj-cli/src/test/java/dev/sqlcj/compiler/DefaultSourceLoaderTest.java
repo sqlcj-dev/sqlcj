@@ -68,12 +68,12 @@ class DefaultSourceLoaderTest {
 
         assertEquals(2, sources.size());
 
-        assertTrue(schemaOf(sources.getFirst()).contains("CREATE TABLE users"));
+        assertTrue(schemaOf(sources.get(0)).contains("CREATE TABLE users"));
         assertTrue(schemaOf(sources.get(1)).contains("CREATE TABLE orders"));
 
         assertEquals(
             List.of("GetUser", "ListUsers"),
-            names(sources.getFirst())
+            names(sources.get(0))
         );
 
         assertEquals(
@@ -111,10 +111,10 @@ class DefaultSourceLoaderTest {
             )
         );
 
-        assertEquals(List.of("GetUser"), names(sources.getFirst()));
+        assertEquals(List.of("GetUser"), names(sources.get(0)));
         assertEquals(List.of("GetUser"), names(sources.get(1)));
 
-        assertEquals("Users", sources.getFirst().name());
+        assertEquals("Users", sources.get(0).name());
         assertEquals("Orders", sources.get(1).name());
     }
 
@@ -251,12 +251,12 @@ class DefaultSourceLoaderTest {
             )
         );
 
-        Source source = sources.getFirst();
+        Source source = sources.get(0);
 
         assertEquals("Users", source.name());
         assertEquals(List.of(schema), schemaPaths(source));
         assertEquals(queries, source.queriesPath());
-        assertEquals(1, source.queries().getFirst().line());
+        assertEquals(1, source.queries().get(0).line());
         assertEquals(6, source.queries().get(1).line());
     }
 
@@ -297,7 +297,7 @@ class DefaultSourceLoaderTest {
             )
         );
 
-        Source source = sources.getFirst();
+        Source source = sources.get(0);
 
         assertEquals(
             List.of(
@@ -434,7 +434,7 @@ class DefaultSourceLoaderTest {
     }
 
     private String schemaOf(Source source) {
-        return source.schemaFiles().getFirst().sql();
+        return source.schemaFiles().get(0).sql();
     }
 
     private List<Path> schemaPaths(Source source) {

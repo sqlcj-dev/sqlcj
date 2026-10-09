@@ -2021,7 +2021,7 @@ class JavaCodeGeneratorTest {
 
         assertEquals(1, rows.size());
 
-        GeneratedFile row = rows.getFirst();
+        GeneratedFile row = rows.get(0);
 
         assertEquals(Path.of("generated", "UsersRow.java"), row.path());
 
@@ -2334,7 +2334,7 @@ class JavaCodeGeneratorTest {
             rows.stream().map(GeneratedFile::path).toList()
         );
 
-        assertTrue(rows.getFirst().content().contains("public record UsersRow("));
+        assertTrue(rows.get(0).content().contains("public record UsersRow("));
         assertTrue(rows.get(1).content().contains("public record OrdersRow("));
 
         assertCompilesWithRows(file);
@@ -2468,7 +2468,7 @@ class JavaCodeGeneratorTest {
         List<GeneratedFile> rows = codeGenerator.generateRows();
 
         assertEquals(1, rows.size());
-        assertEquals(Path.of("generated", "UsersRow.java"), rows.getFirst().path());
+        assertEquals(Path.of("generated", "UsersRow.java"), rows.get(0).path());
 
         assertTrue(users.content().contains("public UsersRow getUser(Long id)"));
         assertTrue(admins.content().contains("public UsersRow getAdmin(Long id)"));
@@ -2476,7 +2476,7 @@ class JavaCodeGeneratorTest {
         assertFalse(users.content().contains("public record"));
         assertFalse(admins.content().contains("public record"));
 
-        assertCompiles(users, admins, rows.getFirst());
+        assertCompiles(users, admins, rows.get(0));
     }
 
     /**
@@ -2667,7 +2667,7 @@ class JavaCodeGeneratorTest {
 
         assertFalse(source.contains("import generated.StageSetting;"));
 
-        assertCompiles(repository, codeGenerator.generateEnums().getFirst());
+        assertCompiles(repository, codeGenerator.generateEnums().get(0));
     }
 
     /**
@@ -2690,9 +2690,9 @@ class JavaCodeGeneratorTest {
         List<GeneratedFile> enums = codeGenerator.generateEnums();
 
         assertEquals(1, enums.size());
-        assertEquals(Path.of("generated", "StageSetting.java"), enums.getFirst().path());
+        assertEquals(Path.of("generated", "StageSetting.java"), enums.get(0).path());
 
-        assertCompiles(repository, enums.getFirst());
+        assertCompiles(repository, enums.get(0));
 
         try (URLClassLoader classLoader = classLoader()) {
             Class<?> type = Class.forName("generated.StageSetting", true, classLoader);
@@ -2784,7 +2784,7 @@ class JavaCodeGeneratorTest {
             )
         );
 
-        GeneratedFile file = codeGenerator.generateEnums().getFirst();
+        GeneratedFile file = codeGenerator.generateEnums().get(0);
 
         assertEquals(Path.of("generated", typeName + ".java"), file.path());
         assertTrue(file.content().contains("public enum " + typeName + " {"));
@@ -3117,9 +3117,9 @@ class JavaCodeGeneratorTest {
         List<GeneratedFile> enums = codeGenerator.generateEnums();
 
         assertEquals(1, enums.size());
-        assertEquals(Path.of("generated", "StageSetting.java"), enums.getFirst().path());
+        assertEquals(Path.of("generated", "StageSetting.java"), enums.get(0).path());
 
-        assertCompiles(repository, enums.getFirst());
+        assertCompiles(repository, enums.get(0));
     }
 
     /**
@@ -3145,7 +3145,7 @@ class JavaCodeGeneratorTest {
 
         GeneratedFile repository = generate(query);
 
-        GeneratedFile row = codeGenerator.generateRows().getFirst();
+        GeneratedFile row = codeGenerator.generateRows().get(0);
 
         assertEquals(
             """

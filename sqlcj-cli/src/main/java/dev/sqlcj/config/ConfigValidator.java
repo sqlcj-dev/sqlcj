@@ -11,10 +11,10 @@ import java.util.Set;
  */
 final class ConfigValidator {
 
-    private static final SourceVersion SOURCE_VERSION = SourceVersion.RELEASE_21;
+    private static final SourceVersion SOURCE_VERSION = SourceVersion.RELEASE_17;
 
     /**
-     * Java 21 restricted identifiers. They are rejected as a group name so that
+     * Java 17 restricted identifiers. They are rejected as a group name so that
      * the configured value can be used unchanged as a generated type-name
      * prefix.
      */
@@ -97,7 +97,7 @@ final class ConfigValidator {
         }
 
         if (schema.size() == 1) {
-            requireValue(schema.getFirst(), field, configFile);
+            requireValue(schema.get(0), field, configFile);
 
             return;
         }
