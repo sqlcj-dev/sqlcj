@@ -10,7 +10,7 @@ on the application's classpath.
 
 ## 1. Prerequisites
 
-- A full JDK 21 on the `PATH` (`java -version` reports 21).
+- A full JDK 17 or later on the `PATH`.
 - Maven (verified with 3.8.7).
 - Docker, or another way to reach a PostgreSQL 16 server.
 
@@ -80,7 +80,7 @@ mkdir -p sql/migrations src/main/java/com/example/app
     <version>1.0.0-SNAPSHOT</version>
 
     <properties>
-        <maven.compiler.release>21</maven.compiler.release>
+        <maven.compiler.release>17</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <sqlcj.version>0.1.0-SNAPSHOT</sqlcj.version>
         <sqlcj.generated.sources>${project.build.directory}/generated-sources/sqlcj</sqlcj.generated.sources>
