@@ -1095,7 +1095,7 @@ class SqlcjCompilerIntegrationTest {
 
             assertEquals(1, rows.size());
 
-            Object row = rows.getFirst();
+            Object row = rows.get(0);
 
             assertEquals(1L, getRecordComponent(row, "id1"));
             assertEquals(10L, getRecordComponent(row, "id2"));
@@ -1159,7 +1159,7 @@ class SqlcjCompilerIntegrationTest {
 
             assertEquals(1, rows.size());
 
-            Object row = rows.getFirst();
+            Object row = rows.get(0);
 
             assertEquals(1L, getRecordComponent(row, "userId"));
             assertEquals(10L, getRecordComponent(row, "profileId"));

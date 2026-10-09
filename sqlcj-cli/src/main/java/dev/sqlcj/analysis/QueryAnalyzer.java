@@ -500,7 +500,7 @@ public final class QueryAnalyzer {
             return null;
         }
 
-        return returningClause.getFirst().getExpression() instanceof AllColumns
+        return returningClause.get(0).getExpression() instanceof AllColumns
             ? source.table().name()
             : null;
     }
@@ -1659,7 +1659,7 @@ public final class QueryAnalyzer {
 
         List<String> name = function.getMultipartName();
 
-        if (name == null || name.size() != 1 || !name.getFirst().equalsIgnoreCase("any")) {
+        if (name == null || name.size() != 1 || !name.get(0).equalsIgnoreCase("any")) {
             return null;
         }
 
@@ -1673,7 +1673,7 @@ public final class QueryAnalyzer {
             return null;
         }
 
-        Expression argument = arguments.getFirst();
+        Expression argument = arguments.get(0);
 
         return bindsValue(argument, placeholders)
             ? argument
@@ -1919,7 +1919,7 @@ public final class QueryAnalyzer {
 
         if (!uncompiled.isEmpty()) {
             throw new UnsupportedOperationException(
-                NAMED_PLACEHOLDER_REJECTION.formatted(uncompiled.getFirst())
+                NAMED_PLACEHOLDER_REJECTION.formatted(uncompiled.get(0))
             );
         }
 
@@ -2029,7 +2029,7 @@ public final class QueryAnalyzer {
     private boolean isScalarCount(Function function) {
         List<String> name = function.getMultipartName();
 
-        if (name == null || name.size() != 1 || !name.getFirst().equalsIgnoreCase("count")) {
+        if (name == null || name.size() != 1 || !name.get(0).equalsIgnoreCase("count")) {
             return false;
         }
 
@@ -2041,7 +2041,7 @@ public final class QueryAnalyzer {
 
         return arguments != null
             && arguments.size() == 1
-            && arguments.getFirst().getClass() == AllColumns.class;
+            && arguments.get(0).getClass() == AllColumns.class;
     }
 
     /**
@@ -2107,8 +2107,8 @@ public final class QueryAnalyzer {
             return null;
         }
 
-        return selectItems.getFirst().getExpression() instanceof AllColumns
-            ? sources.getFirst().table().name()
+        return selectItems.get(0).getExpression() instanceof AllColumns
+            ? sources.get(0).table().name()
             : null;
     }
 
@@ -2157,7 +2157,7 @@ public final class QueryAnalyzer {
             );
         }
 
-        Source source = matches.getFirst();
+        Source source = matches.get(0);
 
         return new ResolvedColumn(source, findColumn(source.table(), columnName));
     }

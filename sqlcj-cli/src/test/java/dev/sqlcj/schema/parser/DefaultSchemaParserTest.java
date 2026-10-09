@@ -126,7 +126,7 @@ class DefaultSchemaParserTest {
 
         assertEquals(1, schema.tables().size());
 
-        Table table = schema.tables().getFirst();
+        Table table = schema.tables().get(0);
 
         assertEquals("users", table.name());
         assertEquals(3, table.columns().size());
@@ -144,7 +144,7 @@ class DefaultSchemaParserTest {
 
         Schema schema = parser.parse(sql);
 
-        Table table = schema.tables().getFirst();
+        Table table = schema.tables().get(0);
 
         assertEquals(
             new Column("id", ColumnType.BIGINT, false),
@@ -175,7 +175,7 @@ class DefaultSchemaParserTest {
 
         Schema schema = parser.parse(sql);
 
-        Table table = schema.tables().getFirst();
+        Table table = schema.tables().get(0);
 
         assertEquals(
             List.of(
@@ -203,7 +203,7 @@ class DefaultSchemaParserTest {
 
         Schema schema = parser.parse(sql);
 
-        Table table = schema.tables().getFirst();
+        Table table = schema.tables().get(0);
 
         assertTrue(table.constraints().isEmpty());
     }
@@ -220,7 +220,7 @@ class DefaultSchemaParserTest {
 
         Schema schema = parser.parse(sql);
 
-        Table table = schema.tables().getFirst();
+        Table table = schema.tables().get(0);
 
         assertEquals("user data", table.name());
 
@@ -276,7 +276,7 @@ class DefaultSchemaParserTest {
 
         assertEquals(
             expectedType,
-            schema.tables().getFirst().columns().getFirst().type()
+            schema.tables().get(0).columns().get(0).type()
         );
     }
 
@@ -309,7 +309,7 @@ class DefaultSchemaParserTest {
 
         assertEquals(
             expectedType,
-            schema.tables().getFirst().columns().getFirst().type()
+            schema.tables().get(0).columns().get(0).type()
         );
     }
 
@@ -378,7 +378,7 @@ class DefaultSchemaParserTest {
 
         assertEquals(
             expectedType,
-            schema.tables().getFirst().columns().getFirst().type()
+            schema.tables().get(0).columns().get(0).type()
         );
     }
 
@@ -403,7 +403,7 @@ class DefaultSchemaParserTest {
 
         Schema schema = parser.parse(sql);
 
-        assertFalse(schema.tables().getFirst().columns().getFirst().nullable());
+        assertFalse(schema.tables().get(0).columns().get(0).nullable());
     }
 
     @Test
@@ -417,7 +417,7 @@ class DefaultSchemaParserTest {
 
         Schema schema = parser.parse(sql);
 
-        Table table = schema.tables().getFirst();
+        Table table = schema.tables().get(0);
 
         assertEquals(
             new Column("external_id", ColumnType.UUID, true),
@@ -446,7 +446,7 @@ class DefaultSchemaParserTest {
 
         Schema schema = parser.parse(sql);
 
-        Table table = schema.tables().getFirst();
+        Table table = schema.tables().get(0);
 
         assertEquals(
             List.of(
@@ -496,7 +496,7 @@ class DefaultSchemaParserTest {
             """
             .formatted(sqlType);
 
-        Table table = parser.parse(sql).tables().getFirst();
+        Table table = parser.parse(sql).tables().get(0);
 
         assertEquals(
             List.of(
@@ -520,7 +520,7 @@ class DefaultSchemaParserTest {
             );
             """;
 
-        Table table = parser.parse(sql).tables().getFirst();
+        Table table = parser.parse(sql).tables().get(0);
 
         assertEquals(
             List.of(
@@ -570,7 +570,7 @@ class DefaultSchemaParserTest {
             """
             .formatted(sqlType, sqlType, sqlType);
 
-        Table table = parser.parse(sql).tables().getFirst();
+        Table table = parser.parse(sql).tables().get(0);
 
         assertEquals(
             List.of(
@@ -616,7 +616,7 @@ class DefaultSchemaParserTest {
             """
             .formatted(sqlType, sqlType, sqlType);
 
-        Table table = parser.parse(sql).tables().getFirst();
+        Table table = parser.parse(sql).tables().get(0);
 
         assertEquals(
             List.of(
@@ -682,7 +682,7 @@ class DefaultSchemaParserTest {
 
         Schema schema = parser.parse(sql);
 
-        Table table = schema.tables().getFirst();
+        Table table = schema.tables().get(0);
 
         assertEquals(
             List.of(
@@ -729,7 +729,7 @@ class DefaultSchemaParserTest {
 
         Schema schema = parser.parse(sql);
 
-        Table table = schema.tables().getFirst();
+        Table table = schema.tables().get(0);
 
         assertEquals(
             List.of(
@@ -762,7 +762,7 @@ class DefaultSchemaParserTest {
 
         Schema schema = parser.parse(sql);
 
-        Table table = schema.tables().getFirst();
+        Table table = schema.tables().get(0);
 
         assertEquals(
             List.of(
@@ -1103,14 +1103,14 @@ class DefaultSchemaParserTest {
                 new Column("id", ColumnType.BIGINT, false),
                 new Column("name", ColumnType.VARCHAR, true)
             ),
-            third.tables().getFirst().columns()
+            third.tables().get(0).columns()
         );
 
         assertEquals(List.of("users"), tableNames(first));
 
         assertEquals(
             List.of(new Column("id", ColumnType.BIGINT, false)),
-            first.tables().getFirst().columns()
+            first.tables().get(0).columns()
         );
     }
 

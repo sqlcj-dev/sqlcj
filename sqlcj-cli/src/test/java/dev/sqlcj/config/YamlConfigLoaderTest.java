@@ -37,14 +37,14 @@ class YamlConfigLoaderTest {
 
         assertEquals("1", config.version());
         assertEquals(1, config.sql().size());
-        assertEquals("Users", config.sql().getFirst().name());
+        assertEquals("Users", config.sql().get(0).name());
         assertEquals(
             List.of(tempDir.resolve("schema.sql").toString()),
-            config.sql().getFirst().schema()
+            config.sql().get(0).schema()
         );
         assertEquals(
             tempDir.resolve("queries.sql").toString(),
-            config.sql().getFirst().queries()
+            config.sql().get(0).queries()
         );
         assertEquals(
             "dev.example.generated",
@@ -78,7 +78,7 @@ class YamlConfigLoaderTest {
                 tempDir.resolve("sql/baseline.sql").toString(),
                 tempDir.resolve("sql/migrations").toString()
             ),
-            config.sql().getFirst().schema()
+            config.sql().get(0).schema()
         );
     }
 
@@ -214,12 +214,12 @@ class YamlConfigLoaderTest {
 
         assertEquals(
             List.of(tempDir.resolve("project/sql/schema.sql").toString()),
-            config.sql().getFirst().schema()
+            config.sql().get(0).schema()
         );
 
         assertEquals(
             configDirectory.resolve("queries.sql").toString(),
-            config.sql().getFirst().queries()
+            config.sql().get(0).queries()
         );
 
         assertEquals(
@@ -252,12 +252,12 @@ class YamlConfigLoaderTest {
 
         assertEquals(
             List.of(schemaFile.toString()),
-            config.sql().getFirst().schema()
+            config.sql().get(0).schema()
         );
 
         assertEquals(
             queriesFile.toString(),
-            config.sql().getFirst().queries()
+            config.sql().get(0).queries()
         );
 
         assertEquals(
@@ -585,11 +585,11 @@ class YamlConfigLoaderTest {
 
         Config config = configLoader.load(configFile);
 
-        assertEquals("Author", config.sql().getFirst().name());
+        assertEquals("Author", config.sql().get(0).name());
 
         assertEquals(
             List.of(tempDir.resolve("sql/schema.sql").toString()),
-            config.sql().getFirst().schema()
+            config.sql().get(0).schema()
         );
     }
 

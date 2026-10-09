@@ -619,7 +619,7 @@ class PostgresIntegrationTest {
 
             assertEquals(3, users.size());
 
-            assertEquals(List.of("id", "name"), recordComponentNames(users.getFirst()));
+            assertEquals(List.of("id", "name"), recordComponentNames(users.get(0)));
 
             assertEquals(1L, component(users.get(0), "id"));
             assertEquals("Alice", component(users.get(0), "name"));
@@ -1130,12 +1130,12 @@ class PostgresIntegrationTest {
 
             assertEquals(
                 List.of("active", "users"),
-                recordComponentNames(groups.getFirst())
+                recordComponentNames(groups.get(0))
             );
 
             assertEquals(
                 List.of(Boolean.class, Long.class),
-                recordComponentTypes(groups.getFirst())
+                recordComponentTypes(groups.get(0))
             );
 
             assertEquals(Boolean.FALSE, component(groups.get(0), "active"));
@@ -2151,7 +2151,10 @@ class PostgresIntegrationTest {
 
             assertEquals(
                 1L,
-                component(findByMarks.invoke(repository, values.getLast()), "id")
+                component(
+                    findByMarks.invoke(repository, values.get(values.size() - 1)),
+                    "id"
+                )
             );
 
             Object empty = queryMethod.invoke(repository, 2L);
@@ -2624,7 +2627,7 @@ class PostgresIntegrationTest {
 
             assertEquals(
                 List.of("id", "name", "orderId", "quantity"),
-                recordComponentNames(rows.getFirst())
+                recordComponentNames(rows.get(0))
             );
 
             assertEquals(1L, component(rows.get(0), "id"));
@@ -2820,10 +2823,10 @@ class PostgresIntegrationTest {
 
             assertTrue(rowType.getSimpleName().endsWith("Row"), rowType.getSimpleName());
             assertEquals(rowType, read.getClass());
-            assertEquals(rowType, listed.getFirst().getClass());
+            assertEquals(rowType, listed.get(0).getClass());
 
             assertEquals("Alice", component(read, "name"));
-            assertEquals(42, component(listed.getFirst(), "code"));
+            assertEquals(42, component(listed.get(0), "code"));
         }
     }
 
@@ -2867,7 +2870,7 @@ class PostgresIntegrationTest {
 
             assertEquals(
                 List.of("id", "name"),
-                recordComponentNames(deleted.getFirst())
+                recordComponentNames(deleted.get(0))
             );
 
             List<List<Object>> rows = new ArrayList<>();

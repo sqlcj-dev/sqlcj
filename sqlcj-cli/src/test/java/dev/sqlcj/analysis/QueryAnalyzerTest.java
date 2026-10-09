@@ -638,7 +638,7 @@ class QueryAnalyzerTest {
 
         assertEquals(1, model.parameters().size());
 
-        QueryParameter parameter = model.parameters().getFirst();
+        QueryParameter parameter = model.parameters().get(0);
 
         assertEquals(1, parameter.index());
         assertEquals("id", parameter.name());
@@ -663,7 +663,7 @@ class QueryAnalyzerTest {
 
         assertEquals(2, model.parameters().size());
 
-        QueryParameter first = model.parameters().getFirst();
+        QueryParameter first = model.parameters().get(0);
         assertEquals(1, first.index());
         assertEquals("id", first.name());
         assertEquals(ColumnType.BIGINT, first.type());
@@ -692,7 +692,7 @@ class QueryAnalyzerTest {
 
         assertEquals(2, model.parameters().size());
 
-        QueryParameter first = model.parameters().getFirst();
+        QueryParameter first = model.parameters().get(0);
         assertEquals(1, first.index());
         assertEquals("id", first.name());
         assertEquals(ColumnType.BIGINT, first.type());
@@ -721,7 +721,7 @@ class QueryAnalyzerTest {
 
         assertEquals(2, model.parameters().size());
 
-        QueryParameter first = model.parameters().getFirst();
+        QueryParameter first = model.parameters().get(0);
         assertEquals(1, first.index());
         assertEquals("id", first.name());
         assertEquals(ColumnType.BIGINT, first.type());
@@ -750,7 +750,7 @@ class QueryAnalyzerTest {
 
         assertEquals(2, model.parameters().size());
 
-        QueryParameter first = model.parameters().getFirst();
+        QueryParameter first = model.parameters().get(0);
         assertEquals(1, first.index());
         assertEquals("id", first.name());
         assertEquals(ColumnType.BIGINT, first.type());
@@ -784,7 +784,7 @@ class QueryAnalyzerTest {
 
         assertEquals(3, model.parameters().size());
 
-        QueryParameter first = model.parameters().getFirst();
+        QueryParameter first = model.parameters().get(0);
         assertEquals(1, first.index());
         assertEquals("id", first.name());
         assertEquals(ColumnType.BIGINT, first.type());
@@ -823,7 +823,7 @@ class QueryAnalyzerTest {
 
         assertEquals(2, model.parameters().size());
 
-        QueryParameter first = model.parameters().getFirst();
+        QueryParameter first = model.parameters().get(0);
         assertEquals(1, first.index());
         assertEquals("id", first.name());
         assertEquals(ColumnType.BIGINT, first.type());
@@ -869,7 +869,7 @@ class QueryAnalyzerTest {
 
         assertEquals(1, model.parameters().size());
 
-        QueryParameter parameter = model.parameters().getFirst();
+        QueryParameter parameter = model.parameters().get(0);
 
         assertEquals(1, parameter.index());
         assertEquals("id", parameter.name());
@@ -894,7 +894,7 @@ class QueryAnalyzerTest {
 
         assertEquals(1, model.parameters().size());
 
-        QueryParameter parameter = model.parameters().getFirst();
+        QueryParameter parameter = model.parameters().get(0);
 
         assertEquals(1, parameter.index());
         assertEquals("id", parameter.name());
@@ -1657,7 +1657,7 @@ class QueryAnalyzerTest {
 
         assertEquals(3, model.parameters().size());
 
-        QueryParameter first = model.parameters().getFirst();
+        QueryParameter first = model.parameters().get(0);
         assertEquals(1, first.index());
         assertEquals("id", first.name());
         assertEquals(ColumnType.BIGINT, first.type());
@@ -1691,7 +1691,7 @@ class QueryAnalyzerTest {
 
         assertEquals(3, model.parameters().size());
 
-        QueryParameter first = model.parameters().getFirst();
+        QueryParameter first = model.parameters().get(0);
         assertEquals(1, first.index());
         assertEquals("id", first.name());
         assertEquals(ColumnType.BIGINT, first.type());
@@ -1730,7 +1730,7 @@ class QueryAnalyzerTest {
 
         assertEquals(4, model.parameters().size());
 
-        QueryParameter first = model.parameters().getFirst();
+        QueryParameter first = model.parameters().get(0);
         assertEquals(1, first.index());
         assertEquals("id", first.name());
         assertEquals(ColumnType.BIGINT, first.type());

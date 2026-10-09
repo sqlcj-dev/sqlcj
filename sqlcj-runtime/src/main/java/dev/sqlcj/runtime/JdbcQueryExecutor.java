@@ -247,10 +247,10 @@ public final class JdbcQueryExecutor implements QueryExecutor {
         for (int i = 0; i < parameters.size(); i++) {
             Object parameter = parameters.get(i);
 
-            if (parameter instanceof UntypedText(String value)) {
-                statement.setObject(i + 1, value, Types.OTHER);
-            } else if (parameter instanceof SqlArray(String elementType, List<?> elements)) {
-                bindArray(target, statement, i + 1, elementType, elements);
+            if (parameter instanceof UntypedText text) {
+                statement.setObject(i + 1, text.value(), Types.OTHER);
+            } else if (parameter instanceof SqlArray array) {
+                bindArray(target, statement, i + 1, array.elementType(), array.elements());
             } else {
                 statement.setObject(i + 1, parameter);
             }

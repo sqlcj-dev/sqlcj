@@ -47,7 +47,7 @@ import java.util.stream.Collectors;
  */
 final class JavaNames {
 
-    private static final SourceVersion SOURCE_VERSION = SourceVersion.RELEASE_21;
+    private static final SourceVersion SOURCE_VERSION = SourceVersion.RELEASE_17;
 
     private static final String REPOSITORY_SUFFIX = "Repository";
 
