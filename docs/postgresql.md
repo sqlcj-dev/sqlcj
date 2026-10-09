@@ -92,10 +92,13 @@ file, a list of files, or a directory of `.sql` migration files; see
 [`sql[].schema`](configuration.md#sqlschema) for the accepted forms and the
 order the files are read in.
 
-- Only `CREATE TABLE`, `DROP TABLE`, and the `ALTER TABLE` forms listed in
-  [Ordered Table DDL](#ordered-table-ddl) update the schema model. The
-  statements listed in [Ignored Statements](#ignored-statements) are accepted
-  and leave it unchanged. Any other statement in a schema file is rejected.
+- One rule decides every statement: only the `CREATE TABLE`, `DROP TABLE`, and
+  `ALTER TABLE` forms listed in [Ordered Table DDL](#ordered-table-ddl) and the
+  `CREATE TYPE ... AS ENUM` and `ALTER TYPE ... ADD VALUE` forms listed in
+  [Enum Types](#enum-types) update the schema model, and every other statement
+  a schema file records is accepted and leaves it unchanged. Only the few
+  statements listed in [Ignored Statements](#ignored-statements) are rejected
+  instead, because sqlcj cannot tell what they would do to the model.
 - The statements of the schema files of one entry are applied in order to one
   schema model, so each of them sees the tables and columns the statements and
   files before it left.
@@ -244,9 +247,9 @@ left:
 | `ALTER TYPE ... ADD VALUE '<label>' BEFORE '<neighbour>'` | Inserts the label directly before the neighbour. |
 | `ALTER TYPE ... ADD VALUE '<label>' AFTER '<neighbour>'` | Inserts the label directly after the neighbour. |
 | `ALTER TYPE ... ADD VALUE IF NOT EXISTS '<label>'` | Does nothing when the type already has the label. As PostgreSQL does, the existing label decides before the neighbour, so a neighbour the type does not have is not resolved at all. |
-| Any other `ALTER TYPE` action, such as `RENAME TO`, `RENAME VALUE`, `OWNER TO`, `SET SCHEMA`, or an attribute change | Rejected. |
-| `CREATE TYPE` of a composite, range, or shell type | Rejected. |
-| `DROP TYPE` | Rejected. sqlcj's parser does not read the statement, so it is reported as a syntax error. |
+| Any other `ALTER TYPE` action, such as `RENAME TO`, `RENAME VALUE`, `OWNER TO`, `SET SCHEMA`, or an attribute change | Rejected as `Unsupported ALTER TYPE action at line <n>`. |
+| `CREATE TYPE` of a composite, range, or shell type | Ignored. A column of such a type is recorded with its declared type, as [Unsupported Types and DDL](#unsupported-types-and-ddl) describes. |
+| `DROP TYPE` | Rejected. sqlcj's parser does not read the statement, so it is reported as a syntax error; see [Ignored Statements](#ignored-statements). |
 
 Type names are matched case-insensitively, after their SQL identifier
 delimiters are removed, and labels are matched exactly. A statement that repeats
@@ -359,7 +362,7 @@ are recorded with their declared type; see
 | Column-level `CHECK (...)` | Accepted and ignored. |
 | Table-level `FOREIGN KEY (...) REFERENCES ...`, named or unnamed | Accepted and ignored. |
 | Table-level `CHECK (...)`, named or unnamed | Accepted and ignored. |
-| Any statement outside [Ordered Table DDL](#ordered-table-ddl) and [Ignored Statements](#ignored-statements), such as `CREATE VIEW` | Rejected. |
+| A table statement sqlcj's parser cannot read, such as `ALTER FOREIGN TABLE` | Rejected; see [Ignored Statements](#ignored-statements). |
 | Any other table-constraint kind | Rejected. |
 | Unparsable SQL | Rejected. |
 
@@ -392,8 +395,8 @@ statements and files before them left; the enum-type statements are listed in
 | `ALTER TABLE ... ALTER COLUMN ... SET NOT NULL` | Models the column non-null. |
 | `ALTER TABLE ... ALTER COLUMN ... DROP NOT NULL` | Models the column nullable. |
 | `ALTER TABLE IF EXISTS ...` | Does nothing when the table is not modeled. It covers only the table, so a missing column of a modeled table still fails. |
-| Any other `ALTER TABLE` action outside [Ignored Statements](#ignored-statements), such as `SET DEFAULT` | Rejected. |
-| `DROP` of an object that is neither a table nor listed in [Ignored Statements](#ignored-statements), such as `DROP VIEW` | Rejected. |
+| Any other `ALTER TABLE` action outside the constraint actions listed in [Ignored Statements](#ignored-statements), such as `SET DEFAULT` | Rejected as `Unsupported ALTER TABLE action at line <n>`. |
+| `DROP` of any object other than a table, such as `DROP VIEW` or `DROP INDEX` | Ignored; see [Ignored Statements](#ignored-statements). |
 
 One `ALTER TABLE` may state several actions; they are applied in the written
 order. Table and column names are matched case-insensitively, as query analysis
@@ -413,22 +416,64 @@ sqlcj: Invalid schema source /home/dev/project/sql/migrations/V2__orders.sql: Co
 ## Ignored Statements
 
 A schema file records the whole history of a database, not only its tables, so
-these statements are accepted and leave the schema model exactly as the
-statements and files before them left it:
+one rule decides every statement it states: a statement sqlcj models is applied,
+and every other statement is accepted and leaves the schema model exactly as the
+statements and files before it left it. There is no list of accepted kinds to
+keep up to date.
 
-| Statement | Notes |
+The modeled statements are the `CREATE TABLE`, `DROP TABLE`, and `ALTER TABLE`
+forms of [Ordered Table DDL](#ordered-table-ddl) and the
+`CREATE TYPE ... AS ENUM` and `ALTER TYPE ... ADD VALUE` forms of
+[Enum Types](#enum-types). Everything else a migration history holds is ignored,
+including
+
+- `CREATE INDEX`, `CREATE UNIQUE INDEX`, `ALTER INDEX`, and `DROP INDEX`,
+- `COMMENT ON TABLE`, `COMMENT ON COLUMN`, and `COMMENT ON VIEW`, the only
+  `COMMENT ON` targets sqlcj's parser reads; see below,
+- `CREATE EXTENSION`, `CREATE SEQUENCE`, `ALTER SEQUENCE`, and `DROP SEQUENCE`,
+- `GRANT`, `REVOKE`, and `ALTER DEFAULT PRIVILEGES`,
+- `CREATE FUNCTION`, `CREATE PROCEDURE`, `DROP FUNCTION`, `CREATE TRIGGER`, and
+  `DROP TRIGGER`; a function or procedure body must be dollar-quoted, as below,
+- `INSERT`, `UPDATE`, `DELETE`, and `TRUNCATE`, a migration's data statements,
+- `CREATE VIEW`, `DROP VIEW`, and the `CREATE`, `REFRESH`, and `DROP` forms of
+  `MATERIALIZED VIEW`,
+- `CREATE SCHEMA` and `DROP SCHEMA`,
+- `SET`, `RESET`, `ANALYZE`, `COMMIT`, and a plain `SELECT`, such as the
+  `SELECT pg_catalog.set_config(...)` a `pg_dump` snapshot opens with,
+- `CREATE POLICY`, `CREATE ROLE`, `CREATE USER`, and `ALTER ROLE`,
+- `CREATE DOMAIN` and `ALTER DOMAIN`,
+- a `CREATE TYPE` of a composite, range, or shell type, and
+- a statement sqlcj's parser reports only as opaque text and that does not open
+  as table or type DDL, such as `ALTER FUNCTION`, `ALTER SCHEMA`,
+  `CREATE AGGREGATE`, or `CREATE CAST`.
+
+An ignored statement is not resolved against the schema at all, so it may name a
+table or a column the snapshot does not model: a view over an unmodeled table
+and a `TRUNCATE` of one are both accepted.
+
+These statements are rejected rather than ignored, because sqlcj cannot tell
+what they would do to the schema model:
+
+| Statement | Diagnostic |
 | --- | --- |
-| `CREATE INDEX`, `CREATE UNIQUE INDEX` | |
-| `ALTER INDEX` | |
-| `DROP INDEX`, `DROP INDEX IF EXISTS` | |
-| `COMMENT ON TABLE`, `COMMENT ON COLUMN`, `COMMENT ON VIEW` | These are the only `COMMENT ON` targets sqlcj's parser reads; see below. |
-| `CREATE EXTENSION`, `CREATE EXTENSION IF NOT EXISTS` | |
-| `CREATE SEQUENCE`, `ALTER SEQUENCE`, `DROP SEQUENCE` | |
-| `GRANT`, `REVOKE` | |
-| `CREATE FUNCTION`, `CREATE OR REPLACE FUNCTION` | Only with a body delimited by the untagged `$$ ... $$`, such as `AS $$ ... $$`; see below. |
-| `DROP FUNCTION`, `DROP FUNCTION IF EXISTS` | |
-| `CREATE TRIGGER`, `DROP TRIGGER` | |
-| `INSERT`, `UPDATE`, `DELETE` | A migration's data statements do not change the modeled tables. |
+| An `ALTER TABLE` action outside [Ordered Table DDL](#ordered-table-ddl) and the constraint actions below | `Unsupported ALTER TABLE action at line <n>` |
+| An `ALTER TYPE` action other than `ADD VALUE` | `Unsupported ALTER TYPE action at line <n>` |
+| A `CREATE FUNCTION` or `CREATE PROCEDURE` whose body is not delimited by the untagged `$$ ... $$` | `Unsupported schema statement: CREATE FUNCTION without a dollar-quoted body at line <n>`, with `CREATE PROCEDURE` for a procedure |
+| A statement sqlcj's parser reports only as opaque text and that opens as table or type DDL | `Unsupported schema statement: ALTER FOREIGN TABLE at line <n>`, quoting the opening words |
+
+An opaque statement opens as table DDL when its first words are `CREATE`,
+`ALTER`, or `DROP`, then any of `GLOBAL`, `LOCAL`, `TEMP`, `TEMPORARY`,
+`UNLOGGED`, or `FOREIGN`, then `TABLE`, and as type DDL when they are `CREATE`
+or `ALTER`, then `TYPE`. The words are matched case-insensitively and the
+diagnostic quotes them in upper case, single-spaced, so both
+`ALTER FOREIGN TABLE ft ADD COLUMN x integer` and its lower-case spelling are
+rejected as `Unsupported schema statement: ALTER FOREIGN TABLE at line <n>`.
+
+These `ALTER TABLE` actions are ignored like any other unmodeled statement,
+except that the statement still resolves its table:
+
+| Action | Notes |
+| --- | --- |
 | `ALTER TABLE ... ADD [CONSTRAINT name] PRIMARY KEY (...)` | Named or unnamed. |
 | `ALTER TABLE ... ADD [CONSTRAINT name] UNIQUE (...)` | Named or unnamed. |
 | `ALTER TABLE ... ADD [CONSTRAINT name] FOREIGN KEY (...) REFERENCES ...` | Named or unnamed. |
@@ -437,14 +482,11 @@ statements and files before them left it:
 | `ALTER TABLE ... RENAME CONSTRAINT` | |
 
 A constraint an `ALTER TABLE` adds is not recorded, so it is not carried into
-the schema model the way a `CREATE TABLE` constraint is.
-
-An ignored statement is not resolved against the schema at all, so it may name
-a table or a column the snapshot does not model. An ignored `ALTER TABLE`
-action is the one exception: the statement still resolves its table, so
+the schema model the way a `CREATE TABLE` constraint is. Because the table is
+still resolved,
 `ALTER TABLE payments ADD CONSTRAINT payments_pkey PRIMARY KEY (id)` fails when
 `payments` is not modeled, exactly as any other `ALTER TABLE` of a missing
-table does. An ignored action may stand alone or beside modeled actions of one
+table does. Such an action may stand alone or beside modeled actions of one
 `ALTER TABLE`, so
 `ALTER TABLE users ADD COLUMN age INTEGER, ADD CONSTRAINT users_age_check CHECK (age > 0)`
 appends `age` and records nothing for the constraint.
@@ -452,20 +494,33 @@ appends `age` and records nothing for the constraint.
 Three limitations follow from what sqlcj's SQL parser reads, and sqlcj does not
 split or pre-process the SQL to work around them:
 
-- A `CREATE FUNCTION` is ignored only when its body is delimited by the untagged
-  `$$ ... $$`, which is the only dollar-quote delimiter sqlcj's parser reads. A
-  tagged delimiter such as `$body$ ... $body$` is not read at all: it is a
-  syntax error, reported for the closing delimiter, as in
+- A `CREATE FUNCTION` or `CREATE PROCEDURE` is ignored only when its body is
+  delimited by the untagged `$$ ... $$`, which is the only dollar-quote
+  delimiter sqlcj's parser reads. A tagged delimiter such as
+  `$body$ ... $body$` is not read at all: it is a syntax error, reported for the
+  closing delimiter, as in
   `Encountered unexpected token: "$body$" at line 1, column 74`. A body written
-  any other way, such as `AS 'SELECT 1' LANGUAGE sql`, is captured through the
-  end of the file, so such a function is rejected at the line it begins on and
-  nothing after it is applied.
+  any other way, such as `AS 'SELECT 1' LANGUAGE sql` or `RETURN 1`, is captured
+  through the end of the file, so such a function or procedure is rejected at
+  the line it begins on and nothing after it is applied.
 - `COMMENT ON` is read only for the `TABLE`, `COLUMN`, and `VIEW` targets. Any
   other target, such as `COMMENT ON TYPE`, is a syntax error rather than an
   ignored statement.
 - `ALTER TABLE ... ADD CHECK (...)` without a constraint name is a syntax
   error. The named `ADD CONSTRAINT name CHECK (...)` spelling is ignored as
   listed above.
+
+sqlcj reads only the statements a schema file states, so a schema change a
+statement makes indirectly is never seen:
+
+- DDL inside a function or procedure body belongs to that body, which is one
+  literal to sqlcj's parser, so a table or a type the body creates or alters is
+  not modeled. The same holds for DDL inside a `DO` block, which sqlcj's parser
+  does not read at all: a `DO` statement is reported as a syntax error.
+- `DROP TYPE ... CASCADE` drops every column of the dropped type, and sqlcj
+  never models those columns as dropped. sqlcj's parser does not read
+  `DROP TYPE` at all either, so such a statement is reported as a syntax error;
+  see [Enum Types](#enum-types).
 
 ## Nulls
 
@@ -567,13 +622,15 @@ written by an earlier successful run is left unchanged. The writing step itself
 is sequential rather than atomic; see
 [Generated Output and Failures](configuration.md#generated-output-and-failures).
 
-A schema message names the schema source and the offending statement with the
-line it begins on, the table or column the statement refers to, or the syntax
-error with the line and column it was found at. A query message names the
-query, its source, its header line, and the offending column and recorded type:
+A schema message names the schema source and the offending statement or action
+in SQL terms with the line it begins on, the table or column the statement
+refers to, or the syntax error with the line and column it was found at. A query
+message names the query, its source, its header line, and the offending column
+and recorded type:
 
 ```text
-sqlcj: Invalid schema source /home/dev/project/schema.sql: Unsupported schema statement: CreateView at line 12
+sqlcj: Invalid schema source /home/dev/project/schema.sql: Unsupported schema statement: ALTER FOREIGN TABLE at line 12
+sqlcj: Invalid schema source /home/dev/project/schema.sql: Unsupported ALTER TABLE action at line 18
 sqlcj: Invalid schema source /home/dev/project/schema.sql: Encountered unexpected token: ";" at line 4, column 1
 sqlcj: Invalid query 'ListTags' in /home/dev/project/queries.sql at line 5: Column 'tags' has unsupported type JSONB[]
 ```
@@ -686,8 +743,12 @@ Enum types:
   `DefaultSchemaParserTest.shouldModelEnumArraysAndRecordUndeclaredTypesAsUnsupported`
   covers the modeled enum array beside the multidimensional enum array and the
   undeclared type that stay recorded.
-- `DefaultSchemaParserTest.shouldRejectStatementOutsideTheIgnoredList` covers
-  the rejected `ALTER TYPE` actions and the composite `CREATE TYPE`, and
+- `DefaultSchemaParserTest.shouldRejectUnsupportedStatementsInSqlTerms` covers
+  the rejected `ALTER TYPE` actions,
+  `DefaultSchemaParserTest.shouldIgnoreEveryStatementItDoesNotModel` and
+  `DefaultSchemaParserTest.shouldRecordAColumnOfAnIgnoredCompositeType` cover
+  the ignored composite, range, and shell `CREATE TYPE` and the column a
+  composite type leaves recorded, and
   `DefaultSchemaParserTest.shouldRejectDropType` covers `DROP TYPE`.
 - `QueryAnalyzerTest.shouldCarryTheEnumTypeOfASelectedColumnAndItsParameter`,
   `QueryAnalyzerTest.shouldCarryTheEnumTypeOfAReturningColumnAndItsParameter`,
@@ -766,20 +827,25 @@ Ordered table DDL:
 
 Ignored statements:
 
-- `DefaultSchemaParserTest.shouldIgnoreDocumentedStatements` covers one spelling
-  per listed statement, including the lower-case `ALTER INDEX` form and
-  `CREATE OR REPLACE FUNCTION ... $$ ... $$ LANGUAGE plpgsql`, and
+- `DefaultSchemaParserTest.shouldIgnoreEveryStatementItDoesNotModel` covers one
+  spelling per statement kind JSqlParser parses, including the lower-case
+  `ALTER INDEX` form, a dollar-quoted `CREATE OR REPLACE FUNCTION` and a
+  dollar-quoted `CREATE PROCEDURE`, the views, schemas, session, privilege,
+  role, policy, domain, and non-enum `CREATE TYPE` statements, and the opaque
+  `ALTER FUNCTION`, `ALTER SCHEMA`, `CREATE AGGREGATE`, and `CREATE CAST`; and
   `DefaultSchemaParserTest.shouldIgnoreConstraintAlterTableActions` covers the
   named and unnamed constraint actions.
 - `DefaultSchemaParserTest.shouldNotResolveAnIgnoredStatementAgainstTheSchema`
-  covers that an ignored statement may name an unmodeled table or column, and
+  covers that an ignored statement, including a view over an unmodeled table and
+  a `TRUNCATE` of one, may name an unmodeled table or column, and
   `DefaultSchemaParserTest.shouldReportTheMissingTableOfAnIgnoredConstraintAction`
   covers that an ignored `ALTER TABLE` action still resolves its table.
 - `DefaultSchemaParserTest.shouldApplyAModeledActionBesideAnIgnoredConstraintAction`
   covers an ignored action beside a modeled one.
-- `DefaultSchemaParserTest.shouldRejectStatementOutsideTheIgnoredList` covers the
-  kind and the line of each rejected statement, including the single-quoted
-  function body, and
+- `DefaultSchemaParserTest.shouldRejectUnsupportedStatementsInSqlTerms` covers
+  the exact message and line of each rejected statement and action, including
+  the single-quoted function and procedure bodies and the upper- and lower-case
+  `ALTER FOREIGN TABLE`, and
   `DefaultSchemaParserTest.shouldRejectUnsupportedSchemaStatement` and
   `DefaultSchemaParserTest.shouldReportTheLineOfARejectedStatementAfterCommentsAndAFunctionBody`
   cover the reported line after comments that contain a statement separator and
@@ -788,8 +854,9 @@ Ignored statements:
   covers that a single-quoted body is rejected at its own line even when it
   captures a later dollar-quoted body.
 - `SqlcjCompilerIntegrationTest.shouldReportTheMigrationFileAndLineOfAnUnsupportedStatement`
-  covers the migration file and line of a rejected statement that follows an
-  ignored one, and that no file is written.
+  covers the migration file, the SQL-term message, and the line of a rejected
+  statement that follows an ignored index and an ignored view, and that no file
+  is written.
 
 Nulls:
 
