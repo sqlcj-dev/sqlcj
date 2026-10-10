@@ -249,7 +249,7 @@ left:
 | `ALTER TYPE ... ADD VALUE IF NOT EXISTS '<label>'` | Does nothing when the type already has the label. As PostgreSQL does, the existing label decides before the neighbour, so a neighbour the type does not have is not resolved at all. |
 | Any other `ALTER TYPE` action, such as `RENAME TO`, `RENAME VALUE`, `OWNER TO`, `SET SCHEMA`, or an attribute change | Rejected as `Unsupported ALTER TYPE action at line <n>`. |
 | `CREATE TYPE` of a composite, range, or shell type | Ignored. A column of such a type is recorded with its declared type, as [Unsupported Types and DDL](#unsupported-types-and-ddl) describes. |
-| `DROP TYPE` | Rejected. sqlcj's parser does not read the statement, so it is reported as a syntax error; see [Ignored Statements](#ignored-statements). |
+| `DROP TYPE` | Ignored. sqlcj's parser cannot read the statement, and an unreadable statement that does not open as table or type DDL is ignored, so an enum the schema models stays modeled with its labels and the columns of that type stay modeled; see [Ignored Statements](#ignored-statements). |
 
 Type names are matched case-insensitively, after their SQL identifier
 delimiters are removed, and labels are matched exactly. A statement that repeats
@@ -428,24 +428,30 @@ forms of [Ordered Table DDL](#ordered-table-ddl) and the
 including
 
 - `CREATE INDEX`, `CREATE UNIQUE INDEX`, `ALTER INDEX`, and `DROP INDEX`,
-- `COMMENT ON TABLE`, `COMMENT ON COLUMN`, and `COMMENT ON VIEW`, the only
-  `COMMENT ON` targets sqlcj's parser reads; see below,
+- `COMMENT ON` of any target, including `TABLE`, `COLUMN`, `VIEW`, `TYPE`,
+  `INDEX`, `FUNCTION`, `SCHEMA`, `EXTENSION`, and `CONSTRAINT`,
 - `CREATE EXTENSION`, `CREATE SEQUENCE`, `ALTER SEQUENCE`, and `DROP SEQUENCE`,
 - `GRANT`, `REVOKE`, and `ALTER DEFAULT PRIVILEGES`,
 - `CREATE FUNCTION`, `CREATE PROCEDURE`, `DROP FUNCTION`, `CREATE TRIGGER`, and
-  `DROP TRIGGER`; a function or procedure body must be dollar-quoted, as below,
+  `DROP TRIGGER`, with a body written any way: the untagged `$$ ... $$`, a
+  tagged `$body$ ... $body$`, a single-quoted `AS 'SELECT 1'`, or `RETURN 1`,
+- `DO` blocks, with an untagged or a tagged body and with or without a stated
+  `LANGUAGE`,
 - `INSERT`, `UPDATE`, `DELETE`, and `TRUNCATE`, a migration's data statements,
 - `CREATE VIEW`, `DROP VIEW`, and the `CREATE`, `REFRESH`, and `DROP` forms of
   `MATERIALIZED VIEW`,
 - `CREATE SCHEMA` and `DROP SCHEMA`,
-- `SET`, `RESET`, `ANALYZE`, `COMMIT`, and a plain `SELECT`, such as the
+- `SET`, including `SET search_path TO a, b`, `RESET`, `ANALYZE`, `VACUUM`,
+  `LOCK TABLE`, `BEGIN`, `COMMIT`, `COPY`, and a plain `SELECT`, such as the
   `SELECT pg_catalog.set_config(...)` a `pg_dump` snapshot opens with,
-- `CREATE POLICY`, `CREATE ROLE`, `CREATE USER`, and `ALTER ROLE`,
-- `CREATE DOMAIN` and `ALTER DOMAIN`,
-- a `CREATE TYPE` of a composite, range, or shell type, and
-- a statement sqlcj's parser reports only as opaque text and that does not open
-  as table or type DDL, such as `ALTER FUNCTION`, `ALTER SCHEMA`,
-  `CREATE AGGREGATE`, or `CREATE CAST`.
+- `CREATE POLICY`, `DROP POLICY`, `CREATE ROLE`, `CREATE USER`, and
+  `ALTER ROLE`,
+- `CREATE DOMAIN`, `ALTER DOMAIN`, and `DROP DOMAIN`,
+- `CREATE RULE` and `CREATE EVENT TRIGGER`,
+- a `CREATE TYPE` of a composite, range, or shell type, and `DROP TYPE`, and
+- a statement sqlcj's parser cannot read, or reports only as opaque text, and
+  that does not open as table or type DDL, such as `ALTER FUNCTION`,
+  `ALTER SCHEMA`, `CREATE AGGREGATE`, or `CREATE CAST`.
 
 An ignored statement is not resolved against the schema at all, so it may name a
 table or a column the snapshot does not model: a view over an unmodeled table
@@ -458,14 +464,14 @@ what they would do to the schema model:
 | --- | --- |
 | An `ALTER TABLE` action outside [Ordered Table DDL](#ordered-table-ddl) and the constraint actions below | `Unsupported ALTER TABLE action at line <n>` |
 | An `ALTER TYPE` action other than `ADD VALUE` | `Unsupported ALTER TYPE action at line <n>` |
-| A `CREATE FUNCTION` or `CREATE PROCEDURE` whose body is not delimited by the untagged `$$ ... $$` | `Unsupported schema statement: CREATE FUNCTION without a dollar-quoted body at line <n>`, with `CREATE PROCEDURE` for a procedure |
-| A statement sqlcj's parser reports only as opaque text and that opens as table or type DDL | `Unsupported schema statement: ALTER FOREIGN TABLE at line <n>`, quoting the opening words |
+| A statement sqlcj's parser cannot read that opens as table or type DDL, outside the `ALTER TABLE` actions below | The parser's own reason with the line and column of the unexpected token, as in `Encountered unexpected token: "DATA" at line 18, column 41` |
+| A statement sqlcj's parser reports only as opaque text, or as several statements, and that opens as table or type DDL | `Unsupported schema statement: ALTER FOREIGN TABLE at line <n>`, quoting the opening words |
 
-An opaque statement opens as table DDL when its first words are `CREATE`,
-`ALTER`, or `DROP`, then any of `GLOBAL`, `LOCAL`, `TEMP`, `TEMPORARY`,
-`UNLOGGED`, or `FOREIGN`, then `TABLE`, and as type DDL when they are `CREATE`
-or `ALTER`, then `TYPE`. The words are matched case-insensitively and the
-diagnostic quotes them in upper case, single-spaced, so both
+A statement opens as table DDL when its first words are `CREATE`, `ALTER`, or
+`DROP`, then any of `GLOBAL`, `LOCAL`, `TEMP`, `TEMPORARY`, `UNLOGGED`, or
+`FOREIGN`, then `TABLE`, and as type DDL when they are `CREATE` or `ALTER`, then
+`TYPE`. The words are matched case-insensitively and the diagnostic quotes them
+in upper case, single-spaced, so both
 `ALTER FOREIGN TABLE ft ADD COLUMN x integer` and its lower-case spelling are
 rejected as `Unsupported schema statement: ALTER FOREIGN TABLE at line <n>`.
 
@@ -477,7 +483,7 @@ except that the statement still resolves its table:
 | `ALTER TABLE ... ADD [CONSTRAINT name] PRIMARY KEY (...)` | Named or unnamed. |
 | `ALTER TABLE ... ADD [CONSTRAINT name] UNIQUE (...)` | Named or unnamed. |
 | `ALTER TABLE ... ADD [CONSTRAINT name] FOREIGN KEY (...) REFERENCES ...` | Named or unnamed. |
-| `ALTER TABLE ... ADD CONSTRAINT name CHECK (...)` | The unnamed `ADD CHECK (...)` spelling is a syntax error for sqlcj's parser; see below. |
+| `ALTER TABLE ... ADD CONSTRAINT name CHECK (...)` | |
 | `ALTER TABLE ... DROP CONSTRAINT [IF EXISTS] name` | |
 | `ALTER TABLE ... RENAME CONSTRAINT` | |
 
@@ -491,36 +497,54 @@ table does. Such an action may stand alone or beside modeled actions of one
 `ALTER TABLE users ADD COLUMN age INTEGER, ADD CONSTRAINT users_age_check CHECK (age > 0)`
 appends `age` and records nothing for the constraint.
 
-Three limitations follow from what sqlcj's SQL parser reads, and sqlcj does not
-split or pre-process the SQL to work around them:
+An `ALTER TABLE` sqlcj's parser cannot read is classified by its words instead,
+and ignored when every one of its top-level actions — the parts separated by
+the commas that stand outside parentheses — begins with one of
 
-- A `CREATE FUNCTION` or `CREATE PROCEDURE` is ignored only when its body is
-  delimited by the untagged `$$ ... $$`, which is the only dollar-quote
-  delimiter sqlcj's parser reads. A tagged delimiter such as
-  `$body$ ... $body$` is not read at all: it is a syntax error, reported for the
-  closing delimiter, as in
-  `Encountered unexpected token: "$body$" at line 1, column 74`. A body written
-  any other way, such as `AS 'SELECT 1' LANGUAGE sql` or `RETURN 1`, is captured
-  through the end of the file, so such a function or procedure is rejected at
-  the line it begins on and nothing after it is applied.
-- `COMMENT ON` is read only for the `TABLE`, `COLUMN`, and `VIEW` targets. Any
-  other target, such as `COMMENT ON TYPE`, is a syntax error rather than an
-  ignored statement.
-- `ALTER TABLE ... ADD CHECK (...)` without a constraint name is a syntax
-  error. The named `ADD CONSTRAINT name CHECK (...)` spelling is ignored as
-  listed above.
+- `ADD CONSTRAINT <name>`,
+- `ADD CHECK`, `ADD UNIQUE`, or `ADD EXCLUDE`,
+- `ADD PRIMARY KEY` or `ADD FOREIGN KEY`, or
+- `ALTER [COLUMN] <name> ADD GENERATED`.
+
+PostgreSQL 16 writes `ALTER TABLE ONLY public.t ALTER COLUMN id ADD GENERATED
+... AS IDENTITY (SEQUENCE NAME ...)` for every identity column of a
+`pg_dump --schema-only` snapshot, and sqlcj's parser reads neither that form nor
+an `EXCLUDE`, `DEFERRABLE INITIALLY DEFERRED`, `UNIQUE USING INDEX`,
+`PRIMARY KEY USING INDEX`, or `NOT VALID` constraint, nor an unnamed
+`ADD CHECK`. None of them can change a modeled column's existence, name, type,
+or nullability, which comes from `NOT NULL` alone. Such a statement is ignored
+without its table being resolved, like every other ignored statement, so it also
+loads for a table the snapshot does not model. Every other unreadable
+`ALTER TABLE`, including `ALTER COLUMN ... SET DATA TYPE` and an ignored action
+written beside it, stays rejected with the parser's reason.
+
+sqlcj splits a schema file at the statement separators its own SQL lexer
+reports and parses each statement alone, so a statement the parser cannot read
+fails only itself:
+
+- A separator inside a quoted string, a quoted identifier, a comment, or the
+  untagged `$$ ... $$` literal is not a boundary. A tagged dollar-quoted body
+  ends at the next occurrence of its own opening delimiter, as PostgreSQL ends
+  it, whether that delimiter stands alone or is glued to the body as in
+  `$fn$BEGIN ... END$fn$`. A body that is never closed fails the source as
+  `Unterminated dollar-quoted string at line <n>, column <c>`.
+- A psql meta-command line, a line whose first non-blank character is a
+  backslash, such as the `\restrict` and `\unrestrict` lines recent `pg_dump`
+  releases write, is skipped. Every line and column a diagnostic reports is a
+  position in the file as it was written.
+- An escape string that quotes a single quote with a backslash, such as
+  `E'it\'s'`, is mis-lexed by sqlcj's SQL lexer and fails the whole file.
+  Writing the doubled `E'it''s'`, or the ordinary `'it''s'`, avoids it.
 
 sqlcj reads only the statements a schema file states, so a schema change a
 statement makes indirectly is never seen:
 
-- DDL inside a function or procedure body belongs to that body, which is one
-  literal to sqlcj's parser, so a table or a type the body creates or alters is
-  not modeled. The same holds for DDL inside a `DO` block, which sqlcj's parser
-  does not read at all: a `DO` statement is reported as a syntax error.
+- DDL inside a function or procedure body, or inside a `DO` block, belongs to
+  that body, so a table or a type the body creates, alters, or drops is not
+  modeled.
 - `DROP TYPE ... CASCADE` drops every column of the dropped type, and sqlcj
-  never models those columns as dropped. sqlcj's parser does not read
-  `DROP TYPE` at all either, so such a statement is reported as a syntax error;
-  see [Enum Types](#enum-types).
+  never models those columns as dropped; `DROP TYPE` itself is ignored, so the
+  enum stays modeled with its labels; see [Enum Types](#enum-types).
 
 ## Nulls
 
@@ -749,7 +773,8 @@ Enum types:
   `DefaultSchemaParserTest.shouldRecordAColumnOfAnIgnoredCompositeType` cover
   the ignored composite, range, and shell `CREATE TYPE` and the column a
   composite type leaves recorded, and
-  `DefaultSchemaParserTest.shouldRejectDropType` covers `DROP TYPE`.
+  `DefaultSchemaParserTest.shouldIgnoreDropTypeAndKeepTheModeledEnum` covers the
+  ignored `DROP TYPE` and the enum and enum column that survive it.
 - `QueryAnalyzerTest.shouldCarryTheEnumTypeOfASelectedColumnAndItsParameter`,
   `QueryAnalyzerTest.shouldCarryTheEnumTypeOfAReturningColumnAndItsParameter`,
   `QueryAnalyzerTest.shouldAcceptARepeatedIndexOfOneEnumType`, and
@@ -842,17 +867,48 @@ Ignored statements:
   covers that an ignored `ALTER TABLE` action still resolves its table.
 - `DefaultSchemaParserTest.shouldApplyAModeledActionBesideAnIgnoredConstraintAction`
   covers an ignored action beside a modeled one.
+- `DefaultSchemaParserTest.shouldIgnoreEveryUnreadableStatementThatIsNotTableOrTypeDdl`
+  covers one spelling per statement kind sqlcj's parser cannot read, including
+  the untagged, tagged, and `LANGUAGE` forms of `DO`, `DROP TYPE`, every
+  `COMMENT ON` target the parser does not read, `SET search_path TO a, b`,
+  `DROP POLICY`, `DROP DOMAIN`, `VACUUM`, `LOCK TABLE`, `BEGIN`, `COPY ... TO`,
+  `CREATE RULE`, `CREATE EVENT TRIGGER`, and the single-quoted, `RETURN`, and
+  tagged function and procedure bodies.
+- `DefaultSchemaParserTest.shouldIgnoreTheUnreadableAlterTableActionsThatCannotChangeAColumn`
+  and
+  `DefaultSchemaParserTest.shouldIgnoreThePgDumpIdentityAlterTableAction` cover
+  every ignored unreadable action, alone and two in one statement, on a table
+  the schema does not model, including the multi-line `pg_dump` identity form.
 - `DefaultSchemaParserTest.shouldRejectUnsupportedStatementsInSqlTerms` covers
-  the exact message and line of each rejected statement and action, including
-  the single-quoted function and procedure bodies and the upper- and lower-case
-  `ALTER FOREIGN TABLE`, and
-  `DefaultSchemaParserTest.shouldRejectUnsupportedSchemaStatement` and
-  `DefaultSchemaParserTest.shouldReportTheLineOfARejectedStatementAfterCommentsAndAFunctionBody`
-  cover the reported line after comments that contain a statement separator and
-  after a multi-line dollar-quoted body.
-- `DefaultSchemaParserTest.shouldRejectASingleQuotedFunctionBodyThatCapturesALaterDollarQuotedBody`
-  covers that a single-quoted body is rejected at its own line even when it
-  captures a later dollar-quoted body.
+  the exact message and line of each statement and action rejected in SQL terms,
+  including the upper- and lower-case `ALTER FOREIGN TABLE`, and
+  `DefaultSchemaParserTest.shouldRejectUnsupportedSchemaStatement`,
+  `DefaultSchemaParserTest.shouldReportTheLineOfARejectedStatementAfterCommentsAndAFunctionBody`,
+  and
+  `DefaultSchemaParserTest.shouldReportTheLineOfARejectedStatementAfterUnreadableOnesAndATaggedBody`
+  cover the reported line after comments that contain a statement separator,
+  after a dollar-quoted body, and after a blanked meta-command line and
+  unreadable statements.
+- `DefaultSchemaParserTest.shouldRejectAnUnreadableAlterColumnActionAtItsFileLineAndColumn`,
+  `DefaultSchemaParserTest.shouldRejectAnUnreadableAlterTableActionBesideAnIgnoredOne`,
+  and
+  `DefaultSchemaParserTest.shouldRejectAnUnreadableCreateTypeAtItsFileLineAndColumn`
+  cover the parser's reason at the file line and column of `SET DATA TYPE`, of
+  `SET DATA TYPE` beside an ignored action in a statement that begins in the
+  middle of a line, and of an unreadable `CREATE TYPE`.
+- `DefaultSchemaParserTest.shouldApplyTheStatementsAroundUnreadableOnesAndNotModelDdlInsideABody`
+  covers the statements applied before and after unreadable ones and the DDL of
+  an untagged, a tagged, and a glued `$fn$BEGIN ... END$fn$` body that is not
+  modeled;
+  `DefaultSchemaParserTest.shouldApplyTheStatementsAfterAFunctionBodyThatIsNotDollarQuoted`
+  covers the statements after a single-quoted body.
+- `DefaultSchemaParserTest.shouldSkipPsqlMetaCommandLines` covers a schema source
+  with `\restrict` and `\unrestrict` lines, and
+  `DefaultSchemaParserTest.shouldRejectAnUnterminatedDollarQuotedBody` covers the
+  located failure of a tagged body that is never closed.
+- `DefaultSchemaParserTest.shouldLoadTheMigrationFilesInOrder` covers a migration
+  history that states `COMMENT ON TYPE` beside the targets the parser reads,
+  loaded unchanged.
 - `SqlcjCompilerIntegrationTest.shouldReportTheMigrationFileAndLineOfAnUnsupportedStatement`
   covers the migration file, the SQL-term message, and the line of a rejected
   statement that follows an ignored index and an ignored view, and that no file
