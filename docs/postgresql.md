@@ -108,6 +108,17 @@ order the files are read in.
 - SQL identifier delimiters are removed for the parsed model, so the table
   `"user data"` is modeled as `user data` and the column `"user id"` is modeled
   as `user id`.
+- sqlcj models one namespace, so an unqualified and a `public`-qualified name
+  are the same name: `users`, `public.users`, and `"public"."users"` are one
+  table, and `mood`, `public.mood`, and `"public"."mood"` are one type. A schema
+  qualifier is compared without its SQL identifier delimiters and
+  case-insensitively, as every other name is.
+- A table or a type qualified with any other schema is invisible: sqlcj never
+  models it, every statement whose own table or type stands there is ignored
+  before anything it names is resolved, and a query that names such a table is
+  rejected as an unknown table. `search_path` is not followed, so an
+  unqualified name always belongs to the one namespace sqlcj models, whatever a
+  `SET search_path` statement in the snapshot says.
 
 ## Supported Column Types
 
@@ -137,7 +148,7 @@ accepted and map exactly like their unparameterized spellings.
 | `BYTEA` | `byte[]` | A record compares an array component by reference, so two row records holding equal bytes are not `equals`. |
 | `JSON` | `String` | The JSON text itself. PostgreSQL stores it as written, so it reads back exactly as written. sqlcj never parses, validates, or normalizes it. |
 | `JSONB` | `String` | The JSON text itself. PostgreSQL stores a decomposed value, so the text reads back as PostgreSQL renders it rather than as written, and `=` compares by value. sqlcj never parses, validates, or normalizes it. |
-| The name of an enum type the schema declares | The generated Java enum of that type | Matched without SQL identifier delimiters and case-insensitively, as PostgreSQL resolves an unquoted type name. See [Enum Types](#enum-types). |
+| The name of an enum type the schema declares | The generated Java enum of that type | Matched without SQL identifier delimiters and case-insensitively, as PostgreSQL resolves an unquoted type name. A `public`-qualified name resolves as its unqualified name, so `public.mood` and `"public"."mood"` are the type `mood`, and a name qualified with any other schema never resolves. See [Enum Types](#enum-types). |
 | A one-dimensional array of any spelling above except `BYTEA`, `JSON`, and `JSONB`, written `type[]` or `type[n]` | `java.util.List<T>` of the element's Java type | The declared size is ignored, as PostgreSQL ignores it. See [Array Types](#array-types). |
 
 Any spelling that is not listed above has no Java mapping. Such a column is
@@ -252,23 +263,29 @@ left:
 | `ALTER TYPE ... RENAME VALUE '<label>' TO '<new label>'` | Renames the label in its position, so the modeled labels keep PostgreSQL's sort order. |
 | A `CREATE TYPE ... AS ENUM (...)` or an `ALTER TYPE ... RENAME TO` whose name a modeled enum already has | Replaces that enum in its position with the newly declared or renamed one, because the `DROP TYPE ... CASCADE` that freed the name is never seen. This is how the migration that replaces an enum loads, in either of its usual shapes: renaming the old type away before declaring the new one under its name, or declaring the new type beside it and renaming the new type onto its name once the columns are retyped. A column that still names a replaced enum keeps that name, so it is modeled as a column of the replacing enum with its labels, which is the same unseen `DROP TYPE ... CASCADE` case: PostgreSQL would have removed the column. |
 | `ALTER TYPE ... OWNER TO`, `RENAME ATTRIBUTE`, `ADD ATTRIBUTE`, `DROP ATTRIBUTE`, and `ALTER ATTRIBUTE` | Ignored. Ownership cannot change a modeled enum and the attribute actions belong to a composite type, so the stated type is not resolved at all. |
-| `ALTER TYPE ... SET SCHEMA <schema>` | Rejected for a modeled enum as `Unsupported ALTER TYPE action: SET SCHEMA <schema> at line <n>`, because the columns of that type would keep it in a namespace sqlcj does not model. Ignored for a type sqlcj does not model. |
-| `ALTER TYPE ... RENAME TO` of a type sqlcj does not model | Ignored, because such a type is none of its enum types. |
+| `ALTER TYPE ... SET SCHEMA <schema>` | Rejected for a modeled enum as `Unsupported ALTER TYPE action: SET SCHEMA <schema> at line <n>`, because the columns of that type would keep it in a namespace sqlcj does not model. |
+| `ALTER TYPE ... SET SCHEMA public` | Does nothing for a modeled enum: the type already stands in the one namespace sqlcj models. |
+| `ALTER TYPE ... RENAME TO` or `SET SCHEMA` of a type sqlcj does not model | Ignored, however the type is qualified, because such a type is none of its enum types. |
+| A `CREATE TYPE` or an `ALTER TYPE` whose own type is qualified with a schema other than `public` | Ignored before anything it states is resolved, so it never touches the modeled enum of the same unqualified name and neither a repeated label nor a missing label or neighbour fails. |
 | `CREATE TYPE` of a composite, range, or shell type | Ignored. A column of such a type is recorded with its declared type, as [Unsupported Types and DDL](#unsupported-types-and-ddl) describes. |
 | `DROP TYPE` | Ignored. sqlcj's parser cannot read the statement, and an unreadable statement that does not open as table or type DDL is ignored, so an enum the schema models stays modeled with its labels and the columns of that type stay modeled; see [Ignored Statements](#ignored-statements). |
 
 An `ALTER TYPE` written in a form sqlcj's parser cannot read, such as a
 qualified `RENAME TO` target, several actions joined by commas, or
-`SET (...)`, is rejected as unreadable type DDL; see
+`SET (...)`, is rejected as unreadable type DDL, unless its own type is
+qualified with a schema other than `public`, which is ignored; see
 [Ignored Statements](#ignored-statements).
 
 Type names are matched case-insensitively, after their SQL identifier
-delimiters are removed, and labels are matched exactly. A type name is the
-statement's own name, so `public.stage_setting` and `stage_setting` are
-different names: a `RENAME TO` or `SET SCHEMA` of a qualified name that matches
-no modeled enum fails as a missing type rather than being ignored, because it
-may state one. A statement that repeats a label, or that refers to a type or a
-label that is not modeled, is rejected as PostgreSQL rejects it:
+delimiters are removed, and labels are matched exactly. Because sqlcj models one
+namespace, a type name resolves by its unqualified name, so
+`CREATE TYPE public.stage_setting` and `CREATE TYPE "public"."stage_setting"`
+declare the type `stage_setting` and replace a modeled `stage_setting` rather
+than adding a second enum, and `ADD VALUE`, `RENAME VALUE`, and `RENAME TO`
+written through `public.stage_setting` act on that one type and name it
+unqualified in their diagnostics. A statement that repeats a label, or that
+refers to a type or a label that is not modeled, is rejected as PostgreSQL
+rejects it:
 
 ```text
 sqlcj: Invalid schema source /home/dev/project/sql/migrations/V2__stages.sql: Type not found in schema: stage_setting
@@ -409,9 +426,12 @@ as `Table not found in schema: <t>`.
 
 Because sqlcj models one namespace, a `LIKE` or `PARTITION OF` source and an
 `ATTACH` or `DETACH PARTITION` partition resolve by their unqualified name, so
-`public.t` is `t`. Until sqlcj models namespaces, such a name qualified with any
-other schema names a table sqlcj leaves unmodeled and fails as
-`Table not found in schema: <schema>.<t>` rather than resolving to a modeled `t`.
+`public.t` is `t`. Such a name qualified with any other schema names a table
+sqlcj leaves unmodeled rather than a modeled `t`: a `LIKE` or `PARTITION OF`
+source fails as `Table not found in schema: <schema>.<t>`, because the created
+table's columns would otherwise be unknown, and an `ATTACH` or
+`DETACH PARTITION` partition is ignored, like any other partition sqlcj does not
+model.
 
 A `CREATE TABLE` with neither an element list, `()`, nor `PARTITION OF`, such as
 `CREATE TABLE c LIKE t` without the parentheses PostgreSQL requires, states no
@@ -433,7 +453,7 @@ statements and files before them left; the enum-type statements are listed in
 | --- | --- |
 | `CREATE TABLE` | Adds the table after the tables already modeled. |
 | `CREATE TABLE IF NOT EXISTS` | Does nothing when the table already exists. |
-| `DROP TABLE`, with one or several names | Removes each named table and, recursively, every partition of it, as PostgreSQL does. |
+| `DROP TABLE`, with one or several names | Removes each named table and, recursively, every partition of it, as PostgreSQL does. A name qualified with a schema other than `public` names a table sqlcj leaves unmodeled and is skipped without failing, because the statement may name a modeled table beside it. |
 | `DROP TABLE IF EXISTS` | Does nothing for a name that is not modeled. |
 | `ALTER TABLE ... ADD COLUMN` | Appends the column, typed exactly as a `CREATE TABLE` column of the same declaration, and records its column-level `PRIMARY KEY` or `UNIQUE`. |
 | `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` | Does nothing when the column already exists. |
@@ -447,7 +467,9 @@ statements and files before them left; the enum-type statements are listed in
 | `ALTER TABLE ... ALTER COLUMN ... SET NOT NULL` | Models the column non-null. |
 | `ALTER TABLE ... ALTER COLUMN ... DROP NOT NULL` | Models the column nullable. |
 | `ALTER TABLE IF EXISTS ...` | Does nothing when the table is not modeled. It covers only the table, so a missing column of a modeled table still fails. |
-| Any other `ALTER TABLE` action outside the ignored actions listed in [Ignored Statements](#ignored-statements), such as `SET SCHEMA` | Rejected as `Unsupported ALTER TABLE action: <action> at line <n>`, quoting the action's own SQL. |
+| `ALTER TABLE ... SET SCHEMA <schema>`, as the statement's sole action, which is the only form PostgreSQL accepts | Removes the table, keeping the order of the remaining ones, because it moves out of the one namespace sqlcj models. `SET SCHEMA public` does nothing: the table already stands there. A table with modeled partitions is rejected as `Unsupported ALTER TABLE action: SET SCHEMA <schema> at line <n>`, because its partitions would stay in the modeled namespace following a parent sqlcj no longer models. |
+| A `CREATE TABLE` or an `ALTER TABLE` whose own table is qualified with a schema other than `public` | Ignored before anything it names is resolved, so neither its rejected clauses, its rejected actions, nor its `LIKE` and `PARTITION OF` sources are resolved and a modeled table of the same unqualified name is left alone. |
+| Any other `ALTER TABLE` action outside the ignored actions listed in [Ignored Statements](#ignored-statements) | Rejected as `Unsupported ALTER TABLE action: <action> at line <n>`, quoting the action's own SQL. |
 | `DROP` of any object other than a table, such as `DROP VIEW` or `DROP INDEX` | Ignored; see [Ignored Statements](#ignored-statements). |
 
 One `ALTER TABLE` may state several actions; they are applied in the written
@@ -509,7 +531,10 @@ Everything else a migration history holds is ignored, including
   `ALTER ROLE`,
 - `CREATE DOMAIN`, `ALTER DOMAIN`, and `DROP DOMAIN`,
 - `CREATE RULE` and `CREATE EVENT TRIGGER`,
-- a `CREATE TYPE` of a composite, range, or shell type, and `DROP TYPE`, and
+- a `CREATE TYPE` of a composite, range, or shell type, and `DROP TYPE`,
+- a `CREATE TABLE`, `ALTER TABLE`, `CREATE TYPE`, or `ALTER TYPE` whose own
+  table or type is qualified with a schema other than `public`, readable or not,
+  and
 - a statement sqlcj's parser cannot read, or reports only as opaque text, and
   that does not open as table or type DDL, such as `ALTER FUNCTION`,
   `ALTER SCHEMA`, `CREATE AGGREGATE`, or `CREATE CAST`.
@@ -525,8 +550,8 @@ what they would do to the schema model:
 | --- | --- |
 | An `ALTER TABLE` action outside [Ordered Table DDL](#ordered-table-ddl) and the ignored actions below | `Unsupported ALTER TABLE action: <action> at line <n>`, quoting the action's own SQL |
 | A `CREATE TABLE ... AS SELECT`, `OF <type>`, or `INHERITS`, whose columns sqlcj cannot determine | `Unsupported CREATE TABLE clause: <clause> at line <n>`, naming `AS SELECT`, `OF <type>`, or `INHERITS` |
-| An `ALTER TYPE ... SET SCHEMA` of a modeled enum type | `Unsupported ALTER TYPE action: SET SCHEMA <schema> at line <n>` |
-| A statement sqlcj's parser cannot read that opens as table or type DDL, outside the `ALTER TABLE` actions below | The parser's own reason with the line and column of the unexpected token, as in `Encountered unexpected token: "DATA" at line 18, column 41` |
+| An `ALTER TYPE ... SET SCHEMA <other schema>` of a modeled enum type | `Unsupported ALTER TYPE action: SET SCHEMA <schema> at line <n>` |
+| A statement sqlcj's parser cannot read that opens as table or type DDL, outside the `ALTER TABLE` actions below and the names of another schema below | The parser's own reason with the line and column of the unexpected token, as in `Encountered unexpected token: "DATA" at line 18, column 41` |
 | A statement sqlcj's parser reports only as opaque text, or as several statements, and that opens as table or type DDL | `Unsupported schema statement: ALTER FOREIGN TABLE at line <n>`, quoting the opening words |
 
 A statement opens as table DDL when its first words are `CREATE`, `ALTER`, or
@@ -536,6 +561,16 @@ A statement opens as table DDL when its first words are `CREATE`, `ALTER`, or
 in upper case, single-spaced, so both
 `ALTER FOREIGN TABLE ft ADD COLUMN x integer` and its lower-case spelling are
 rejected as `Unsupported schema statement: ALTER FOREIGN TABLE at line <n>`.
+
+An unreadable statement that opens as `CREATE` or `ALTER TABLE` or as `CREATE`
+or `ALTER TYPE` is ignored instead when the object it names stands in a schema
+sqlcj does not model, decided from its words alone: the qualifier before the
+dot of the name that follows the opening words, an optional `IF [NOT] EXISTS`,
+and an optional `ONLY`. An unreadable
+`ALTER TABLE reporting.users ALTER COLUMN x SET DATA TYPE int` is therefore
+ignored, while the same statement about `users` or `public.users` stays rejected
+with the parser's reason. An unreadable `DROP TABLE` keeps its handling, because
+another of its names may be modeled.
 
 Every `ALTER TABLE` action that cannot change a column's existence, name, type,
 or nullability is ignored like any other unmodeled statement, except that the
@@ -584,10 +619,13 @@ sqlcj's parser has no form of its own for the table-level actions listed from
 `OWNER TO` down in the table above. It reports such an action as the text that
 runs to the end of the statement, so sqlcj splits that text at the commas
 outside parentheses, with its own SQL lexer, and every action in it must be one
-of those. `ALTER TABLE users SET SCHEMA archive` is therefore rejected as
-`Unsupported ALTER TABLE action: SET SCHEMA archive at line <n>`, because it
-moves the table out of the one namespace sqlcj models, and a modeled action
-written after such an action is rejected rather than skipped, so
+of those. `SET SCHEMA` is not among them: written as the statement's sole
+action, the only form PostgreSQL accepts, it is applied as
+[Ordered Table DDL](#ordered-table-ddl) states, and written beside another
+action, as in `ALTER TABLE users ADD COLUMN x int, SET SCHEMA archive` or
+`ALTER TABLE users SET SCHEMA archive, OWNER TO app`, it is rejected as
+`Unsupported ALTER TABLE action: SET SCHEMA archive at line <n>`. A modeled
+action written after an ignored action is rejected rather than skipped, so
 `ALTER TABLE users OWNER TO app, ADD COLUMN x int` is rejected as
 `Unsupported ALTER TABLE action: ADD COLUMN x int at line <n>`. Written the
 other way round, `ALTER TABLE users ADD COLUMN x int, OWNER TO app` appends `x`.
@@ -611,7 +649,8 @@ or nullability, which comes from `NOT NULL` alone. Such a statement is ignored
 without its table being resolved, like every other ignored statement, so it also
 loads for a table the snapshot does not model. Every other unreadable
 `ALTER TABLE`, including `ALTER COLUMN ... SET DATA TYPE` and an ignored action
-written beside it, stays rejected with the parser's reason.
+written beside it, stays rejected with the parser's reason, unless its table
+stands in a schema sqlcj does not model.
 
 sqlcj splits a schema file at the statement separators its own SQL lexer
 reports and parses each statement alone, so a statement the parser cannot read
@@ -872,6 +911,23 @@ Enum types:
   composite type leaves recorded, and
   `DefaultSchemaParserTest.shouldIgnoreDropTypeAndKeepTheModeledEnum` covers the
   ignored `DROP TYPE` and the enum and enum column that survive it.
+- `DefaultSchemaParserTest.shouldModelAPublicQualifiedTypeNameAsItsUnqualifiedName`
+  covers the unqualified, `public`-qualified, quoted, and upper-case qualifier
+  forms of a `CREATE TYPE` that replaces a modeled enum and of `ADD VALUE`,
+  `RENAME VALUE`, and `RENAME TO`;
+  `DefaultSchemaParserTest.shouldIgnoreATypeStatementOfAnotherSchema` covers
+  every `CREATE TYPE` and `ALTER TYPE` of another schema that is ignored,
+  including the repeated label and the missing neighbour that are never
+  resolved; and
+  `DefaultSchemaParserTest.shouldIgnoreSetSchemaPublicOfAModeledEnum` covers
+  `SET SCHEMA public` of a modeled enum.
+- `DefaultSchemaParserTest.shouldModelPublicQualifiedEnumColumnTypes` covers the
+  `public`-qualified enum column and enum array, quoted and unquoted, through
+  `CREATE TABLE`, `ADD COLUMN`, and `ALTER COLUMN ... TYPE`, beside the
+  multidimensional and other-schema types that stay recorded, and
+  `QueryAnalyzerTest.shouldResolveAPublicQualifiedEnumCastType` covers the
+  `public`-qualified enum array cast and the rejected cast type of another
+  schema.
 - `QueryAnalyzerTest.shouldCarryTheEnumTypeOfASelectedColumnAndItsParameter`,
   `QueryAnalyzerTest.shouldCarryTheEnumTypeOfAReturningColumnAndItsParameter`,
   `QueryAnalyzerTest.shouldAcceptARepeatedIndexOfOneEnumType`, and
@@ -926,8 +982,10 @@ Enum types:
   `DefaultSchemaParserTest.shouldRejectTheCreateTableClausesWhoseColumnsItCannotDetermine`,
   and `DefaultSchemaParserTest.shouldRejectASourceOrPartitionOfAnotherSchema`
   cover the repeated column name, the missing source, each rejected clause at
-  the line of its own statement, and the interim rule for a source and a
-  partition qualified with another schema.
+  the line of its own statement, and the `LIKE` and `PARTITION OF` source
+  qualified with another schema; and
+  `DefaultSchemaParserTest.shouldIgnoreAPartitionOfAnotherSchema` covers the
+  `ATTACH` and `DETACH PARTITION` partition qualified that way.
 - `SqlcjCompilerIntegrationTest.shouldGenerateCompilableRepositoriesOverCopiedTableColumns`
   generates and compiles `SELECT *` row records and a repository over a `LIKE`
   table and a `PARTITION OF` table.
@@ -975,6 +1033,21 @@ Ordered table DDL:
   `DefaultSchemaParserTest.shouldReportAStatementThatRepeatsAColumnName`, and
   `DefaultSchemaParserTest.shouldReportTheLineOfARejectedAlterTableAction`
   cover the rejected statements and their messages.
+- `DefaultSchemaParserTest.shouldModelAPublicQualifiedTableNameAsItsUnqualifiedName`
+  covers the unqualified, `public`-qualified, quoted, and upper-case qualifier
+  forms of one `CREATE TABLE`, `ALTER TABLE`, and `DROP TABLE`;
+  `DefaultSchemaParserTest.shouldIgnoreAStatementAboutATableOfAnotherSchema`
+  covers every ignored statement of another schema, including the clauses,
+  actions, and sources it never resolves; and
+  `DefaultSchemaParserTest.shouldSkipTheDroppedNamesOfAnotherSchema` covers the
+  `DROP TABLE` that carries on past such a name.
+- `DefaultSchemaParserTest.shouldIgnoreSetSchemaPublicOfAModeledTable`,
+  `DefaultSchemaParserTest.shouldRemoveATableMovedToAnotherSchema`, and
+  `DefaultSchemaParserTest.shouldRejectSetSchemaOfATableWithModeledPartitions`
+  cover the `SET SCHEMA` no-op, the removed table, and the rejected action and
+  its line for a table with modeled partitions, and
+  `DefaultSchemaParserTest.shouldRejectUnsupportedStatementsInSqlTerms` covers
+  `SET SCHEMA` written beside another action.
 - `SqlcjCompilerIntegrationTest.shouldGenerateTheSameRepositoryFromAlteringMigrationsAndASnapshot`
   generates one compilable repository from migrations that rename, add, drop, and
   alter columns, byte-identical to the one generated from the equivalent
@@ -1024,11 +1097,18 @@ Ignored statements:
   `DefaultSchemaParserTest.shouldIgnoreThePgDumpIdentityAlterTableAction` cover
   every ignored unreadable action, alone and two in one statement, on a table
   the schema does not model, including the multi-line `pg_dump` identity form.
+- `DefaultSchemaParserTest.shouldIgnoreAnUnreadableStatementQualifiedWithAnotherSchema`
+  covers the ignored unreadable `CREATE` and `ALTER TABLE` and `CREATE` and
+  `ALTER TYPE` of another schema, including the `ONLY` and `IF [NOT] EXISTS`
+  spellings, and
+  `DefaultSchemaParserTest.shouldRejectAnUnreadableStatementOfTheModeledSchema`
+  covers the same statements still rejected unqualified and
+  `public`-qualified.
 - `DefaultSchemaParserTest.shouldRejectUnsupportedStatementsInSqlTerms` covers
   the exact message and line of each statement and action rejected in SQL terms,
-  including `SET SCHEMA` alone and after a modeled action, a modeled action
-  written after an ignored one, an unrecognized `ALTER COLUMN` action, and the
-  upper- and lower-case `ALTER FOREIGN TABLE`, and
+  including `SET SCHEMA` after a modeled action, a modeled action written after
+  an ignored one, an unrecognized `ALTER COLUMN` action, and the upper- and
+  lower-case `ALTER FOREIGN TABLE`, and
   `DefaultSchemaParserTest.shouldRejectUnsupportedSchemaStatement`,
   `DefaultSchemaParserTest.shouldReportTheLineOfARejectedStatementAfterCommentsAndAFunctionBody`,
   and

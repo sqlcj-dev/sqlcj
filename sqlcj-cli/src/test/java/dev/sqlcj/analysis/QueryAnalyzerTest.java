@@ -5039,4 +5039,114 @@ class QueryAnalyzerTest {
             exception.getMessage()
         );
     }
+
+    /**
+     * sqlcj models one namespace, so an unqualified and a
+     * {@code public}-qualified query source are the same table and analyze
+     * alike. The qualifier is matched without its SQL identifier delimiters and
+     * case-insensitively.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "users",
+            "public.users",
+            "\"public\".\"users\"",
+            "PUBLIC.users"
+        }
+    )
+    void shouldResolveAPublicQualifiedSource(String declaredName) {
+        String sql = "SELECT id, name FROM %s WHERE id = $1".formatted(declaredName);
+
+        QueryModel model = analyzer.analyze(
+            new Query("GetUser", QueryType.ONE, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals("users", model.table());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            model.parameters()
+        );
+    }
+
+    /**
+     * A source qualified with a schema other than {@code public} names a table
+     * sqlcj leaves unmodeled, so it is rejected as a missing table rather than
+     * resolving to the modeled table of the same unqualified name, in every
+     * query that names a table.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "MANY|SELECT id FROM reporting.users",
+            "MANY|SELECT u.id FROM users u JOIN reporting.profiles p ON p.user_id = u.id",
+            "MANY|SELECT u.id FROM users u LEFT JOIN reporting.profiles p ON p.user_id = u.id",
+            "EXEC|INSERT INTO reporting.users (name) VALUES ($1)",
+            "EXEC|UPDATE reporting.users SET name = $1 WHERE id = $2",
+            "EXEC|DELETE FROM reporting.users WHERE id = $1"
+        }
+    )
+    void shouldRejectASourceOfAnotherSchema(QueryType type, String sql) {
+        Query query = new Query("TouchUsers", type, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
+        );
+
+        assertEquals(
+            "Table not found in schema: reporting."
+                + (sql.contains("profiles") ? "profiles" : "users"),
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A cast type resolves its enum in the one namespace sqlcj models, so a
+     * {@code public}-qualified cast names the declared enum, scalar and array
+     * alike, and a cast type of any other schema is rejected with its declared
+     * text.
+     */
+    @Test
+    void shouldResolveAPublicQualifiedEnumCastType() {
+        String sql = "SELECT handle::public.stage_setting[] AS s FROM stages";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListStageSettings", QueryType.MANY, sql),
+            parser.parse(sql),
+            enumSchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("s", ColumnType.ENUM, true, "stage_setting", true)),
+            model.columns()
+        );
+
+        String unmapped = "SELECT handle::reporting.stage_setting AS s FROM stages";
+        Query query = new Query("ListStageSettings", QueryType.MANY, unmapped);
+        ParsedSql parsedSql = parser.parse(unmapped);
+
+        assertEquals(
+            "Result column 's' has unsupported cast type REPORTING.STAGE_SETTING",
+            assertThrows(
+                UnsupportedOperationException.class,
+                () -> analyzer.analyze(query, parsedSql, enumSchema)
+            )
+                .getMessage()
+        );
+    }
 }

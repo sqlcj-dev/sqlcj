@@ -2,11 +2,11 @@ package dev.sqlcj.schema.parser;
 
 import dev.sqlcj.schema.ColumnType;
 import dev.sqlcj.schema.EnumType;
-import net.sf.jsqlparser.schema.MultiPartName;
 import net.sf.jsqlparser.statement.create.table.ColDataType;
 
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -21,6 +21,9 @@ public final class ColumnTypeMapping {
 
     /** One parenthesized type argument group, such as {@code (10, 2)}. */
     private static final Pattern TYPE_ARGUMENTS = Pattern.compile("\\([^)]*\\)");
+
+    /** The array dimension groups a declared type text ends with. */
+    private static final Pattern TRAILING_DIMENSIONS = Pattern.compile("(\\[[^\\[\\]]*\\])+$");
 
     /**
      * One declared SQL type and the type sqlcj maps it to.
@@ -64,7 +67,8 @@ public final class ColumnTypeMapping {
      * recorded like any other unmapped type.
      */
     public MappedType map(ColDataType declaredType, List<EnumType> enums) {
-        String typeName = typeName(declaredType);
+        String elementText = elementText(declaredType.getDataType());
+        String typeName = typeName(elementText);
         int arrayDimensions = arrayDimensions(declaredType);
         boolean array = arrayDimensions == 1;
 
@@ -83,7 +87,7 @@ public final class ColumnTypeMapping {
                     );
                 }
             } else {
-                EnumType enumType = declaredEnum(declaredType, enums);
+                EnumType enumType = declaredEnum(elementText, enums);
 
                 if (enumType != null) {
                     return new MappedType(
@@ -137,13 +141,18 @@ public final class ColumnTypeMapping {
     }
 
     /**
-     * The enum type an unmapped declared type names, or {@code null} when the
-     * schema declares no such type. The declared type is matched without its
-     * SQL identifier delimiters and case-insensitively, as PostgreSQL resolves
-     * an unquoted type name.
+     * The enum type an unmapped declared element type names, or {@code null}
+     * when the schema declares no such type. The name is resolved in the one
+     * namespace sqlcj models, so a {@code public}-qualified name resolves as
+     * its unqualified name and a name of any other schema never resolves; see
+     * {@link SchemaNamespace}.
      */
-    private EnumType declaredEnum(ColDataType declaredType, List<EnumType> enums) {
-        String typeName = MultiPartName.unquote(declaredType.getDataType());
+    private EnumType declaredEnum(String elementText, List<EnumType> enums) {
+        String typeName = SchemaNamespace.modeledTypeName(elementText);
+
+        if (typeName == null) {
+            return null;
+        }
 
         return enums.stream()
             .filter(enumType -> enumType.name().equalsIgnoreCase(typeName))
@@ -154,28 +163,44 @@ public final class ColumnTypeMapping {
     /**
      * Reports how many array dimensions a declaration states. The parser
      * reports an array's dimensions separately from its element type, so a
-     * declaration with any dimension is an array of the reported type.
+     * declaration with any dimension is an array of the reported type, except
+     * that a qualified element type carries its dimensions inside its own text,
+     * as in {@code public.mood[]}.
      */
     private int arrayDimensions(ColDataType declaredType) {
         List<Integer> arrayData = declaredType.getArrayData();
 
-        return arrayData == null
+        int dimensions = arrayData == null
             ? 0
             : arrayData.size();
+
+        return dimensions + textDimensions(declaredType.getDataType());
+    }
+
+    /** How many array dimension groups a declared type text itself ends with. */
+    private int textDimensions(String dataType) {
+        Matcher matcher = TRAILING_DIMENSIONS.matcher(dataType);
+
+        if (!matcher.find()) {
+            return 0;
+        }
+
+        return (int) matcher.group().chars().filter(character -> character == '[').count();
+    }
+
+    /** The declared element type text, without its array dimension groups. */
+    private String elementText(String dataType) {
+        return TRAILING_DIMENSIONS.matcher(dataType).replaceAll("");
     }
 
     /**
-     * Returns the canonical spelling of a declared SQL type: upper case,
+     * Returns the canonical spelling of a declared element type: upper case,
      * without type arguments such as a length or a precision, and with single
      * spaces between the remaining words.
      */
-    private String typeName(ColDataType declaredType) {
-        String dataType = declaredType
-            .getDataType()
-            .toUpperCase(Locale.ROOT);
-
+    private String typeName(String elementText) {
         return TYPE_ARGUMENTS
-            .matcher(dataType)
+            .matcher(elementText.toUpperCase(Locale.ROOT))
             .replaceAll(" ")
             .replaceAll("\\s+", " ")
             .trim();

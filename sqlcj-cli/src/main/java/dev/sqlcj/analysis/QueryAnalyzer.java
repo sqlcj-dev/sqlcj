@@ -5,6 +5,7 @@ import dev.sqlcj.parser.QueryType;
 import dev.sqlcj.schema.ColumnType;
 import dev.sqlcj.schema.Schema;
 import dev.sqlcj.schema.parser.ColumnTypeMapping;
+import dev.sqlcj.schema.parser.SchemaNamespace;
 import dev.sqlcj.sql.ParsedSql;
 import dev.sqlcj.type.DefaultTypeResolver;
 import dev.sqlcj.type.TypeResolver;
@@ -1017,9 +1018,25 @@ public final class QueryAnalyzer {
             table.getAlias() == null
                 ? table.getUnquotedName()
                 : table.getAlias().getUnquotedName(),
-            findTable(schema, table.getUnquotedName()),
+            findSourceTable(schema, table),
             leftJoined
         );
+    }
+
+    /**
+     * The modeled table one query source names. sqlcj models one namespace, so
+     * an unqualified and a {@code public}-qualified name are the same table,
+     * and a name qualified with any other schema names a table sqlcj leaves
+     * unmodeled and fails as a missing table.
+     */
+    private dev.sqlcj.schema.Table findSourceTable(Schema schema, Table table) {
+        if (!SchemaNamespace.isModeled(table)) {
+            throw new IllegalArgumentException(
+                "Table not found in schema: " + SchemaNamespace.declaredName(table)
+            );
+        }
+
+        return findTable(schema, table.getUnquotedName());
     }
 
     /**
