@@ -9,6 +9,7 @@ import net.sf.jsqlparser.parser.Token;
 import net.sf.jsqlparser.statement.create.table.ColDataType;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -202,7 +203,7 @@ class SqlParameterCompilerTest {
     }
 
     private SqlParameters compile(String sql, Token... tokens) {
-        return compiler.compile(sql, node(tokens));
+        return compiler.compile(sql, node(tokens), new ArrayList<>());
     }
 
     /**
@@ -221,7 +222,7 @@ class SqlParameterCompilerTest {
             root.jjtAddChild(child, index);
         }
 
-        return compiler.compile(sql, root);
+        return compiler.compile(sql, root, new ArrayList<>());
     }
 
     private Node node(Token... tokens) {

@@ -1,5 +1,6 @@
 package dev.sqlcj.sql;
 
+import net.sf.jsqlparser.expression.JdbcNamedParameter;
 import net.sf.jsqlparser.statement.select.Select;
 import org.junit.jupiter.api.Test;
 
@@ -321,6 +322,68 @@ class SqlParserTest {
             exception.getMessage()
         );
         assertFalse(exception.getMessage().contains("net.sf.jsqlparser"));
+    }
+
+    /**
+     * One occurrence is reported per placeholder the source spells, in textual
+     * order at every clause and nesting depth, each with the cast whose direct
+     * operand it is.
+     */
+    @Test
+    void shouldReportPlaceholderOccurrencesInTextualOrder() {
+        ParsedSql parsedSql = parser.parse("""
+            WITH recent AS (SELECT id FROM orders WHERE total = :amount::numeric)
+            SELECT :label::text AS label, id
+            FROM users
+            WHERE id = :id
+              AND EXISTS (SELECT 1 FROM tasks WHERE tasks.name = CAST(:task AS text))
+            ORDER BY id
+            OFFSET :skip::int
+            LIMIT :pageSize::int""");
+
+        assertEquals(
+            List.of("amount", "label", "id", "task", "skip", "pageSize"),
+            placeholderNames(parsedSql)
+        );
+
+        assertEquals(
+            List.of("numeric", "text", "none", "text", "int", "int"),
+            castTypes(parsedSql)
+        );
+    }
+
+    /**
+     * Every occurrence of one placeholder is reported, and only a placeholder a
+     * cast casts directly carries a cast, which for a chain of casts is the
+     * cast that applies first.
+     */
+    @Test
+    void shouldReportTheCastThatCastsAPlaceholderDirectly() {
+        ParsedSql parsedSql = parser.parse(
+            "SELECT id FROM users WHERE id = :a::text::int AND id = (:b)::int AND id = :a"
+        );
+
+        assertEquals(List.of("a", "b", "a"), placeholderNames(parsedSql));
+        assertEquals(List.of("text", "none", "none"), castTypes(parsedSql));
+        assertEquals(List.of(1, 2, 1), parsedSql.parameters().indexes());
+    }
+
+    private List<String> placeholderNames(ParsedSql parsedSql) {
+        return parsedSql.placeholders().stream()
+            .map(occurrence -> ((JdbcNamedParameter) occurrence.placeholder()).getName())
+            .toList();
+    }
+
+    /** The declared cast type of each occurrence, and {@code none} for none. */
+    private List<String> castTypes(ParsedSql parsedSql) {
+        return parsedSql.placeholders().stream()
+            .map(PlaceholderOccurrence::cast)
+            .map(
+                cast -> cast == null
+                    ? "none"
+                    : cast.getColDataType().getDataType()
+            )
+            .toList();
     }
 
     /** A block comment nests as in PostgreSQL and ends at its last delimiter. */
