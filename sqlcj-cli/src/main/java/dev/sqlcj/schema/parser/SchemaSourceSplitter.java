@@ -124,6 +124,32 @@ final class SchemaSourceSplitter {
     }
 
     /**
+     * The images of the tokens of one piece of SQL, in order, lexed with the
+     * same token manager {@link #split(String)} uses, so one SQL grammar reads
+     * every word sqlcj classifies. A lexical error fails as it does there.
+     */
+    static List<String> tokens(String sql) {
+        CCJSqlParserTokenManager tokenManager = tokenManager(sql, 1, 1);
+        List<String> tokens = new ArrayList<>();
+
+        try {
+            while (true) {
+                Token token = tokenManager.getNextToken();
+
+                if (token.kind == CCJSqlParserConstants.EOF) {
+                    break;
+                }
+
+                tokens.add(token.image);
+            }
+        } catch (TokenMgrException e) {
+            throw new SchemaParseException(SqlParseReason.of(e, true), e);
+        }
+
+        return tokens;
+    }
+
+    /**
      * A token manager over {@code text}, which begins at {@code line} and
      * {@code column} of the whole source, so every token it reports carries a
      * position in that source.
