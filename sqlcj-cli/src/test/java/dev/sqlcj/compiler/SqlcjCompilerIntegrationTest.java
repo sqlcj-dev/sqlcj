@@ -2966,6 +2966,8 @@ class SqlcjCompilerIntegrationTest {
                 CREATE VIEW active_users AS
                 SELECT id
                 FROM users;
+
+                ALTER FOREIGN TABLE users ADD COLUMN name TEXT;
                 """
         );
 
@@ -2993,7 +2995,7 @@ class SqlcjCompilerIntegrationTest {
 
         assertEquals(
             "Invalid schema source %s: ".formatted(unsupported)
-                + "Unsupported schema statement: CreateView at line 3",
+                + "Unsupported schema statement: ALTER FOREIGN TABLE at line 7",
             exception.getMessage()
         );
 

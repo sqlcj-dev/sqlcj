@@ -14,6 +14,7 @@ import net.sf.jsqlparser.parser.CCJSqlParserConstants;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.parser.Token;
 import net.sf.jsqlparser.schema.MultiPartName;
+import net.sf.jsqlparser.statement.CreateFunctionalStatement;
 import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.Statements;
 import net.sf.jsqlparser.statement.UnsupportedStatement;
@@ -21,42 +22,34 @@ import net.sf.jsqlparser.statement.alter.Alter;
 import net.sf.jsqlparser.statement.alter.AlterExpression;
 import net.sf.jsqlparser.statement.alter.AlterOperation;
 import net.sf.jsqlparser.statement.alter.AlterType;
-import net.sf.jsqlparser.statement.alter.sequence.AlterSequence;
-import net.sf.jsqlparser.statement.comment.Comment;
-import net.sf.jsqlparser.statement.create.extension.CreateExtension;
-import net.sf.jsqlparser.statement.create.function.CreateFunction;
-import net.sf.jsqlparser.statement.create.index.CreateIndex;
-import net.sf.jsqlparser.statement.create.sequence.CreateSequence;
 import net.sf.jsqlparser.statement.create.table.CheckConstraint;
 import net.sf.jsqlparser.statement.create.table.ColumnDefinition;
 import net.sf.jsqlparser.statement.create.table.CreateTable;
 import net.sf.jsqlparser.statement.create.table.ForeignKeyIndex;
 import net.sf.jsqlparser.statement.create.table.Index;
-import net.sf.jsqlparser.statement.create.trigger.CreateTrigger;
 import net.sf.jsqlparser.statement.create.type.CreateType;
 import net.sf.jsqlparser.statement.create.type.EnumTypeDefinition;
-import net.sf.jsqlparser.statement.delete.Delete;
 import net.sf.jsqlparser.statement.drop.Drop;
-import net.sf.jsqlparser.statement.grant.Grant;
-import net.sf.jsqlparser.statement.grant.Revoke;
-import net.sf.jsqlparser.statement.insert.Insert;
-import net.sf.jsqlparser.statement.update.Update;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.regex.Pattern;
 
 public class DefaultSchemaParser implements SchemaParser {
 
     /**
-     * The opening words of an {@code ALTER INDEX} statement, which the parser
-     * reports only as an opaque unsupported statement.
+     * The words PostgreSQL allows between the verb and {@code TABLE} of a table
+     * statement.
      */
-    private static final Pattern ALTER_INDEX = Pattern.compile(
-        "^ALTER\\s+INDEX\\b",
-        Pattern.CASE_INSENSITIVE
+    private static final Set<String> TABLE_MODIFIERS = Set.of(
+        "GLOBAL",
+        "LOCAL",
+        "TEMP",
+        "TEMPORARY",
+        "UNLOGGED",
+        "FOREIGN"
     );
 
     /** Resolves the type a column declaration states. */
@@ -130,6 +123,15 @@ public class DefaultSchemaParser implements SchemaParser {
     /**
      * Applies one statement to the tables and enum types the statements before
      * it left.
+     *
+     * <p>Only the statements sqlcj models are applied: {@code CREATE TABLE},
+     * {@code ALTER TABLE}, {@code DROP TABLE},
+     * {@code CREATE TYPE ... AS ENUM}, and {@code ALTER TYPE ... ADD VALUE}.
+     * Every other statement a schema source may record is ignored and is not
+     * resolved against the schema at all, with two exceptions the parser forces:
+     * a function or procedure whose body it captures through the end of the
+     * source, and a statement it reports only as opaque text that opens as table
+     * or type DDL, which may change what the schema models.
      */
     private void apply(Statement statement, int line, List<Table> tables, List<EnumType> enums) {
         if (statement instanceof CreateTable createTable) {
@@ -143,20 +145,84 @@ public class DefaultSchemaParser implements SchemaParser {
                 && createType.getDefinition() instanceof EnumTypeDefinition definition
         ) {
             applyCreateEnumType(createType, definition, enums);
-        } else if (
-            statement instanceof AlterType alterType
-                && alterType.getAction() == AlterType.Action.ADD_VALUE
-        ) {
+        } else if (statement instanceof AlterType alterType) {
+            if (alterType.getAction() != AlterType.Action.ADD_VALUE) {
+                throw unsupportedAlterTypeAction(line);
+            }
+
             applyAddEnumValue(alterType, enums);
-        } else if (!isIgnored(statement)) {
-            throw unsupportedStatement(statement, line);
+        } else if (statement instanceof CreateFunctionalStatement functional) {
+            if (!hasDollarQuotedBody(functional)) {
+                throw unsupportedFunctionBody(functional, line);
+            }
+        } else if (statement instanceof UnsupportedStatement unsupported) {
+            String opening = tableOrTypeOpening(words(unsupported.toString()));
+
+            if (opening != null) {
+                throw unsupportedOpening(opening, line);
+            }
         }
+    }
+
+    /** The whitespace-separated words of a statement's text. */
+    private List<String> words(String text) {
+        return List.of(text.trim().split("\\s+"));
+    }
+
+    /**
+     * The table or type DDL opening that {@code words} begin with, in upper case
+     * and separated by single spaces, or {@code null} when they begin with
+     * anything else. The words are compared case-insensitively, as PostgreSQL
+     * reads them.
+     *
+     * <p>A table opening is {@code CREATE}, {@code ALTER}, or {@code DROP}, then
+     * any of PostgreSQL's table modifiers, then {@code TABLE}. A type opening is
+     * {@code CREATE} or {@code ALTER}, then {@code TYPE}. A statement sqlcj
+     * cannot read is ignored unless it opens this way, because such a statement
+     * may change the tables or the enum types the schema models.
+     */
+    private String tableOrTypeOpening(List<String> words) {
+        if (words.isEmpty()) {
+            return null;
+        }
+
+        String verb = upperCase(words.get(0));
+
+        if (!"CREATE".equals(verb) && !"ALTER".equals(verb) && !"DROP".equals(verb)) {
+            return null;
+        }
+
+        if (!"DROP".equals(verb) && words.size() > 1 && "TYPE".equals(upperCase(words.get(1)))) {
+            return verb + " TYPE";
+        }
+
+        int index = 1;
+
+        while (index < words.size() && TABLE_MODIFIERS.contains(upperCase(words.get(index)))) {
+            index++;
+        }
+
+        if (index >= words.size() || !"TABLE".equals(upperCase(words.get(index)))) {
+            return null;
+        }
+
+        return String.join(
+            " ",
+            words.subList(0, index + 1).stream()
+                .map(this::upperCase)
+                .toList()
+        );
+    }
+
+    private String upperCase(String word) {
+        return word.toUpperCase(Locale.ROOT);
     }
 
     /**
      * Appends one enum type with its declared labels. A repeated type name
      * fails, as PostgreSQL rejects it, and so does a repeated label. An enum is
-     * the only type sqlcj models; every other {@code CREATE TYPE} is rejected.
+     * the only type sqlcj models; a {@code CREATE TYPE} of any other kind is
+     * ignored, and a column of such a type is recorded with its declared type.
      */
     private void applyCreateEnumType(
         CreateType createType,
@@ -243,59 +309,17 @@ public class DefaultSchemaParser implements SchemaParser {
     }
 
     /**
-     * Reports whether a statement is one of the documented statements a schema
-     * source may state without changing the schema model. Such a statement is
-     * not resolved against the schema at all.
-     */
-    private boolean isIgnored(Statement statement) {
-        if (statement instanceof Drop drop) {
-            return isIgnoredDropObject(drop);
-        }
-
-        if (statement instanceof CreateFunction createFunction) {
-            return hasDollarQuotedBody(createFunction);
-        }
-
-        if (statement instanceof UnsupportedStatement unsupported) {
-            return ALTER_INDEX.matcher(unsupported.toString()).find();
-        }
-
-        return statement instanceof CreateIndex
-            || statement instanceof Comment
-            || statement instanceof CreateExtension
-            || statement instanceof CreateSequence
-            || statement instanceof AlterSequence
-            || statement instanceof Grant
-            || statement instanceof Revoke
-            || statement instanceof CreateTrigger
-            || statement instanceof Insert
-            || statement instanceof Update
-            || statement instanceof Delete;
-    }
-
-    /**
-     * A dropped table is modeled and the listed dropped objects are ignored;
-     * any other dropped object, such as a view, is rejected.
-     */
-    private boolean isIgnoredDropObject(Drop drop) {
-        return switch (drop.getObjectType()) {
-            case INDEX, SEQUENCE, FUNCTION, TRIGGER -> true;
-            default -> false;
-        };
-    }
-
-    /**
-     * Reports whether a {@code CREATE FUNCTION} states a dollar-quoted body,
-     * which the parser lexes as one literal token. It captures a body written
-     * any other way through the end of the source, so such a function is
-     * rejected instead of ignored.
+     * Reports whether a {@code CREATE FUNCTION} or {@code CREATE PROCEDURE}
+     * states a dollar-quoted body, which the parser lexes as one literal token.
+     * It captures a body written any other way through the end of the source, so
+     * such a function or procedure is rejected instead of ignored.
      *
      * <p>A captured statement separator and everything after it is part of a
      * later statement rather than of this function, so only the parts before the
      * first {@code ";"} part decide.
      */
-    private boolean hasDollarQuotedBody(CreateFunction createFunction) {
-        List<String> parts = createFunction.getFunctionDeclarationParts();
+    private boolean hasDollarQuotedBody(CreateFunctionalStatement functional) {
+        List<String> parts = functional.getFunctionDeclarationParts();
 
         return parts != null
             && parts.stream()
@@ -363,7 +387,7 @@ public class DefaultSchemaParser implements SchemaParser {
         }
 
         for (AlterExpression expression : alter.getAlterExpressions()) {
-            tables.set(index, applyAlterExpression(alter, line, expression, enums, tables, index));
+            tables.set(index, applyAlterExpression(line, expression, enums, tables, index));
         }
     }
 
@@ -371,10 +395,9 @@ public class DefaultSchemaParser implements SchemaParser {
      * Applies one {@code ALTER TABLE} action and returns the altered table. A
      * constraint action is accepted and leaves the table unchanged; an action
      * that cannot be recognized as one of those forms, such as
-     * {@code SET DEFAULT}, is rejected like any other unsupported statement.
+     * {@code SET DEFAULT}, is rejected naming the statement it belongs to.
      */
     private Table applyAlterExpression(
-        Alter alter,
         int line,
         AlterExpression expression,
         List<EnumType> enums,
@@ -401,14 +424,14 @@ public class DefaultSchemaParser implements SchemaParser {
         }
 
         if (operation == AlterOperation.ALTER) {
-            return alterColumns(alter, line, expression, enums, table);
+            return alterColumns(line, expression, enums, table);
         }
 
         if (isIgnoredConstraintAction(expression)) {
             return table;
         }
 
-        throw unsupportedStatement(alter, line);
+        throw unsupportedAlterTableAction(line);
     }
 
     /**
@@ -450,7 +473,6 @@ public class DefaultSchemaParser implements SchemaParser {
      * column's position and nullability, or a nullability change.
      */
     private Table alterColumns(
-        Alter alter,
         int line,
         AlterExpression expression,
         List<EnumType> enums,
@@ -458,7 +480,7 @@ public class DefaultSchemaParser implements SchemaParser {
     ) {
         if (isNotEmpty(expression.getColDataTypeList())) {
             if (!statesNewTypes(expression.getColDataTypeList())) {
-                throw unsupportedStatement(alter, line);
+                throw unsupportedAlterTableAction(line);
             }
 
             return changeColumnTypes(expression, enums, table);
@@ -484,7 +506,7 @@ public class DefaultSchemaParser implements SchemaParser {
             );
         }
 
-        throw unsupportedStatement(alter, line);
+        throw unsupportedAlterTableAction(line);
     }
 
     /**
@@ -782,10 +804,31 @@ public class DefaultSchemaParser implements SchemaParser {
         );
     }
 
-    private UnsupportedOperationException unsupportedStatement(Statement statement, int line) {
+    private UnsupportedOperationException unsupportedAlterTableAction(int line) {
         return new UnsupportedOperationException(
-            "Unsupported schema statement: %s at line %d"
-                .formatted(statement.getClass().getSimpleName(), line)
+            "Unsupported ALTER TABLE action at line %d".formatted(line)
+        );
+    }
+
+    private UnsupportedOperationException unsupportedAlterTypeAction(int line) {
+        return new UnsupportedOperationException(
+            "Unsupported ALTER TYPE action at line %d".formatted(line)
+        );
+    }
+
+    private UnsupportedOperationException unsupportedFunctionBody(
+        CreateFunctionalStatement functional,
+        int line
+    ) {
+        return new UnsupportedOperationException(
+            "Unsupported schema statement: CREATE %s without a dollar-quoted body at line %d"
+                .formatted(upperCase(functional.getKind()), line)
+        );
+    }
+
+    private UnsupportedOperationException unsupportedOpening(String opening, int line) {
+        return new UnsupportedOperationException(
+            "Unsupported schema statement: %s at line %d".formatted(opening, line)
         );
     }
 

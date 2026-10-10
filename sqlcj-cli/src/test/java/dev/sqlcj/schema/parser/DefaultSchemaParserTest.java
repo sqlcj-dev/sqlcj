@@ -786,7 +786,7 @@ class DefaultSchemaParserTest {
                 id BIGINT NOT NULL
             );
 
-            CREATE VIEW active_users AS SELECT id FROM users;
+            ALTER FOREIGN TABLE users ADD COLUMN name TEXT;
             """;
 
         UnsupportedOperationException exception = assertThrows(
@@ -795,7 +795,7 @@ class DefaultSchemaParserTest {
         );
 
         assertEquals(
-            "Unsupported schema statement: CreateView at line 5",
+            "Unsupported schema statement: ALTER FOREIGN TABLE at line 5",
             exception.getMessage()
         );
     }
@@ -814,7 +814,7 @@ class DefaultSchemaParserTest {
         );
 
         assertEquals(
-            "Unsupported schema statement: Alter at line 1",
+            "Unsupported ALTER TABLE action at line 1",
             exception.getMessage()
         );
     }
@@ -833,7 +833,7 @@ class DefaultSchemaParserTest {
         );
 
         assertEquals(
-            "Unsupported schema statement: Alter at line 1",
+            "Unsupported ALTER TABLE action at line 1",
             exception.getMessage()
         );
     }
@@ -855,14 +855,14 @@ class DefaultSchemaParserTest {
         );
 
         assertEquals(
-            "Unsupported schema statement: Alter at line 1",
+            "Unsupported ALTER TABLE action at line 1",
             exception.getMessage()
         );
     }
 
     /**
-     * Every statement of the documented ignored list is accepted and leaves the
-     * schema the statements before it left.
+     * Every statement outside the forms sqlcj models is accepted and leaves the
+     * schema the statements before it left, whatever object it states.
      */
     @ParameterizedTest
     @ValueSource(
@@ -892,11 +892,45 @@ class DefaultSchemaParserTest {
             "DROP TRIGGER users_touch ON users;",
             "INSERT INTO users (id) VALUES (1);",
             "UPDATE users SET name = 'new';",
-            "DELETE FROM users;"
+            "DELETE FROM users;",
+            "CREATE VIEW active_users AS SELECT id FROM users;",
+            "CREATE OR REPLACE VIEW active_users AS SELECT id FROM users;",
+            "DROP VIEW active_users;",
+            "CREATE MATERIALIZED VIEW active_users AS SELECT id FROM users;",
+            "REFRESH MATERIALIZED VIEW active_users;",
+            "DROP MATERIALIZED VIEW active_users;",
+            "CREATE SCHEMA app;",
+            "DROP SCHEMA app;",
+            "SET statement_timeout = 0;",
+            "SET search_path = public;",
+            "RESET ALL;",
+            "TRUNCATE users;",
+            "CREATE POLICY users_owner ON users USING (true);",
+            "CREATE ROLE readonly;",
+            "CREATE USER reader;",
+            "ALTER ROLE readonly NOLOGIN;",
+            "ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO readonly;",
+            "CREATE DOMAIN positive AS INTEGER CHECK (VALUE > 0);",
+            "ALTER DOMAIN positive DROP NOT NULL;",
+            "CREATE TYPE address AS (street TEXT, city TEXT);",
+            "CREATE TYPE bounds AS RANGE (subtype = numeric);",
+            "CREATE TYPE opaque_state;",
+            "SELECT pg_catalog.set_config('search_path', '', false);",
+            "CREATE PROCEDURE touch() AS $$ BEGIN END; $$ LANGUAGE plpgsql;",
+            "ANALYZE users;",
+            "COMMIT;",
+            "ALTER FUNCTION touch() RENAME TO touched;",
+            "ALTER SCHEMA app RENAME TO archive;",
+            "CREATE AGGREGATE total (INTEGER) (sfunc = add, stype = INTEGER);",
+            "CREATE CAST (INTEGER AS TEXT) WITH FUNCTION render(INTEGER);"
         }
     )
-    void shouldIgnoreDocumentedStatements(String statement) {
-        assertEquals(parser.parse(BASE_SCHEMA).tables(), applied(statement).tables());
+    void shouldIgnoreEveryStatementItDoesNotModel(String statement) {
+        Schema base = parser.parse(BASE_SCHEMA);
+        Schema schema = applied(statement);
+
+        assertEquals(base.tables(), schema.tables());
+        assertEquals(base.enums(), schema.enums());
     }
 
     /**
@@ -909,9 +943,38 @@ class DefaultSchemaParserTest {
             CREATE INDEX payments_total_idx ON payments (total);
             COMMENT ON COLUMN users.nickname IS 'the nickname';
             INSERT INTO payments (total) VALUES (1);
+            CREATE VIEW payment_totals AS SELECT total FROM payments;
+            TRUNCATE payments;
             """);
 
         assertEquals(parser.parse(BASE_SCHEMA).tables(), schema.tables());
+    }
+
+    /**
+     * A {@code CREATE TYPE} that is not an enum is ignored rather than modeled,
+     * so a column of that type is recorded with the canonical spelling of its
+     * declared type, like a column of any type sqlcj cannot map.
+     */
+    @Test
+    void shouldRecordAColumnOfAnIgnoredCompositeType() {
+        Schema schema = parser.parse("""
+            CREATE TYPE address AS (street TEXT, city TEXT);
+
+            CREATE TABLE places (
+                id       BIGINT NOT NULL,
+                location address
+            );
+            """);
+
+        assertTrue(schema.enums().isEmpty());
+
+        assertEquals(
+            List.of(
+                new Column("id", ColumnType.BIGINT, false),
+                new Column("location", null, true, "ADDRESS")
+            ),
+            table(schema, "places").columns()
+        );
     }
 
     /**
@@ -980,28 +1043,32 @@ class DefaultSchemaParserTest {
     }
 
     /**
-     * A statement outside the ignored list is rejected naming its kind and the
-     * line it begins on.
+     * A statement sqlcj rejects is reported in SQL terms, naming the statement
+     * or the action and the line it begins on, never a parser class.
      */
     @ParameterizedTest
     @CsvSource(
         delimiter = '|',
         quoteCharacter = '"',
         value = {
-            "CREATE VIEW active_users AS SELECT id FROM users;|CreateView",
-            "CREATE TYPE address AS (street TEXT, city TEXT);|CreateType",
-            "ALTER TYPE status RENAME TO state;|AlterType",
-            "ALTER TYPE status RENAME VALUE 'draft' TO 'new';|AlterType",
-            "CREATE DOMAIN positive AS INTEGER CHECK (VALUE > 0);|CreateDomain",
-            "CREATE SCHEMA app;|CreateSchema",
-            "DROP VIEW active_users;|Drop",
-            "SELECT id FROM users;|PlainSelect",
-            "ALTER TABLE users ALTER COLUMN name SET DEFAULT 'new';|Alter",
-            "CREATE FUNCTION one() RETURNS integer AS 'SELECT 1' LANGUAGE sql;|CreateFunction",
-            "ALTER FUNCTION touch() RENAME TO touched;|UnsupportedStatement"
+            "ALTER TABLE users ALTER COLUMN name SET DEFAULT 'new';"
+                + "|Unsupported ALTER TABLE action at line 1",
+            "ALTER TYPE status RENAME TO state;|Unsupported ALTER TYPE action at line 1",
+            "ALTER TYPE status RENAME VALUE 'draft' TO 'new';"
+                + "|Unsupported ALTER TYPE action at line 1",
+            "CREATE FUNCTION one() RETURNS integer AS 'SELECT 1' LANGUAGE sql;"
+                + "|Unsupported schema statement: CREATE FUNCTION without a dollar-quoted body"
+                + " at line 1",
+            "CREATE PROCEDURE one() AS 'SELECT 1' LANGUAGE sql;"
+                + "|Unsupported schema statement: CREATE PROCEDURE without a dollar-quoted body"
+                + " at line 1",
+            "ALTER FOREIGN TABLE ft ADD COLUMN x integer;"
+                + "|Unsupported schema statement: ALTER FOREIGN TABLE at line 1",
+            "alter foreign table ft add column x integer;"
+                + "|Unsupported schema statement: ALTER FOREIGN TABLE at line 1"
         }
     )
-    void shouldRejectStatementOutsideTheIgnoredList(String statement, String kind) {
+    void shouldRejectUnsupportedStatementsInSqlTerms(String statement, String message) {
         Schema schema = parser.parse(BASE_SCHEMA);
 
         UnsupportedOperationException exception = assertThrows(
@@ -1009,10 +1076,7 @@ class DefaultSchemaParserTest {
             () -> parser.parse(schema, statement)
         );
 
-        assertEquals(
-            "Unsupported schema statement: %s at line 1".formatted(kind),
-            exception.getMessage()
-        );
+        assertEquals(message, exception.getMessage());
     }
 
     /**
@@ -1036,7 +1100,7 @@ class DefaultSchemaParserTest {
         );
 
         assertEquals(
-            "Unsupported schema statement: CreateFunction at line 2",
+            "Unsupported schema statement: CREATE FUNCTION without a dollar-quoted body at line 2",
             exception.getMessage()
         );
     }
@@ -1063,7 +1127,7 @@ class DefaultSchemaParserTest {
             $$ LANGUAGE plpgsql;
 
             -- another ; separator
-            CREATE VIEW active_tags AS SELECT id FROM tags;
+            ALTER FOREIGN TABLE tags ADD COLUMN label TEXT;
             """;
 
         UnsupportedOperationException exception = assertThrows(
@@ -1072,7 +1136,7 @@ class DefaultSchemaParserTest {
         );
 
         assertEquals(
-            "Unsupported schema statement: CreateView at line 15",
+            "Unsupported schema statement: ALTER FOREIGN TABLE at line 15",
             exception.getMessage()
         );
     }
