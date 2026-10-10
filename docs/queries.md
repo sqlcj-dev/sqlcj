@@ -78,6 +78,14 @@ configuration entry.
 ### Sources
 
 - The `FROM` item must be a table of that schema, optionally with an alias.
+- sqlcj models one namespace, so a source resolves by its unqualified name:
+  `users`, `public.users`, and `"public"."users"` are one table, matched without
+  SQL identifier delimiters and case-insensitively. A source qualified with any
+  other schema names a table sqlcj leaves unmodeled and is rejected as
+  `Table not found in schema: <schema>.<t>`, in a `FROM`, a `JOIN`, and the
+  target of an `INSERT`, an `UPDATE`, and a `DELETE` alike. `search_path` is
+  not followed; see
+  [Schema Snapshot Input](postgresql.md#schema-snapshot-input).
 - A table may be joined with `JOIN`, `INNER JOIN`, `LEFT JOIN`, or
   `LEFT OUTER JOIN`, and inner and left joins may be chained in any order. A
   comma-separated source list and every other join modifier — `RIGHT`, `FULL`, a
@@ -900,6 +908,11 @@ Reads:
   `QueryAnalyzerTest.shouldResolveQueryParametersInsideNestedAndOrExpressions`,
   and `QueryAnalyzerTest.shouldResolveQueryParametersInsideInExpression` cover
   the accepted read shapes.
+- `QueryAnalyzerTest.shouldResolveAPublicQualifiedSource` covers the
+  unqualified, `public`-qualified, quoted, and upper-case qualifier forms of one
+  source, and `QueryAnalyzerTest.shouldRejectASourceOfAnotherSchema` covers the
+  rejected message of a source of another schema in a `FROM`, an `INNER` and a
+  `LEFT JOIN`, and an `INSERT`, an `UPDATE`, and a `DELETE` target.
 - `SqlcjCompilerIntegrationTest.shouldExecuteGeneratedAliasedQualifiedQuery`,
   `SqlcjCompilerIntegrationTest.shouldExecuteGeneratedJoinQueryWithDuplicateColumnNames`,
   `SqlcjCompilerIntegrationTest.shouldExecuteGeneratedJoinQueryWithProjectionAliases`,

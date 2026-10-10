@@ -75,8 +75,10 @@ public class DefaultSchemaParser implements SchemaParser {
      * unreadable: the parser states a syntax failure for it, reports it only as
      * opaque text, or reads it as several statements. An unreadable statement is
      * ignored unless it opens as table or type DDL, which may change what the
-     * schema models, and an unreadable {@code ALTER TABLE} is ignored as well
-     * when every one of its top-level actions cannot change a modeled column.
+     * schema models; such a statement is ignored as well when it names its own
+     * table or type in a schema sqlcj does not model, and an unreadable
+     * {@code ALTER TABLE} when every one of its top-level actions cannot change
+     * a modeled column.
      */
     private void apply(
         SchemaSourceSplitter.SourceStatement statement,
@@ -104,7 +106,11 @@ public class DefaultSchemaParser implements SchemaParser {
 
         String opening = tableOrTypeOpening(statement.tokens());
 
-        if (opening == null || ignoresEveryAlterTableAction(opening, statement.tokens())) {
+        if (
+            opening == null
+                || namesAnotherSchema(opening, statement.tokens())
+                || ignoresEveryAlterTableAction(opening, statement.tokens())
+        ) {
             return;
         }
 
@@ -141,6 +147,38 @@ public class DefaultSchemaParser implements SchemaParser {
         }
 
         return new SchemaParseException(SqlParseReason.of(located, true), located);
+    }
+
+    /**
+     * Reports whether an unreadable statement names its own table or type in a
+     * schema sqlcj does not model, which is decided from the statement's tokens
+     * alone: the qualifier before the dot of the name that follows the opening
+     * words, the optional {@code IF [NOT] EXISTS}, and the optional
+     * {@code ONLY}. Such a statement cannot change what the schema models and
+     * is ignored, like a readable statement of the same name.
+     *
+     * <p>{@code DROP TABLE} is excluded, because it may name a modeled table
+     * beside a table of another schema.
+     */
+    private boolean namesAnotherSchema(String opening, List<String> tokens) {
+        if (opening.startsWith("DROP")) {
+            return false;
+        }
+
+        int index = opening.split(" ").length;
+
+        if (statesWords(tokens, index, "IF", "NOT", "EXISTS")) {
+            index += 3;
+        } else if (statesWords(tokens, index, "IF", "EXISTS")) {
+            index += 2;
+        }
+
+        if (statesWords(tokens, index, "ONLY")) {
+            index++;
+        }
+
+        return statesWords(tokens, index + 1, ".")
+            && !SchemaNamespace.isModeled(tokens.get(index));
     }
 
     /**
@@ -298,12 +336,21 @@ public class DefaultSchemaParser implements SchemaParser {
      * {@code CREATE TYPE ... AS ENUM}, and {@code ALTER TYPE}. Every other
      * statement a schema source may record is ignored and is not resolved
      * against the schema at all.
+     *
+     * <p>A statement whose own table or type stands in a schema sqlcj does not
+     * model is ignored the same way, before anything it names is resolved; see
+     * {@link SchemaNamespace}. {@code DROP TABLE} is the one statement that
+     * carries on, skipping such a name among its names.
      */
     private void apply(Statement statement, int line, List<Table> tables, List<EnumType> enums) {
         if (statement instanceof CreateTable createTable) {
-            applyCreateTable(createTable, line, enums, tables);
+            if (SchemaNamespace.isModeled(createTable.getTable())) {
+                applyCreateTable(createTable, line, enums, tables);
+            }
         } else if (statement instanceof Alter alter) {
-            applyAlterTable(alter, line, enums, tables);
+            if (SchemaNamespace.isModeled(alter.getTable())) {
+                applyAlterTable(alter, line, enums, tables);
+            }
         } else if (statement instanceof Drop drop && drop.getObjectType() == Drop.ObjectType.TABLE) {
             applyDropTable(drop, tables);
         } else if (
@@ -371,14 +418,19 @@ public class DefaultSchemaParser implements SchemaParser {
      * freed the name is never seen. A repeated label fails, as PostgreSQL
      * rejects it. An enum is the only type sqlcj models; a {@code CREATE TYPE}
      * of any other kind is ignored, and a column of such a type is recorded
-     * with its declared type.
+     * with its declared type. A type of a schema sqlcj does not model is
+     * ignored as well.
      */
     private void applyCreateEnumType(
         CreateType createType,
         EnumTypeDefinition definition,
         List<EnumType> enums
     ) {
-        String typeName = MultiPartName.unquote(createType.getName());
+        String typeName = SchemaNamespace.modeledTypeName(createType.getName());
+
+        if (typeName == null) {
+            return;
+        }
 
         int index = indexOfEnum(enums, typeName);
 
@@ -406,8 +458,10 @@ public class DefaultSchemaParser implements SchemaParser {
     }
 
     /**
-     * Applies one {@code ALTER TYPE} action, resolving the stated type name,
-     * with its SQL identifier delimiters removed, among the modeled enum types.
+     * Applies one {@code ALTER TYPE} action, resolving the stated type name in
+     * the one namespace sqlcj models, so a {@code public}-qualified name
+     * resolves as its unqualified name and a type of any other schema is
+     * ignored.
      *
      * <p>An action that cannot change a modeled enum is ignored without the
      * type being resolved at all: ownership and the attribute actions of a
@@ -426,19 +480,24 @@ public class DefaultSchemaParser implements SchemaParser {
             return;
         }
 
+        String typeName = SchemaNamespace.modeledTypeName(alterType.getName());
+
+        if (typeName == null) {
+            return;
+        }
+
         if (action == AlterType.Action.ADD_VALUE) {
-            applyAddEnumValue(alterType, enums);
+            applyAddEnumValue(alterType, typeName, enums);
 
             return;
         }
 
-        String typeName = MultiPartName.unquote(alterType.getName());
         int index = indexOfEnum(enums, typeName);
 
         switch (action) {
             case RENAME_VALUE -> renameEnumLabel(alterType, typeName, index, enums);
             case RENAME -> renameEnumType(alterType, typeName, index, enums, tables);
-            case SET_SCHEMA -> moveEnumTypeToSchema(alterType, line, typeName, index);
+            case SET_SCHEMA -> moveEnumTypeToSchema(alterType, line, index);
             default -> throw unsupportedAlterTypeAction(String.valueOf(action), line);
         }
     }
@@ -508,8 +567,6 @@ public class DefaultSchemaParser implements SchemaParser {
         List<Table> tables
     ) {
         if (index < 0) {
-            ignoreUnmodeledType(alterType, typeName);
-
             return;
         }
 
@@ -532,36 +589,16 @@ public class DefaultSchemaParser implements SchemaParser {
 
     /**
      * Rejects {@code SET SCHEMA} of a modeled enum type, because its columns
-     * keep the type in a namespace sqlcj does not model.
+     * would keep the type in a namespace sqlcj does not model. A move into the
+     * one namespace it models leaves the type where it already is, and a type
+     * sqlcj does not model is ignored.
      */
-    private void moveEnumTypeToSchema(
-        AlterType alterType,
-        int line,
-        String typeName,
-        int index
-    ) {
-        if (index < 0) {
-            ignoreUnmodeledType(alterType, typeName);
-
+    private void moveEnumTypeToSchema(AlterType alterType, int line, int index) {
+        if (index < 0 || SchemaNamespace.isModeled(alterType.getNewName())) {
             return;
         }
 
         throw unsupportedAlterTypeAction("SET SCHEMA " + alterType.getNewName(), line);
-    }
-
-    /**
-     * Ignores an {@code ALTER TYPE} action on a type sqlcj does not model,
-     * because such a type is none of its enum types.
-     *
-     * <p>A type name is the statement's own name with its SQL identifier
-     * delimiters removed, so {@code public.mood} and {@code mood} are different
-     * names. A qualified name that matches no modeled enum may therefore still
-     * state one, and fails as a missing type rather than being ignored.
-     */
-    private void ignoreUnmodeledType(AlterType alterType, String typeName) {
-        if (alterType.getName().contains(".")) {
-            throw typeNotFound(typeName);
-        }
     }
 
     /** Renames the enum type of every column of {@code oldName}. */
@@ -601,9 +638,7 @@ public class DefaultSchemaParser implements SchemaParser {
      * alone: a label the type already has is a no-op even when the stated
      * neighbor is not one of its labels.
      */
-    private void applyAddEnumValue(AlterType alterType, List<EnumType> enums) {
-        String typeName = MultiPartName.unquote(alterType.getName());
-
+    private void applyAddEnumValue(AlterType alterType, String typeName, List<EnumType> enums) {
         int index = indexOfEnum(enums, typeName);
 
         if (index < 0) {
@@ -726,11 +761,19 @@ public class DefaultSchemaParser implements SchemaParser {
      * tables as they stand before it drops anything, as PostgreSQL resolves
      * every name of one statement before deleting any of them. A name that is
      * not modeled fails, unless the statement declares {@code IF EXISTS}.
+     *
+     * <p>A name qualified with a schema sqlcj does not model names a table it
+     * leaves unmodeled and is skipped without failing, because the statement
+     * may name a modeled table beside it.
      */
     private List<String> droppedTableNames(Drop drop, List<Table> tables) {
         List<String> names = new ArrayList<>();
 
         for (net.sf.jsqlparser.schema.Table dropped : drop.getNames()) {
+            if (!SchemaNamespace.isModeled(dropped)) {
+                continue;
+            }
+
             String tableName = dropped.getUnquotedName();
 
             if (indexOfTable(tables, tableName) < 0) {
@@ -796,9 +839,69 @@ public class DefaultSchemaParser implements SchemaParser {
             throw tableNotFound(tableName);
         }
 
+        String schemaName = soleSetSchemaAction(alter);
+
+        if (schemaName != null) {
+            moveTableToSchema(line, schemaName, tables, index);
+
+            return;
+        }
+
         for (AlterExpression expression : alter.getAlterExpressions()) {
             applyToTableAndPartitions(line, expression, enums, tables, index);
         }
+    }
+
+    /**
+     * The schema a {@code SET SCHEMA} written as the statement's sole action
+     * names, or {@code null} for every other {@code ALTER TABLE}, including a
+     * {@code SET SCHEMA} written beside another action, which PostgreSQL does
+     * not accept and sqlcj rejects.
+     *
+     * <p>The parser has no form of its own for the action and reports it as the
+     * text that runs to the end of the statement, so that text is lexed with
+     * the parser's own lexer and must state exactly {@code SET SCHEMA <schema>}.
+     */
+    private String soleSetSchemaAction(Alter alter) {
+        List<AlterExpression> expressions = alter.getAlterExpressions();
+
+        if (expressions.size() != 1) {
+            return null;
+        }
+
+        AlterExpression expression = expressions.get(0);
+
+        if (expression.getOperation() != AlterOperation.UNSPECIFIC || expression.getOptionalSpecifier() == null) {
+            return null;
+        }
+
+        List<String> tokens = SchemaSourceSplitter.tokens(expression.getOptionalSpecifier());
+
+        return tokens.size() == 3 && statesWords(tokens, 0, "SET", "SCHEMA")
+            ? tokens.get(2)
+            : null;
+    }
+
+    /**
+     * Moves one table out of the schema model, because sqlcj models the tables
+     * of one namespace alone: the table is removed, keeping the order of the
+     * remaining ones, and a move into the namespace it models leaves the table
+     * where it already is.
+     *
+     * <p>A table with modeled partitions is rejected naming the action, because
+     * its partitions would stay in the modeled namespace following a parent
+     * sqlcj no longer models.
+     */
+    private void moveTableToSchema(int line, String schemaName, List<Table> tables, int index) {
+        if (SchemaNamespace.isModeled(schemaName)) {
+            return;
+        }
+
+        if (indexOfPartition(tables, tables.get(index).name()) >= 0) {
+            throw unsupportedAlterTableAction(line, "SET SCHEMA " + schemaName);
+        }
+
+        tables.remove(index);
     }
 
     /**
@@ -1007,7 +1110,9 @@ public class DefaultSchemaParser implements SchemaParser {
      * trigger and rule switches, constraint validation, replica identity,
      * clustering, storage parameters, the tablespace, logging, the access
      * method, inheritance, and the typed-table form. {@code SET SCHEMA} is not
-     * among them, because it moves the table out of the namespace sqlcj models.
+     * among them: it moves the table out of the namespace sqlcj models and is
+     * applied as the statement's sole action, which is the only form PostgreSQL
+     * accepts, so written beside another action it is rejected here.
      */
     private boolean ignoresTableLevelAction(List<String> action) {
         return statesWords(action, 0, "OWNER", "TO")
@@ -1426,27 +1531,20 @@ public class DefaultSchemaParser implements SchemaParser {
      * {@code -1} when sqlcj does not model it.
      *
      * <p>sqlcj models one namespace, so an unqualified and a
-     * {@code public}-qualified name are the same table. A name qualified with
-     * any other schema names a table sqlcj leaves unmodeled, and fails as a
-     * missing table rather than resolving to a modeled table of the same
-     * unqualified name.
+     * {@code public}-qualified name are the same table, and a name qualified
+     * with any other schema names a table sqlcj leaves unmodeled rather than
+     * the modeled table of the same unqualified name; see
+     * {@link SchemaNamespace}.
      */
     private int indexOfReferencedTable(
         List<Table> tables,
         net.sf.jsqlparser.schema.Table referenced
     ) {
-        String tableName = referenced.getUnquotedName();
-        String declaredSchema = referenced.getSchemaName();
-
-        if (declaredSchema != null) {
-            String schemaName = MultiPartName.unquote(declaredSchema);
-
-            if (!"public".equalsIgnoreCase(schemaName)) {
-                throw tableNotFound(schemaName + "." + tableName);
-            }
+        if (!SchemaNamespace.isModeled(referenced)) {
+            return -1;
         }
 
-        return indexOfTable(tables, tableName);
+        return indexOfTable(tables, referenced.getUnquotedName());
     }
 
     /** Enum type names are matched case-insensitively, as a column names them. */
@@ -1642,7 +1740,7 @@ public class DefaultSchemaParser implements SchemaParser {
         int index = indexOfReferencedTable(tables, referenced);
 
         if (index < 0) {
-            throw tableNotFound(referenced.getUnquotedName());
+            throw tableNotFound(SchemaNamespace.declaredName(referenced));
         }
 
         return tables.get(index);

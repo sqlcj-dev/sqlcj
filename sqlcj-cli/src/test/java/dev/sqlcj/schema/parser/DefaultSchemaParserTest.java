@@ -1294,8 +1294,6 @@ class DefaultSchemaParserTest {
         delimiter = '|',
         quoteCharacter = '"',
         value = {
-            "ALTER TABLE users SET SCHEMA archive;"
-                + "|Unsupported ALTER TABLE action: SET SCHEMA archive at line 1",
             "ALTER TABLE users ADD COLUMN x int, SET SCHEMA archive;"
                 + "|Unsupported ALTER TABLE action: SET SCHEMA archive at line 1",
             "ALTER TABLE users OWNER TO app, ADD COLUMN x int;"
@@ -1336,12 +1334,12 @@ class DefaultSchemaParserTest {
             () -> parser.parse(schema, """
                 ALTER TABLE users OWNER TO app;
 
-                ALTER TABLE users SET SCHEMA archive;
+                ALTER TABLE users ALTER COLUMN name SET VISIBLE;
                 """)
         );
 
         assertEquals(
-            "Unsupported ALTER TABLE action: SET SCHEMA archive at line 3",
+            "Unsupported ALTER TABLE action: ALTER COLUMN name SET VISIBLE at line 3",
             exception.getMessage()
         );
     }
@@ -2244,7 +2242,11 @@ class DefaultSchemaParserTest {
         );
     }
 
-    /** Each enum diagnostic names the type and, where it applies, the label. */
+    /**
+     * Each enum diagnostic names the type and, where it applies, the label. A
+     * {@code public}-qualified name resolves as its unqualified name, so the
+     * diagnostic names it unqualified.
+     */
     @ParameterizedTest
     @CsvSource(
         delimiter = '|',
@@ -2260,10 +2262,10 @@ class DefaultSchemaParserTest {
                 + "|Label not found in type stage_setting: missing",
             "ALTER TYPE stage_setting RENAME VALUE 'indoor' TO 'outdoor';"
                 + "|Label already exists in type stage_setting: outdoor",
-            "ALTER TYPE public.stage_setting RENAME TO stage;"
-                + "|Type not found in schema: public.stage_setting",
-            "ALTER TYPE public.stage_setting SET SCHEMA archive;"
-                + "|Type not found in schema: public.stage_setting"
+            "ALTER TYPE public.shelf_state ADD VALUE 'stocked';"
+                + "|Type not found in schema: shelf_state",
+            "ALTER TYPE \"public\".\"shelf_state\" RENAME VALUE 'stocked' TO 'kept';"
+                + "|Type not found in schema: shelf_state"
         }
     )
     void shouldReportTheEnumStatementItCannotApply(String statement, String message) {
@@ -3160,12 +3162,11 @@ class DefaultSchemaParserTest {
     }
 
     /**
-     * Until sqlcj models namespaces, a table name qualified with a schema other
-     * than {@code public} names a table it leaves unmodeled, so a
-     * {@code LIKE} or {@code PARTITION OF} source and an {@code ATTACH} or
-     * {@code DETACH PARTITION} partition written that way fails as a missing
-     * table rather than resolving to the modeled table of the same unqualified
-     * name.
+     * A table name qualified with a schema other than {@code public} names a
+     * table sqlcj leaves unmodeled rather than the modeled table of the same
+     * unqualified name, so a {@code LIKE} or {@code PARTITION OF} source
+     * written that way fails as a missing table: the created table's columns
+     * would otherwise be unknown.
      */
     @ParameterizedTest
     @CsvSource(
@@ -3174,11 +3175,7 @@ class DefaultSchemaParserTest {
             "CREATE TABLE c (LIKE reporting.events);"
                 + "|Table not found in schema: reporting.events",
             "CREATE TABLE events_2026 PARTITION OF reporting.events DEFAULT;"
-                + "|Table not found in schema: reporting.events",
-            "ALTER TABLE events ATTACH PARTITION reporting.events_2026 DEFAULT;"
-                + "|Table not found in schema: reporting.events_2026",
-            "ALTER TABLE events DETACH PARTITION reporting.events_2026;"
-                + "|Table not found in schema: reporting.events_2026"
+                + "|Table not found in schema: reporting.events"
         }
     )
     void shouldRejectASourceOrPartitionOfAnotherSchema(String statement, String message) {
@@ -3191,6 +3188,348 @@ class DefaultSchemaParserTest {
                 () -> parser.parse(schema, statement)
             )
                 .getMessage()
+        );
+    }
+
+    /**
+     * An {@code ATTACH} or {@code DETACH PARTITION} partition qualified with a
+     * schema other than {@code public} names a table sqlcj leaves unmodeled and
+     * is ignored, like any other partition it does not model, so the modeled
+     * table of the same unqualified name keeps its own link.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "ALTER TABLE events ATTACH PARTITION reporting.events_2026 DEFAULT;",
+            "ALTER TABLE events DETACH PARTITION reporting.events_2026;"
+        }
+    )
+    void shouldIgnoreAPartitionOfAnotherSchema(String statement) {
+        Schema schema = partitionedSchema();
+
+        assertEquals(schema, parser.parse(schema, statement));
+        assertEquals("events", table(parser.parse(schema, statement), "events_2026").partitionOf());
+    }
+
+    /**
+     * sqlcj models one namespace, so an unqualified and a
+     * {@code public}-qualified table name are the same table: a
+     * {@code CREATE TABLE}, an {@code ALTER TABLE}, and a {@code DROP TABLE}
+     * written either way leave the same schema model. The qualifier is matched
+     * without its SQL identifier delimiters and case-insensitively.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "users",
+            "public.users",
+            "\"public\".\"users\"",
+            "PUBLIC.users",
+            "\"PUBLIC\".users"
+        }
+    )
+    void shouldModelAPublicQualifiedTableNameAsItsUnqualifiedName(String declaredName) {
+        Schema schema = parser.parse(
+            """
+                CREATE TABLE %s (
+                    id   BIGINT NOT NULL,
+                    note TEXT
+                );
+
+                ALTER TABLE %s ADD COLUMN label VARCHAR(32);
+                ALTER TABLE %s ALTER COLUMN note SET NOT NULL;
+                """.formatted(declaredName, declaredName, declaredName)
+        );
+
+        assertEquals(List.of("users"), tableNames(schema));
+
+        assertEquals(
+            List.of(
+                new Column("id", ColumnType.BIGINT, false),
+                new Column("note", ColumnType.TEXT, false),
+                new Column("label", ColumnType.VARCHAR, true)
+            ),
+            table(schema, "users").columns()
+        );
+
+        assertEquals(
+            List.of(),
+            tableNames(parser.parse(schema, "DROP TABLE %s;".formatted(declaredName)))
+        );
+    }
+
+    /**
+     * A statement whose own table stands in a schema sqlcj does not model
+     * cannot change what the schema models and is ignored before anything it
+     * names is resolved, so neither its rejected clauses, its rejected actions,
+     * nor its sources are resolved and a modeled table of the same unqualified
+     * name is left alone.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "CREATE TABLE reporting.users (code TEXT);",
+            "CREATE TABLE IF NOT EXISTS reporting.users (code TEXT);",
+            "CREATE TABLE reporting.copy (LIKE missing);",
+            "CREATE TABLE reporting.copy PARTITION OF missing DEFAULT;",
+            "CREATE TABLE reporting.copy OF missing_type;",
+            "CREATE TABLE reporting.copy AS SELECT 1;",
+            "ALTER TABLE reporting.users ADD COLUMN id TEXT;",
+            "ALTER TABLE reporting.users DROP COLUMN id;",
+            "ALTER TABLE reporting.users RENAME TO orders;",
+            "ALTER TABLE reporting.users ALTER COLUMN name SET VISIBLE;",
+            "ALTER TABLE reporting.users SET SCHEMA public;",
+            "ALTER TABLE reporting.missing ADD COLUMN x INTEGER;",
+            "ALTER TABLE \"reporting\".\"users\" DROP COLUMN id;",
+            "DROP TABLE reporting.users;",
+            "DROP TABLE reporting.missing;"
+        }
+    )
+    void shouldIgnoreAStatementAboutATableOfAnotherSchema(String statement) {
+        Schema schema = parser.parse(BASE_SCHEMA);
+
+        assertEquals(schema, parser.parse(schema, statement));
+    }
+
+    /**
+     * A {@code DROP TABLE} carries on past a name qualified with a schema sqlcj
+     * does not model, without failing, and removes the modeled tables it names
+     * beside it.
+     */
+    @Test
+    void shouldSkipTheDroppedNamesOfAnotherSchema() {
+        Schema schema = parser.parse(BASE_SCHEMA);
+
+        assertEquals(
+            List.of("users"),
+            tableNames(parser.parse(schema, "DROP TABLE reporting.missing, orders;"))
+        );
+    }
+
+    /**
+     * An unreadable statement that opens as table or type DDL is ignored when
+     * the object it names is qualified with a schema sqlcj does not model,
+     * which is decided from the statement's tokens alone.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "ALTER TABLE reporting.users ALTER COLUMN name SET DATA TYPE text;",
+            "ALTER TABLE ONLY reporting.users ALTER COLUMN name SET DATA TYPE text;",
+            "ALTER TABLE IF EXISTS reporting.users ALTER COLUMN name SET DATA TYPE text;",
+            "CREATE TABLE reporting.copy (id WITH OPTIONS NOT NULL);",
+            "CREATE TABLE IF NOT EXISTS reporting.copy (id WITH OPTIONS NOT NULL);",
+            "CREATE TYPE reporting.pair AS (a int, b);",
+            "ALTER TYPE reporting.pair SET (RECEIVE = f);",
+            "ALTER TYPE reporting.stage_setting ADD VALUE 'a', ADD VALUE 'b';"
+        }
+    )
+    void shouldIgnoreAnUnreadableStatementQualifiedWithAnotherSchema(String statement) {
+        Schema schema = parser.parse(BASE_SCHEMA);
+
+        assertEquals(schema, parser.parse(schema, statement));
+    }
+
+    /**
+     * The same unreadable statements stay rejected when the object they name
+     * stands in the one namespace sqlcj models, unqualified or
+     * {@code public}-qualified.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "ALTER TABLE users ALTER COLUMN name SET DATA TYPE text;",
+            "ALTER TABLE public.users ALTER COLUMN name SET DATA TYPE text;",
+            "ALTER TABLE ONLY \"public\".\"users\" ALTER COLUMN name SET DATA TYPE text;",
+            "CREATE TABLE public.copy (id WITH OPTIONS NOT NULL);",
+            "CREATE TYPE public.pair AS (a int, b);",
+            "ALTER TYPE public.pair SET (RECEIVE = f);"
+        }
+    )
+    void shouldRejectAnUnreadableStatementOfTheModeledSchema(String statement) {
+        Schema schema = parser.parse(BASE_SCHEMA);
+
+        assertThrows(SchemaParseException.class, () -> parser.parse(schema, statement));
+    }
+
+    /**
+     * {@code ALTER TABLE ... SET SCHEMA public} leaves the table where it
+     * already is, because sqlcj models that namespace.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "ALTER TABLE users SET SCHEMA public;",
+            "ALTER TABLE users SET SCHEMA \"public\";",
+            "ALTER TABLE users SET SCHEMA PUBLIC;"
+        }
+    )
+    void shouldIgnoreSetSchemaPublicOfAModeledTable(String statement) {
+        Schema schema = parser.parse(BASE_SCHEMA);
+
+        assertEquals(schema, parser.parse(schema, statement));
+    }
+
+    /**
+     * {@code ALTER TABLE ... SET SCHEMA} of any other schema moves the table
+     * out of the one namespace sqlcj models, so the table is removed and the
+     * remaining ones keep their order.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "ALTER TABLE users SET SCHEMA archive;",
+            "ALTER TABLE users SET SCHEMA \"Archive\";"
+        }
+    )
+    void shouldRemoveATableMovedToAnotherSchema(String statement) {
+        assertEquals(List.of("orders"), tableNames(applied(statement)));
+    }
+
+    /**
+     * {@code SET SCHEMA} of a table with modeled partitions is rejected naming
+     * the action and the line its own statement begins on, because its
+     * partitions would stay in the modeled namespace following a parent sqlcj
+     * no longer models.
+     */
+    @Test
+    void shouldRejectSetSchemaOfATableWithModeledPartitions() {
+        Schema schema = partitionedSchema();
+
+        assertEquals(
+            "Unsupported ALTER TABLE action: SET SCHEMA archive at line 3",
+            assertThrows(
+                UnsupportedOperationException.class,
+                () -> parser.parse(schema, """
+                    ALTER TABLE events OWNER TO app;
+
+                    ALTER TABLE events SET SCHEMA archive;
+                    """)
+            )
+                .getMessage()
+        );
+    }
+
+    /**
+     * An unqualified and a {@code public}-qualified type name are the same
+     * type, so a qualified {@code CREATE TYPE} replaces a modeled enum of that
+     * name in its position rather than adding a second one, and every
+     * {@code ALTER TYPE} action written that way acts on the modeled enum.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "stage_setting",
+            "public.stage_setting",
+            "\"public\".\"stage_setting\"",
+            "PUBLIC.stage_setting"
+        }
+    )
+    void shouldModelAPublicQualifiedTypeNameAsItsUnqualifiedName(String declaredName) {
+        Schema schema = parser.parse(
+            enumSchema(),
+            """
+                CREATE TYPE %s AS ENUM ('indoor', 'outdoor');
+
+                ALTER TYPE %s ADD VALUE 'covered' BEFORE 'outdoor';
+                ALTER TYPE %s RENAME VALUE 'indoor' TO 'inside';
+                """.formatted(declaredName, declaredName, declaredName)
+        );
+
+        assertEquals(
+            List.of(new EnumType("stage_setting", List.of("inside", "covered", "outdoor"))),
+            schema.enums()
+        );
+
+        assertEquals(
+            List.of(new EnumType("stage", List.of("inside", "covered", "outdoor"))),
+            parser.parse(schema, "ALTER TYPE %s RENAME TO stage;".formatted(declaredName)).enums()
+        );
+    }
+
+    /**
+     * Every {@code CREATE TYPE} and {@code ALTER TYPE} of a type qualified with
+     * a schema sqlcj does not model is ignored before anything it states is
+     * resolved, so the modeled enum of the same unqualified name is left alone.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "CREATE TYPE reporting.stage_setting AS ENUM ('indoor', 'indoor');",
+            "ALTER TYPE reporting.stage_setting ADD VALUE 'covered';",
+            "ALTER TYPE reporting.stage_setting ADD VALUE 'indoor';",
+            "ALTER TYPE reporting.stage_setting ADD VALUE 'covered' AFTER 'missing';",
+            "ALTER TYPE reporting.stage_setting RENAME VALUE 'indoor' TO 'inside';",
+            "ALTER TYPE reporting.stage_setting RENAME TO stage;",
+            "ALTER TYPE reporting.stage_setting SET SCHEMA public;",
+            "ALTER TYPE reporting.stage_setting SET SCHEMA archive;",
+            "ALTER TYPE \"reporting\".\"stage_setting\" ADD VALUE 'covered';"
+        }
+    )
+    void shouldIgnoreATypeStatementOfAnotherSchema(String statement) {
+        Schema schema = enumSchema();
+
+        assertEquals(schema, parser.parse(schema, statement));
+    }
+
+    /**
+     * {@code ALTER TYPE ... SET SCHEMA public} of a modeled enum leaves the
+     * type where it already is, because sqlcj models that namespace.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "ALTER TYPE stage_setting SET SCHEMA public;",
+            "ALTER TYPE public.stage_setting SET SCHEMA \"public\";"
+        }
+    )
+    void shouldIgnoreSetSchemaPublicOfAModeledEnum(String statement) {
+        Schema schema = enumSchema();
+
+        assertEquals(schema, parser.parse(schema, statement));
+    }
+
+    /**
+     * A column whose declared type names a modeled enum qualified with
+     * {@code public} is modeled as an enum column, scalar and array alike,
+     * through every path that types a column, and a type qualified with any
+     * other schema never resolves and is recorded with its declared text, as
+     * an unmapped {@code public}-qualified type is.
+     */
+    @Test
+    void shouldModelPublicQualifiedEnumColumnTypes() {
+        Schema schema = parser.parse(
+            enumSchema(),
+            """
+                CREATE TABLE stages (
+                    setting  public.stage_setting NOT NULL,
+                    covered  "public"."stage_setting",
+                    past     public.stage_setting[],
+                    quoted   "public"."stage_setting"[],
+                    sized    public.stage_setting[4],
+                    nested   public.stage_setting[][],
+                    external reporting.stage_setting,
+                    legacy   public.citext[]
+                );
+
+                ALTER TABLE stages ADD COLUMN added public.stage_setting[];
+                ALTER TABLE stages ALTER COLUMN covered TYPE "public"."stage_setting"[];
+                """
+        );
+
+        assertEquals(
+            List.of(
+                new Column("setting", ColumnType.ENUM, false, null, "stage_setting"),
+                new Column("covered", ColumnType.ENUM, true, null, "stage_setting", true),
+                new Column("past", ColumnType.ENUM, true, null, "stage_setting", true),
+                new Column("quoted", ColumnType.ENUM, true, null, "stage_setting", true),
+                new Column("sized", ColumnType.ENUM, true, null, "stage_setting", true),
+                new Column("nested", null, true, "PUBLIC.STAGE_SETTING[][]"),
+                new Column("external", null, true, "REPORTING.STAGE_SETTING"),
+                new Column("legacy", null, true, "PUBLIC.CITEXT[]"),
+                new Column("added", ColumnType.ENUM, true, null, "stage_setting", true)
+            ),
+            table(schema, "stages").columns()
         );
     }
 
