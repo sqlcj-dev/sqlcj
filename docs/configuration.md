@@ -56,7 +56,7 @@ java:
 | `version` | string | Configuration contract version. Must be `"1"`. |
 | `sql` | list | Non-empty, ordered list of source entries. |
 | `sql[].name` | string | Identity of the query group. Names the generated repository. |
-| `sql[].schema` | string or list | One path, or a non-empty ordered list of paths, to a file containing `CREATE TABLE` statements or to a directory of `.sql` migration files. |
+| `sql[].schema` | string or list | One path, or a non-empty ordered list of paths, to a file containing `CREATE TABLE` statements, such as a `pg_dump --schema-only` snapshot, or to a directory of `.sql` migration files. |
 | `sql[].queries` | string | Path to a file containing named queries. |
 | `java` | mapping | Java generation settings. |
 | `java.package` | string | Package of the generated Java classes. |
@@ -112,6 +112,10 @@ sql:
       - sql/orders/migrations
     queries: sql/orders/queries.sql
 ```
+
+A listed file is any file of PostgreSQL statements, so a `pg_dump --schema-only`
+snapshot is configured as it is written; see
+[Schema Snapshot Input](postgresql.md#schema-snapshot-input).
 
 A listed path is either a file, which contributes itself, or a directory, which
 contributes the regular files in it whose name ends in `.sql`. A directory is
