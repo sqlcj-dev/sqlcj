@@ -16,6 +16,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -98,6 +99,30 @@ class DefaultSchemaParserTest {
         COMMENT ON TABLE stages IS 'Places where performances happen';
         COMMENT ON COLUMN stages.handle IS 'Appears in public links';
         """;
+
+    /**
+     * The schema the {@code LIKE} and {@code PARTITION OF} tests copy their
+     * columns from.
+     */
+    private static final String SOURCE_SCHEMA = """
+        CREATE TABLE tags (
+            label VARCHAR(32) NOT NULL
+        );
+
+        CREATE TABLE events (
+            id      BIGINT NOT NULL PRIMARY KEY,
+            tenant  VARCHAR(64) NOT NULL,
+            payload TEXT,
+            UNIQUE (tenant, payload)
+        );
+        """;
+
+    /** The columns the {@code events} table of {@link #SOURCE_SCHEMA} states. */
+    private static final List<Column> EVENT_COLUMNS = List.of(
+        new Column("id", ColumnType.BIGINT, false),
+        new Column("tenant", ColumnType.VARCHAR, false),
+        new Column("payload", ColumnType.TEXT, true)
+    );
 
     /** The third migration file, which reshapes the table the second creates. */
     private static final String RESHAPE_STAGE_MIGRATION = """
@@ -822,7 +847,9 @@ class DefaultSchemaParserTest {
             "ALTER TABLE users FORCE ROW LEVEL SECURITY;",
             "ALTER TABLE users NO FORCE ROW LEVEL SECURITY;",
             "ALTER TABLE users ATTACH PARTITION users_p1 FOR VALUES FROM (1) TO (2);",
+            "ALTER TABLE users ATTACH PARTITION public.users_p1 DEFAULT;",
             "ALTER TABLE users DETACH PARTITION users_p1;",
+            "ALTER TABLE users DETACH PARTITION public.users_p1;",
             "ALTER TABLE users OWNER TO app;",
             "ALTER TABLE users ENABLE TRIGGER users_touch;",
             "ALTER TABLE users DISABLE TRIGGER users_touch;",
@@ -2673,6 +2700,512 @@ class DefaultSchemaParserTest {
             "Unsupported ALTER TYPE action: SET SCHEMA archive at line 3",
             exception.getMessage()
         );
+    }
+
+    /**
+     * A {@code LIKE} copies its source's columns, types, and nullability, in
+     * the position it stands in, whatever {@code INCLUDING} and
+     * {@code EXCLUDING} options it states, and whether its source is named
+     * unqualified or qualified with {@code public}.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "CREATE TABLE events_copy (LIKE events);",
+            "CREATE TABLE events_copy (LIKE events INCLUDING ALL);",
+            "CREATE TABLE events_copy (LIKE events EXCLUDING ALL);",
+            "CREATE TABLE events_copy "
+                + "(LIKE events INCLUDING DEFAULTS EXCLUDING CONSTRAINTS INCLUDING IDENTITY);",
+            "CREATE TABLE events_copy (LIKE public.events INCLUDING ALL);"
+        }
+    )
+    void shouldCopyTheColumnsOfALikeSource(String statement) {
+        Table copy = table(parser.parse(parser.parse(SOURCE_SCHEMA), statement), "events_copy");
+
+        assertEquals(EVENT_COLUMNS, copy.columns());
+        assertEquals(List.of(), copy.constraints());
+        assertNull(copy.partitionOf());
+    }
+
+    /**
+     * Every element of a {@code CREATE TABLE} list contributes its columns in
+     * the written order, as PostgreSQL creates them, so a {@code LIKE} may
+     * stand before or after a column definition and beside another
+     * {@code LIKE}.
+     */
+    @Test
+    void shouldModelTheColumnsOfAnElementListInWrittenOrder() {
+        Schema source = parser.parse(SOURCE_SCHEMA);
+
+        assertEquals(
+            List.of("id", "tenant", "payload", "note"),
+            columnNames(
+                parser.parse(source, "CREATE TABLE c (LIKE events, note TEXT);"),
+                "c"
+            )
+        );
+
+        assertEquals(
+            List.of("note", "id", "tenant", "payload"),
+            columnNames(
+                parser.parse(source, "CREATE TABLE c (note TEXT, LIKE events);"),
+                "c"
+            )
+        );
+
+        assertEquals(
+            List.of("label", "id", "tenant", "payload"),
+            columnNames(
+                parser.parse(source, "CREATE TABLE c (LIKE tags, LIKE events);"),
+                "c"
+            )
+        );
+    }
+
+    /**
+     * A {@code LIKE} records the table's own table constraints, like any other
+     * {@code CREATE TABLE}, and never its source's recorded constraints.
+     */
+    @Test
+    void shouldRecordOnlyTheOwnConstraintsOfALikeTable() {
+        Schema schema = parser.parse(
+            parser.parse(SOURCE_SCHEMA),
+            "CREATE TABLE events_copy (LIKE events INCLUDING ALL, UNIQUE (id));"
+        );
+
+        assertEquals(
+            List.of(
+                new Constraint(ConstraintType.PRIMARY_KEY, List.of("id")),
+                new Constraint(ConstraintType.UNIQUE, List.of("tenant", "payload"))
+            ),
+            table(schema, "events").constraints()
+        );
+
+        assertEquals(
+            List.of(new Constraint(ConstraintType.UNIQUE, List.of("id"))),
+            table(schema, "events_copy").constraints()
+        );
+    }
+
+    /**
+     * A column name a {@code LIKE} repeats fails, as PostgreSQL rejects it,
+     * whether it is repeated by a column definition or by a second
+     * {@code LIKE}.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        value = {
+            "CREATE TABLE c (LIKE events, tenant TEXT);"
+                + "|Column already exists in table c: tenant",
+            "CREATE TABLE c (tenant TEXT, LIKE events);"
+                + "|Column already exists in table c: tenant",
+            "CREATE TABLE c (LIKE events, LIKE events);"
+                + "|Column already exists in table c: id"
+        }
+    )
+    void shouldReportARepeatedColumnNameOfALikeSource(String statement, String message) {
+        Schema schema = parser.parse(SOURCE_SCHEMA);
+
+        assertEquals(
+            message,
+            assertThrows(
+                IllegalArgumentException.class,
+                () -> parser.parse(schema, statement)
+            )
+                .getMessage()
+        );
+    }
+
+    /**
+     * A {@code LIKE} or {@code PARTITION OF} source sqlcj does not model fails
+     * as a missing table, because the created table's columns would otherwise
+     * be unknown.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "CREATE TABLE c (LIKE archive);",
+            "CREATE TABLE c PARTITION OF archive DEFAULT;"
+        }
+    )
+    void shouldReportTheMissingSourceOfACreatedTable(String statement) {
+        Schema schema = parser.parse(SOURCE_SCHEMA);
+
+        assertEquals(
+            "Table not found in schema: archive",
+            assertThrows(
+                IllegalArgumentException.class,
+                () -> parser.parse(schema, statement)
+            )
+                .getMessage()
+        );
+    }
+
+    /**
+     * A {@code PARTITION OF} copies its parent's columns, whatever bound it
+     * states, and records its parent, which it keeps following.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "CREATE TABLE events_2026 PARTITION OF events FOR VALUES FROM (1) TO (100);",
+            "CREATE TABLE events_2026 PARTITION OF events FOR VALUES IN ('a', 'b');",
+            "CREATE TABLE events_2026 PARTITION OF events "
+                + "FOR VALUES WITH (MODULUS 4, REMAINDER 0);",
+            "CREATE TABLE events_2026 PARTITION OF events DEFAULT;",
+            "CREATE TABLE events_2026 PARTITION OF public.events DEFAULT;"
+        }
+    )
+    void shouldCopyTheColumnsOfAPartitionParent(String statement) {
+        Table partition = table(
+            parser.parse(parser.parse(SOURCE_SCHEMA), statement),
+            "events_2026"
+        );
+
+        assertEquals(EVENT_COLUMNS, partition.columns());
+        assertEquals(List.of(), partition.constraints());
+        assertEquals("events", partition.partitionOf());
+    }
+
+    /**
+     * The table constraints a {@code PARTITION OF} may state are recorded as in
+     * any other {@code CREATE TABLE}, beside the columns it copies.
+     */
+    @Test
+    void shouldRecordTheTableConstraintsOfAPartition() {
+        Table partition = table(
+            parser.parse(
+                parser.parse(SOURCE_SCHEMA),
+                "CREATE TABLE events_2026 PARTITION OF events (PRIMARY KEY (id)) "
+                    + "FOR VALUES FROM (1) TO (100);"
+            ),
+            "events_2026"
+        );
+
+        assertEquals(EVENT_COLUMNS, partition.columns());
+
+        assertEquals(
+            List.of(new Constraint(ConstraintType.PRIMARY_KEY, List.of("id"))),
+            partition.constraints()
+        );
+
+        assertEquals("events", partition.partitionOf());
+    }
+
+    /** An empty element list is a table without columns. */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "CREATE TABLE marker ();",
+            "CREATE TABLE marker ( );"
+        }
+    )
+    void shouldModelAnEmptyElementListAsATableWithoutColumns(String statement) {
+        Table marker = table(parser.parse(parser.parse(SOURCE_SCHEMA), statement), "marker");
+
+        assertEquals(List.of(), marker.columns());
+        assertEquals(List.of(), marker.constraints());
+        assertNull(marker.partitionOf());
+    }
+
+    /**
+     * A {@code CREATE TABLE} whose columns sqlcj cannot determine is rejected
+     * naming the clause and the line its own statement begins on. A statement
+     * with neither an element list, {@code ()}, nor {@code PARTITION OF} states
+     * no columns at all and is rejected as unsupported table DDL.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        value = {
+            "CREATE TABLE summary AS SELECT id FROM events;"
+                + "|Unsupported CREATE TABLE clause: AS SELECT at line 3",
+            "CREATE TABLE typed OF event_type;"
+                + "|Unsupported CREATE TABLE clause: OF event_type at line 3",
+            "CREATE TABLE typed OF public.event_type;"
+                + "|Unsupported CREATE TABLE clause: OF public.event_type at line 3",
+            "CREATE TABLE child (id BIGINT) INHERITS (events);"
+                + "|Unsupported CREATE TABLE clause: INHERITS at line 3",
+            "create table child (id bigint) inherits (events);"
+                + "|Unsupported CREATE TABLE clause: INHERITS at line 3",
+            "CREATE TABLE events_copy LIKE events;"
+                + "|Unsupported schema statement: CREATE TABLE at line 3"
+        }
+    )
+    void shouldRejectTheCreateTableClausesWhoseColumnsItCannotDetermine(
+        String statement,
+        String message
+    ) {
+        Schema schema = parser.parse(SOURCE_SCHEMA);
+
+        assertEquals(
+            message,
+            assertThrows(
+                UnsupportedOperationException.class,
+                () -> parser.parse(
+                    schema,
+                    "CREATE INDEX events_tenant_idx ON events (tenant);\n\n" + statement + "\n"
+                )
+            )
+                .getMessage()
+        );
+    }
+
+    /**
+     * PostgreSQL applies every column change of a partitioned table to its
+     * partitions, so each modeled column action of a parent reaches its
+     * partition, which keeps the columns its parent has.
+     */
+    @Test
+    void shouldApplyEveryColumnActionOfAParentToItsPartition() {
+        Schema schema = partitionedSchema();
+
+        schema = parser.parse(schema, "ALTER TABLE events ADD COLUMN note TEXT;");
+
+        assertEquals(
+            List.of(
+                new Column("id", ColumnType.BIGINT, false),
+                new Column("tenant", ColumnType.VARCHAR, false),
+                new Column("payload", ColumnType.TEXT, true),
+                new Column("note", ColumnType.TEXT, true)
+            ),
+            table(schema, "events_2026").columns()
+        );
+
+        for (
+            String statement : List.of(
+                "ALTER TABLE events DROP COLUMN payload;",
+                "ALTER TABLE events RENAME COLUMN note TO remark;",
+                "ALTER TABLE events ALTER COLUMN remark TYPE VARCHAR(16);",
+                "ALTER TABLE events ALTER COLUMN remark SET NOT NULL;",
+                "ALTER TABLE events ALTER COLUMN tenant DROP NOT NULL;"
+            )
+        ) {
+            schema = parser.parse(schema, statement);
+
+            assertEquals(
+                table(schema, "events").columns(),
+                table(schema, "events_2026").columns(),
+                statement
+            );
+        }
+
+        assertEquals(
+            List.of(
+                new Column("id", ColumnType.BIGINT, false),
+                new Column("tenant", ColumnType.VARCHAR, true),
+                new Column("remark", ColumnType.VARCHAR, false)
+            ),
+            table(schema, "events_2026").columns()
+        );
+    }
+
+    /** A column action of a parent reaches the partitions of its partitions. */
+    @Test
+    void shouldApplyAColumnActionToANestedPartition() {
+        Schema schema = parser.parse(
+            partitionedSchema(),
+            "CREATE TABLE events_2026_01 PARTITION OF events_2026 FOR VALUES FROM (1) TO (10);"
+        );
+
+        assertEquals("events_2026", table(schema, "events_2026_01").partitionOf());
+
+        schema = parser.parse(schema, "ALTER TABLE events ADD COLUMN note TEXT;");
+
+        assertEquals(
+            List.of("id", "tenant", "payload", "note"),
+            columnNames(schema, "events_2026_01")
+        );
+    }
+
+    /**
+     * Renaming a partitioned table keeps its partitions, which name the new
+     * name from then on and keep following their parent's column changes.
+     */
+    @Test
+    void shouldKeepThePartitionLinkThroughARenameOfTheParent() {
+        Schema schema = parser.parse(
+            partitionedSchema(),
+            "ALTER TABLE events RENAME TO event_log;"
+        );
+
+        assertEquals(List.of("tags", "event_log", "events_2026"), tableNames(schema));
+        assertEquals("event_log", table(schema, "events_2026").partitionOf());
+
+        schema = parser.parse(schema, "ALTER TABLE event_log ADD COLUMN note TEXT;");
+
+        assertEquals(
+            List.of("id", "tenant", "payload", "note"),
+            columnNames(schema, "events_2026")
+        );
+    }
+
+    /**
+     * Dropping a partitioned table removes its partitions, recursively, as
+     * PostgreSQL does, and keeps the order of the remaining tables.
+     */
+    @Test
+    void shouldDropThePartitionsOfADroppedParent() {
+        Schema schema = parser.parse(
+            partitionedSchema(),
+            "CREATE TABLE events_2026_01 PARTITION OF events_2026 FOR VALUES FROM (1) TO (10);"
+        );
+
+        assertEquals(
+            List.of("tags"),
+            tableNames(parser.parse(schema, "DROP TABLE events;"))
+        );
+    }
+
+    /**
+     * PostgreSQL resolves every name of one {@code DROP TABLE} before deleting
+     * any of them, so naming a partitioned table before one of its partitions,
+     * however that partition was linked and however deep it stands, removes
+     * both instead of failing on the partition the parent's drop already
+     * removed.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        value = {
+            "CREATE TABLE events_2026 PARTITION OF events DEFAULT;"
+                + "|DROP TABLE events, events_2026;",
+            "CREATE TABLE events_2026 (id BIGINT NOT NULL);"
+                + " ALTER TABLE events ATTACH PARTITION events_2026 DEFAULT;"
+                + "|DROP TABLE events, events_2026;",
+            "CREATE TABLE events_2026 PARTITION OF events DEFAULT;"
+                + " CREATE TABLE events_2026_01 PARTITION OF events_2026 DEFAULT;"
+                + "|DROP TABLE events, events_2026_01;"
+        }
+    )
+    void shouldDropAParentNamedBeforeItsPartition(String partitions, String statement) {
+        Schema schema = parser.parse(parser.parse(SOURCE_SCHEMA), partitions);
+
+        assertEquals(
+            List.of("tags"),
+            tableNames(parser.parse(schema, statement))
+        );
+    }
+
+    /**
+     * {@code DETACH PARTITION} of a modeled partition ends the link, so the
+     * parent's later column changes no longer reach it.
+     */
+    @Test
+    void shouldStopPropagationAfterDetachPartition() {
+        Schema schema = parser.parse(
+            partitionedSchema(),
+            "ALTER TABLE events DETACH PARTITION events_2026;"
+        );
+
+        assertNull(table(schema, "events_2026").partitionOf());
+
+        schema = parser.parse(schema, "ALTER TABLE events ADD COLUMN note TEXT;");
+
+        assertEquals(EVENT_COLUMNS, table(schema, "events_2026").columns());
+    }
+
+    /**
+     * {@code ATTACH PARTITION} of a modeled table starts the link, so the
+     * parent's later column changes reach it, whether the partition is named
+     * unqualified or qualified with {@code public}.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "ALTER TABLE events ATTACH PARTITION events_2026 FOR VALUES FROM (1) TO (100);",
+            "ALTER TABLE events ATTACH PARTITION public.events_2026 DEFAULT;"
+        }
+    )
+    void shouldStartPropagationAfterAttachPartition(String statement) {
+        Schema schema = parser.parse(
+            parser.parse(SOURCE_SCHEMA),
+            """
+                CREATE TABLE events_2026 (
+                    id      BIGINT NOT NULL,
+                    tenant  VARCHAR(64) NOT NULL,
+                    payload TEXT
+                );
+                """
+        );
+
+        schema = parser.parse(schema, statement);
+
+        assertEquals("events", table(schema, "events_2026").partitionOf());
+
+        schema = parser.parse(schema, "ALTER TABLE events ADD COLUMN note TEXT;");
+
+        assertEquals(
+            List.of("id", "tenant", "payload", "note"),
+            columnNames(schema, "events_2026")
+        );
+    }
+
+    /**
+     * A {@code LIKE} copy is independent of its source afterwards, as in
+     * PostgreSQL, so the source's later column changes do not reach it.
+     */
+    @Test
+    void shouldNotFollowTheSourceOfALikeCopy() {
+        Schema schema = parser.parse(
+            parser.parse(SOURCE_SCHEMA),
+            "CREATE TABLE events_copy (LIKE events);"
+        );
+
+        schema = parser.parse(schema, "ALTER TABLE events ADD COLUMN note TEXT;");
+
+        assertEquals(EVENT_COLUMNS, table(schema, "events_copy").columns());
+        assertNull(table(schema, "events_copy").partitionOf());
+    }
+
+    /**
+     * Until sqlcj models namespaces, a table name qualified with a schema other
+     * than {@code public} names a table it leaves unmodeled, so a
+     * {@code LIKE} or {@code PARTITION OF} source and an {@code ATTACH} or
+     * {@code DETACH PARTITION} partition written that way fails as a missing
+     * table rather than resolving to the modeled table of the same unqualified
+     * name.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        value = {
+            "CREATE TABLE c (LIKE reporting.events);"
+                + "|Table not found in schema: reporting.events",
+            "CREATE TABLE events_2026 PARTITION OF reporting.events DEFAULT;"
+                + "|Table not found in schema: reporting.events",
+            "ALTER TABLE events ATTACH PARTITION reporting.events_2026 DEFAULT;"
+                + "|Table not found in schema: reporting.events_2026",
+            "ALTER TABLE events DETACH PARTITION reporting.events_2026;"
+                + "|Table not found in schema: reporting.events_2026"
+        }
+    )
+    void shouldRejectASourceOrPartitionOfAnotherSchema(String statement, String message) {
+        Schema schema = parser.parse(SOURCE_SCHEMA);
+
+        assertEquals(
+            message,
+            assertThrows(
+                IllegalArgumentException.class,
+                () -> parser.parse(schema, statement)
+            )
+                .getMessage()
+        );
+    }
+
+    /** The schema whose {@code events} table the copying tests read. */
+    private Schema partitionedSchema() {
+        return parser.parse(
+            parser.parse(SOURCE_SCHEMA),
+            "CREATE TABLE events_2026 PARTITION OF events FOR VALUES FROM (1) TO (100);"
+        );
+    }
+
+    private List<String> columnNames(Schema schema, String tableName) {
+        return table(schema, tableName).columns().stream()
+            .map(Column::name)
+            .toList();
     }
 
     /** A schema declaring the enum type the enum tests apply statements to. */
