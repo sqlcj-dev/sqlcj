@@ -3,6 +3,7 @@ package dev.sqlcj.sql;
 import net.sf.jsqlparser.expression.CastExpression;
 import net.sf.jsqlparser.expression.Expression;
 import net.sf.jsqlparser.expression.JdbcNamedParameter;
+import net.sf.jsqlparser.expression.JdbcParameter;
 import net.sf.jsqlparser.parser.CCJSqlParserConstants;
 import net.sf.jsqlparser.parser.Node;
 import net.sf.jsqlparser.parser.Token;
@@ -26,6 +27,10 @@ import java.util.regex.Pattern;
  * such as a qualified, quoted, or {@code &name} placeholder, stays in the SQL
  * and is reported as written for semantic analysis to reject, as is an
  * anonymous {@code ?} placeholder, which has no parameter to bind.
+ *
+ * <p>The same walk reports the placeholder occurrences of the source in
+ * textual order, each with the cast that casts it, which is the syntax-level
+ * order in which semantic analysis binds them.
  */
 final class SqlParameterCompiler {
 
@@ -66,7 +71,12 @@ final class SqlParameterCompiler {
      */
     private static final int SOURCE_OFFSET = 1;
 
-    SqlParameters compile(String sql, Node astRoot) {
+    /**
+     * Compiles the parameters of one parsed source and collects its placeholder
+     * occurrences into {@code placeholders}, in the textual order of the
+     * {@code ?} positions of the compiled SQL.
+     */
+    SqlParameters compile(String sql, Node astRoot, List<PlaceholderOccurrence> placeholders) {
         if (astRoot == null) {
             throw new SqlParseException("SQL parse tree is unavailable.");
         }
@@ -140,7 +150,7 @@ final class SqlParameterCompiler {
 
         List<String> uncompiled = new ArrayList<>();
 
-        collectUncompiledPlaceholders(astRoot, names, uncompiled);
+        collectPlaceholders(astRoot, names, uncompiled, placeholders);
 
         return new SqlParameters(
             executableSql.toString(),
@@ -153,33 +163,84 @@ final class SqlParameterCompiler {
     }
 
     /**
-     * Collects the named placeholders of the parse tree that this compiler did
-     * not replace, written as the source spells them, so that an accepted query
-     * never keeps such a placeholder in its executable SQL.
+     * Walks the parse tree in pre-order, collecting the placeholder occurrences
+     * of the source in textual order and the named placeholders this compiler
+     * did not replace, written as the source spells them, so that an accepted
+     * query never keeps such a placeholder in its executable SQL.
      *
      * <p>The parser gives the operand of a {@code ::} cast no parse-tree node
      * of its own, so a cast reports the placeholder it casts, through any
      * further cast of the same operand.
      */
-    private void collectUncompiledPlaceholders(Node node, List<String> names, List<String> uncompiled) {
-        collectUncompiledPlaceholder(node.jjtGetValue(), names, uncompiled);
+    private void collectPlaceholders(
+        Node node,
+        List<String> names,
+        List<String> uncompiled,
+        List<PlaceholderOccurrence> placeholders
+    ) {
+        Object value = node.jjtGetValue();
 
-        if (node.jjtGetValue() instanceof CastExpression cast) {
-            collectUncompiledPlaceholder(castOperand(cast), names, uncompiled);
+        collectUncompiledPlaceholder(value, names, uncompiled);
+
+        if (value instanceof CastExpression cast) {
+            CastExpression innermost = innermostCast(cast);
+            Expression operand = innermost.getLeftExpression();
+
+            collectUncompiledPlaceholder(operand, names, uncompiled);
+            collectPlaceholder(operand, innermost, placeholders);
+        }
+
+        if (value instanceof Expression expression) {
+            collectPlaceholder(expression, null, placeholders);
         }
 
         for (int child = 0; child < node.jjtGetNumChildren(); child++) {
-            collectUncompiledPlaceholders(node.jjtGetChild(child), names, uncompiled);
+            collectPlaceholders(node.jjtGetChild(child), names, uncompiled, placeholders);
         }
     }
 
-    /** The operand a cast casts, which is the operand of a chained cast. */
-    private Expression castOperand(CastExpression cast) {
-        Expression operand = cast.getLeftExpression();
+    /**
+     * The cast a chain of casts applies first, which is the cast whose operand
+     * a chain such as {@code :x::text::int} casts directly.
+     */
+    private CastExpression innermostCast(CastExpression cast) {
+        return cast.getLeftExpression() instanceof CastExpression chained
+            ? innermostCast(chained)
+            : cast;
+    }
 
-        return operand instanceof CastExpression chained
-            ? castOperand(chained)
-            : operand;
+    /**
+     * Collects one parse-tree value when it is a placeholder, in the order the
+     * walk reaches it.
+     *
+     * <p>One expression can hang under two parse-tree nodes, so a placeholder
+     * is recorded once, identified by the expression itself, and the cast that
+     * casts it is kept whichever node reports it first.
+     */
+    private void collectPlaceholder(
+        Object value,
+        CastExpression cast,
+        List<PlaceholderOccurrence> placeholders
+    ) {
+        if (!(value instanceof JdbcParameter) && !(value instanceof JdbcNamedParameter)) {
+            return;
+        }
+
+        Expression placeholder = (Expression) value;
+
+        for (int index = 0; index < placeholders.size(); index++) {
+            PlaceholderOccurrence collected = placeholders.get(index);
+
+            if (collected.placeholder() == placeholder) {
+                if (cast != null && collected.cast() == null) {
+                    placeholders.set(index, new PlaceholderOccurrence(placeholder, cast));
+                }
+
+                return;
+            }
+        }
+
+        placeholders.add(new PlaceholderOccurrence(placeholder, cast));
     }
 
     /**

@@ -150,6 +150,24 @@ class PostgresIntegrationTest {
         """;
 
     /**
+     * A snapshot of a membership relation, whose rows a read reaches only
+     * through an {@code EXISTS} subquery.
+     */
+    private static final String MEMBERSHIP_SCHEMA = """
+        CREATE TABLE teams
+        (
+            id   BIGINT PRIMARY KEY,
+            name VARCHAR(255) NOT NULL
+        );
+
+        CREATE TABLE memberships
+        (
+            team_id BIGINT      NOT NULL,
+            role    VARCHAR(32) NOT NULL
+        );
+        """;
+
+    /**
      * A snapshot that declares every accepted floating-point, binary, and time
      * spelling, each of them nullable so that one row can carry values and
      * another can carry nulls.
@@ -550,6 +568,8 @@ class PostgresIntegrationTest {
         execute("DROP FUNCTION IF EXISTS greet_listener(text)");
         execute("DROP TABLE IF EXISTS customer_orders");
         execute("DROP TABLE IF EXISTS customers");
+        execute("DROP TABLE IF EXISTS memberships");
+        execute("DROP TABLE IF EXISTS teams");
         execute("DROP TABLE IF EXISTS measurements");
         execute("DROP TABLE IF EXISTS documents");
         execute("DROP TABLE IF EXISTS user_aliases");
@@ -985,6 +1005,162 @@ class PostgresIntegrationTest {
             assertEquals(
                 List.of("Bob", "Cara"),
                 names(pageWithLeadingOffset.invoke(repository, 2, 1))
+            );
+        }
+    }
+
+    /**
+     * Covers a dynamic sort end to end: one cast placeholder repeated in two
+     * {@code ORDER BY} keys is generated, compiled, and executed against
+     * PostgreSQL, so each of its two values returns the rows in its own order.
+     */
+    @Test
+    void shouldExecuteGeneratedDynamicSortAgainstPostgres() throws Exception {
+        Path classesDirectory = generateAndCompile("""
+            -- name: ListUsersSorted :many
+            SELECT id, name
+            FROM users
+            ORDER BY
+                CASE WHEN :sort::text = 'name' THEN name END,
+                CASE WHEN :sort::text = 'id' THEN id END;
+            """);
+
+        execute("""
+            INSERT INTO users (id, code, name)
+            VALUES
+                (1, 1, 'Cara'),
+                (2, 2, 'Alice'),
+                (3, 3, 'Bob')
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method listUsersSorted = repository.getClass().getMethod(
+                "listUsersSorted",
+                String.class
+            );
+
+            assertEquals(
+                List.of("Alice", "Bob", "Cara"),
+                names(listUsersSorted.invoke(repository, "name"))
+            );
+
+            assertEquals(
+                List.of("Cara", "Alice", "Bob"),
+                names(listUsersSorted.invoke(repository, "id"))
+            );
+        }
+    }
+
+    /**
+     * Covers a cast page end to end: a {@code LIMIT ... OFFSET ...} page whose
+     * values are cast placeholders, and the same page written as
+     * {@code OFFSET ... LIMIT ...}, are generated, compiled, and executed
+     * against PostgreSQL, so a swapped binding order would change the returned
+     * page.
+     */
+    @Test
+    void shouldExecuteGeneratedCastPaginationAgainstPostgres() throws Exception {
+        Path classesDirectory = generateAndCompile("""
+            -- name: ListUserCastPage :many
+            SELECT id, name
+            FROM users
+            ORDER BY id
+            LIMIT $1::int OFFSET $2::int;
+
+            -- name: ListUserCastPageWithLeadingOffset :many
+            SELECT id, name
+            FROM users
+            ORDER BY id
+            OFFSET $2::int LIMIT $1::int;
+            """);
+
+        execute("""
+            INSERT INTO users (id, code, name)
+            VALUES
+                (1, 1, 'Alice'),
+                (2, 2, 'Bob'),
+                (3, 3, 'Cara'),
+                (4, 4, 'Dora')
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method page = repository.getClass().getMethod(
+                "listUserCastPage",
+                Integer.class,
+                Integer.class
+            );
+
+            Method pageWithLeadingOffset = repository.getClass().getMethod(
+                "listUserCastPageWithLeadingOffset",
+                Integer.class,
+                Integer.class
+            );
+
+            assertEquals(
+                List.of("Bob", "Cara"),
+                names(page.invoke(repository, 2, 1))
+            );
+
+            assertEquals(
+                List.of("Bob", "Cara"),
+                names(pageWithLeadingOffset.invoke(repository, 2, 1))
+            );
+        }
+    }
+
+    /**
+     * Covers a membership check end to end: a read whose {@code EXISTS}
+     * subquery compares a cast placeholder is generated, compiled, and executed
+     * against PostgreSQL, so the placeholder reaches the subquery and selects
+     * the teams of the given role alone.
+     */
+    @Test
+    void shouldExecuteGeneratedExistsSubqueryAgainstPostgres() throws Exception {
+        execute(MEMBERSHIP_SCHEMA);
+
+        Path classesDirectory = generateAndCompile(MEMBERSHIP_SCHEMA, """
+            -- name: ListTeamsByRole :many
+            SELECT id, name
+            FROM teams
+            WHERE EXISTS (
+                SELECT 1
+                FROM memberships
+                WHERE memberships.team_id = teams.id
+                  AND memberships.role = :role::varchar
+            )
+            ORDER BY id;
+            """);
+
+        execute("""
+            INSERT INTO teams (id, name)
+            VALUES (1, 'Platform'), (2, 'Billing'), (3, 'Support')
+            """);
+
+        execute("""
+            INSERT INTO memberships (team_id, role)
+            VALUES (1, 'owner'), (2, 'member'), (3, 'owner')
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method listTeamsByRole = repository.getClass().getMethod(
+                "listTeamsByRole",
+                String.class
+            );
+
+            assertEquals(
+                List.of("Platform", "Support"),
+                names(listTeamsByRole.invoke(repository, "owner"))
+            );
+
+            assertEquals(
+                List.of("Billing"),
+                names(listTeamsByRole.invoke(repository, "member"))
             );
         }
     }

@@ -7,12 +7,12 @@ import dev.sqlcj.schema.Schema;
 import dev.sqlcj.schema.parser.ColumnTypeMapping;
 import dev.sqlcj.schema.parser.SchemaNamespace;
 import dev.sqlcj.sql.ParsedSql;
+import dev.sqlcj.sql.PlaceholderOccurrence;
 import dev.sqlcj.type.DefaultTypeResolver;
 import dev.sqlcj.type.TypeResolver;
 import net.sf.jsqlparser.expression.Alias;
 import net.sf.jsqlparser.expression.CastExpression;
 import net.sf.jsqlparser.expression.Expression;
-import net.sf.jsqlparser.expression.ExpressionVisitorAdapter;
 import net.sf.jsqlparser.expression.Function;
 import net.sf.jsqlparser.expression.JdbcNamedParameter;
 import net.sf.jsqlparser.expression.JdbcParameter;
@@ -56,6 +56,7 @@ import net.sf.jsqlparser.statement.update.UpdateSet;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -125,9 +126,11 @@ public final class QueryAnalyzer {
 
     /**
      * One placeholder occurrence, resolved to the logical parameter it binds
-     * and, for a named placeholder, to the name that parameter carries.
+     * and, for a named placeholder, to the name that parameter carries. The
+     * placeholder expression identifies the occurrence, which is how a clause's
+     * analysis meets the placeholder occurrences the parser reported.
      */
-    private record Placeholder(int index, String name) {
+    private record Placeholder(Expression expression, int index, String name) {
 
         /**
          * The name of the parameter this occurrence binds, which a named
@@ -155,9 +158,10 @@ public final class QueryAnalyzer {
     }
 
     /**
-     * The compiled placeholders of one query and the parameter occurrences
-     * analyzed against them, collected in the textual order of the executable
-     * {@code ?} positions.
+     * The compiled placeholders of one query and the parameter occurrences its
+     * clauses typed, each recorded against the placeholder expression it
+     * resolves. The textual order of the occurrences is the order the parser
+     * reported them in, not the order the clauses were analyzed in.
      */
     private static final class Placeholders {
 
@@ -170,7 +174,8 @@ public final class QueryAnalyzer {
         /** Resolves the type a cast states. */
         private final ColumnTypeMapping columnTypeMapping;
 
-        private final List<QueryParameter> occurrences = new ArrayList<>();
+        /** The occurrences a clause typed, by their placeholder expression. */
+        private final Map<Expression, QueryParameter> typedOccurrences = new IdentityHashMap<>();
 
         private Placeholders(
             List<String> names,
@@ -195,11 +200,15 @@ public final class QueryAnalyzer {
                     throw new UnsupportedOperationException(ANONYMOUS_PARAMETER_REJECTION);
                 }
 
-                return new Placeholder(parameter.getIndex(), null);
+                return new Placeholder(expression, parameter.getIndex(), null);
             }
 
             if (expression instanceof JdbcNamedParameter named) {
-                return new Placeholder(requireCompiledName(named), named.getName());
+                return new Placeholder(
+                    expression,
+                    requireCompiledName(named),
+                    named.getName()
+                );
             }
 
             return null;
@@ -258,12 +267,38 @@ public final class QueryAnalyzer {
             return index + 1;
         }
 
-        private void add(QueryParameter occurrence) {
-            occurrences.add(occurrence);
+        /**
+         * Records the parameter occurrence a clause of the query typed for one
+         * placeholder. Each placeholder occurrence stands in one clause, so
+         * typing one twice is a defect of this analyzer.
+         */
+        private void record(Placeholder placeholder, QueryParameter occurrence) {
+            if (typedOccurrences.put(placeholder.expression(), occurrence) != null) {
+                throw new IllegalStateException(
+                    "Placeholder %s was typed twice.".formatted(placeholder.spelled())
+                );
+            }
         }
 
-        private List<QueryParameter> occurrences() {
-            return occurrences;
+        /**
+         * Takes the occurrence a clause typed for one placeholder, and
+         * {@code null} when no clause typed it.
+         */
+        private QueryParameter typed(Expression placeholder) {
+            return typedOccurrences.remove(placeholder);
+        }
+
+        /**
+         * Requires that every occurrence a clause typed was one of the
+         * placeholder occurrences the parser reported, so that no analyzed
+         * parameter is left out of the binding order.
+         */
+        private void requireReportedOccurrences() {
+            if (!typedOccurrences.isEmpty()) {
+                throw new IllegalStateException(
+                    "A typed placeholder is not a reported placeholder occurrence."
+                );
+            }
         }
     }
 
@@ -765,7 +800,7 @@ public final class QueryAnalyzer {
     }
 
     /**
-     * Builds the analyzed model from the parameter occurrences collected in
+     * Builds the analyzed model from the parameter occurrences resolved in
      * textual order, keeping that order for JDBC binding and exposing one
      * logical parameter per placeholder index.
      */
@@ -777,7 +812,7 @@ public final class QueryAnalyzer {
         Placeholders placeholders,
         String rowTable
     ) {
-        List<QueryParameter> occurrences = placeholders.occurrences();
+        List<QueryParameter> occurrences = resolveOccurrences(parsedSql, placeholders);
 
         List<Integer> bindingParameterIndexes = requireAccountedOccurrences(parsedSql, occurrences);
 
@@ -791,6 +826,43 @@ public final class QueryAnalyzer {
             toParameters(occurrences, parsedSql.parameters().names()),
             rowTable
         );
+    }
+
+    /**
+     * Resolves the parameter occurrences of one query in the textual order of
+     * the placeholder occurrences the SQL parser reported, which is the JDBC
+     * binding order of the generated {@code ?} positions.
+     *
+     * <p>An occurrence a clause of the query typed is that clause's parameter.
+     * Every other occurrence is typed by the cast it is the direct operand of,
+     * wherever in the statement it stands, and is named after its own
+     * placeholder. A placeholder neither a clause nor a cast types contributes
+     * no parameter, so the accounting reports it as unaccounted.
+     */
+    private List<QueryParameter> resolveOccurrences(ParsedSql parsedSql, Placeholders placeholders) {
+        List<QueryParameter> occurrences = new ArrayList<>();
+
+        for (PlaceholderOccurrence occurrence : parsedSql.placeholders()) {
+            QueryParameter typed = placeholders.typed(occurrence.placeholder());
+
+            if (typed != null) {
+                occurrences.add(typed);
+
+                continue;
+            }
+
+            CastPlaceholder cast = placeholders.ofCast(occurrence.cast());
+
+            if (cast != null) {
+                occurrences.add(
+                    toCastParameter(cast, indexedParameterName(cast.placeholder()))
+                );
+            }
+        }
+
+        placeholders.requireReportedOccurrences();
+
+        return occurrences;
     }
 
     /**
@@ -1135,9 +1207,8 @@ public final class QueryAnalyzer {
     }
 
     /**
-     * Resolves the supported parameters in the textual order in which they are
-     * encountered, which is the JDBC binding order of the generated {@code ?}
-     * positions.
+     * Resolves the parameters the clauses of a read type, which are the
+     * {@code WHERE} parameters and the pagination parameters.
      */
     private void resolveBindingParameters(
         PlainSelect plainSelect,
@@ -1156,44 +1227,54 @@ public final class QueryAnalyzer {
     }
 
     /**
-     * Resolves the pagination parameters, which follow every {@code WHERE}
-     * parameter in textual order. A {@code LIMIT} row count and an
-     * {@code OFFSET} value that is a placeholder each becomes an
-     * {@code INTEGER} parameter named after its own clause, or after the
-     * placeholder when the placeholder is named. The parser stores
-     * {@code OFFSET a LIMIT b} exactly like {@code LIMIT b OFFSET a}, so two
-     * placeholders are ordered by their source positions.
+     * Resolves the pagination parameters, which are the {@code LIMIT} row count
+     * and the {@code OFFSET} value. Either value binds one parameter named after
+     * its own clause, or after the placeholder when the placeholder is named.
+     * The parser stores {@code OFFSET a LIMIT b} exactly like
+     * {@code LIMIT b OFFSET a}, so the two bind in the order the parser reported
+     * their placeholders, not in the order they are resolved here.
      */
     private void resolvePaginationParameters(PlainSelect plainSelect, Placeholders placeholders) {
-        Expression rowCountValue = resolveLimitRowCount(plainSelect.getLimit());
-
-        Placeholder rowCount = placeholders.of(rowCountValue);
-
         Offset offset = plainSelect.getOffset();
 
-        Expression offsetExpression = offset == null
-            ? null
-            : offset.getOffset();
+        resolvePaginationValue(
+            resolveLimitRowCount(plainSelect.getLimit()),
+            LIMIT_PARAMETER_NAME,
+            placeholders
+        );
 
-        Placeholder offsetValue = placeholders.of(offsetExpression);
+        resolvePaginationValue(
+            offset == null
+                ? null
+                : offset.getOffset(),
+            OFFSET_PARAMETER_NAME,
+            placeholders
+        );
+    }
 
-        if (
-            rowCount != null
-                && offsetValue != null
-                && sourcePosition(offsetExpression) < sourcePosition(rowCountValue)
-        ) {
-            addParameter(offsetValue, OFFSET_PARAMETER_NAME, ColumnType.INTEGER, placeholders);
-            addParameter(rowCount, LIMIT_PARAMETER_NAME, ColumnType.INTEGER, placeholders);
+    /**
+     * Resolves one pagination value: a placeholder, which counts rows and is
+     * therefore an {@code INTEGER}, or a cast placeholder, which states its own
+     * type and keeps its clause's name. Every other value reaches the database
+     * as written.
+     */
+    private void resolvePaginationValue(
+        Expression value,
+        String name,
+        Placeholders placeholders
+    ) {
+        Placeholder placeholder = placeholders.of(value);
+
+        if (placeholder != null) {
+            addParameter(placeholder, name, ColumnType.INTEGER, placeholders);
 
             return;
         }
 
-        if (rowCount != null) {
-            addParameter(rowCount, LIMIT_PARAMETER_NAME, ColumnType.INTEGER, placeholders);
-        }
+        CastPlaceholder cast = placeholders.ofCast(value);
 
-        if (offsetValue != null) {
-            addParameter(offsetValue, OFFSET_PARAMETER_NAME, ColumnType.INTEGER, placeholders);
+        if (cast != null) {
+            addCastParameter(cast, name, placeholders);
         }
     }
 
@@ -1206,11 +1287,6 @@ public final class QueryAnalyzer {
         return limit == null || limit.getOffset() != null
             ? null
             : limit.getRowCount();
-    }
-
-    /** The source position of a placeholder token, counted from one. */
-    private int sourcePosition(Expression placeholder) {
-        return placeholder.getASTNode().jjtGetFirstToken().absoluteBegin;
     }
 
     private void resolveParameters(
@@ -1252,7 +1328,7 @@ public final class QueryAnalyzer {
         }
 
         if (expression instanceof IsNullExpression isNull) {
-            resolveIsNullExpression(isNull, sources, placeholders);
+            resolveIsNullExpression(isNull, sources);
             return;
         }
 
@@ -1263,17 +1339,11 @@ public final class QueryAnalyzer {
 
         if (expression instanceof ComparisonOperator comparison) {
             resolveParameterComparison(comparison, sources, placeholders);
-            return;
         }
-
-        resolveCastPlaceholders(expression, placeholders);
     }
 
     private void resolveInExpression(InExpression in, List<Source> sources, Placeholders placeholders) {
         if (!(in.getLeftExpression() instanceof net.sf.jsqlparser.schema.Column column)) {
-            resolveCastPlaceholders(in.getLeftExpression(), placeholders);
-            resolveCastPlaceholders(in.getRightExpression(), placeholders);
-
             return;
         }
 
@@ -1368,10 +1438,7 @@ public final class QueryAnalyzer {
 
         if (cast != null) {
             addCastParameter(cast, schemaColumn.name(), placeholders);
-            return;
         }
-
-        resolveCastPlaceholders(expression, placeholders);
     }
 
     /**
@@ -1435,12 +1502,7 @@ public final class QueryAnalyzer {
                 resolveColumn(column, sources).column().name(),
                 placeholders
             );
-
-            return;
         }
-
-        resolveCastPlaceholders(left, placeholders);
-        resolveCastPlaceholders(right, placeholders);
     }
 
     /**
@@ -1509,22 +1571,15 @@ public final class QueryAnalyzer {
     /**
      * Resolves the tested column of {@code IS NULL} and {@code IS NOT NULL}
      * against the query sources. The predicate names no parameter after its
-     * tested value, so a tested value that is not a direct column contributes
-     * only the parameters its own cast placeholders state.
+     * tested value, so a tested value that is not a direct column is left to
+     * the cast that types its own placeholder.
      */
-    private void resolveIsNullExpression(
-        IsNullExpression isNull,
-        List<Source> sources,
-        Placeholders placeholders
-    ) {
+    private void resolveIsNullExpression(IsNullExpression isNull, List<Source> sources) {
         Expression tested = isNull.getLeftExpression();
 
         if (tested instanceof net.sf.jsqlparser.schema.Column column) {
             resolveColumn(column, sources);
-            return;
         }
-
-        resolveCastPlaceholders(tested, placeholders);
     }
 
     /**
@@ -1555,13 +1610,7 @@ public final class QueryAnalyzer {
 
             resolveColumnValue(start, schemaColumn, placeholders);
             resolveColumnValue(end, schemaColumn, placeholders);
-
-            return;
         }
-
-        resolveCastPlaceholders(left, placeholders);
-        resolveCastPlaceholders(start, placeholders);
-        resolveCastPlaceholders(end, placeholders);
     }
 
     /**
@@ -1631,13 +1680,9 @@ public final class QueryAnalyzer {
                         resolveColumn(column, sources).column().name(),
                         placeholders
                     );
-                    return;
                 }
             }
         }
-
-        resolveCastPlaceholders(left, placeholders);
-        resolveCastPlaceholders(right, placeholders);
     }
 
     /**
@@ -1767,8 +1812,8 @@ public final class QueryAnalyzer {
     /**
      * Resolves one value of a clause that names its parameter after a column: a
      * placeholder typed from the column, a cast placeholder that states its own
-     * type and keeps the column's name, or an expression that is neither, which
-     * contributes only the parameters its own cast placeholders state.
+     * type and keeps the column's name, or an expression that is neither, whose
+     * own cast placeholders are typed where they stand.
      */
     private void resolveColumnValue(
         Expression value,
@@ -1786,10 +1831,7 @@ public final class QueryAnalyzer {
 
         if (cast != null) {
             addCastParameter(cast, column.name(), placeholders);
-            return;
         }
-
-        resolveCastPlaceholders(value, placeholders);
     }
 
     /**
@@ -1798,42 +1840,6 @@ public final class QueryAnalyzer {
      */
     private boolean bindsValue(Expression value, Placeholders placeholders) {
         return placeholders.of(value) != null || placeholders.ofCast(value) != null;
-    }
-
-    /**
-     * Binds every cast placeholder an expression contains that no clause of the
-     * query names, each after its own placeholder, in textual order. The
-     * expression visitor reports an expression's parts in the order the query
-     * writes them and does not descend into a subquery, whose placeholders are
-     * not analyzed.
-     */
-    private void resolveCastPlaceholders(Expression expression, Placeholders placeholders) {
-        if (expression == null) {
-            return;
-        }
-
-        expression.accept(
-            new ExpressionVisitorAdapter<Void>() {
-
-                @Override
-                public <S> Void visit(CastExpression cast, S context) {
-                    CastPlaceholder castPlaceholder = placeholders.ofCast(cast);
-
-                    if (castPlaceholder == null) {
-                        return super.visit(cast, context);
-                    }
-
-                    addCastParameter(
-                        castPlaceholder,
-                        indexedParameterName(castPlaceholder.placeholder()),
-                        placeholders
-                    );
-
-                    return null;
-                }
-            },
-            null
-        );
     }
 
     /**
@@ -1846,25 +1852,28 @@ public final class QueryAnalyzer {
     }
 
     /**
-     * Records one parameter occurrence a cast types, named after the column
-     * whose value it is where a clause names one, and otherwise after the
-     * placeholder itself.
+     * Records one parameter occurrence a cast types in the clause that names
+     * it, which names it after the column whose value it is.
      */
     private void addCastParameter(
         CastPlaceholder cast,
         String name,
         Placeholders placeholders
     ) {
+        placeholders.record(cast.placeholder(), toCastParameter(cast, name));
+    }
+
+    /** One parameter occurrence a cast types, under the given name. */
+    private QueryParameter toCastParameter(CastPlaceholder cast, String name) {
         ColumnTypeMapping.MappedType type = cast.type();
 
-        addParameter(
+        return toParameter(
             cast.placeholder(),
             name,
             type.type(),
             type.enumType(),
             type.array(),
-            type.blankPadded(),
-            placeholders
+            type.blankPadded()
         );
     }
 
@@ -1893,11 +1902,7 @@ public final class QueryAnalyzer {
         addParameter(placeholder, name, type, null, false, false, placeholders);
     }
 
-    /**
-     * Records one parameter occurrence, named after its placeholder when the
-     * placeholder is named, and otherwise after the column or clause it belongs
-     * to.
-     */
+    /** Records one parameter occurrence a clause of the query typed. */
     private void addParameter(
         Placeholder placeholder,
         String name,
@@ -1907,15 +1912,31 @@ public final class QueryAnalyzer {
         boolean blankPadded,
         Placeholders placeholders
     ) {
-        placeholders.add(
-            new QueryParameter(
-                placeholder.index(),
-                placeholder.nameOr(name),
-                type,
-                enumType,
-                array,
-                blankPadded
-            )
+        placeholders.record(
+            placeholder,
+            toParameter(placeholder, name, type, enumType, array, blankPadded)
+        );
+    }
+
+    /**
+     * One parameter occurrence, named after its placeholder when the placeholder
+     * is named, and otherwise after the column or clause it belongs to.
+     */
+    private QueryParameter toParameter(
+        Placeholder placeholder,
+        String name,
+        ColumnType type,
+        String enumType,
+        boolean array,
+        boolean blankPadded
+    ) {
+        return new QueryParameter(
+            placeholder.index(),
+            placeholder.nameOr(name),
+            type,
+            enumType,
+            array,
+            blankPadded
         );
     }
 

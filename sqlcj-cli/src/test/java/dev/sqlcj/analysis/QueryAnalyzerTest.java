@@ -1344,6 +1344,90 @@ class QueryAnalyzerTest {
         assertEquals(List.of(1), model.bindingParameterIndexes());
     }
 
+    /**
+     * A cast pagination value states its own type and keeps its clause's name.
+     */
+    @Test
+    void shouldResolveCastPaginationParameters() {
+        String sql = "SELECT id FROM users ORDER BY id LIMIT $1::int OFFSET $2::int";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "limit", ColumnType.INTEGER),
+                new QueryParameter(2, "offset", ColumnType.INTEGER)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+
+        assertEquals(
+            "SELECT id FROM users ORDER BY id LIMIT ?::int OFFSET ?::int",
+            model.executableSql()
+        );
+    }
+
+    /**
+     * The parser stores an {@code OFFSET} written before its {@code LIMIT} like
+     * one written after it, so the two cast values bind in the order the query
+     * writes them.
+     */
+    @Test
+    void shouldResolveCastPaginationParametersInTextualBindingOrder() {
+        String sql = "SELECT id FROM users ORDER BY id OFFSET $2::int LIMIT $1::int";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "limit", ColumnType.INTEGER),
+                new QueryParameter(2, "offset", ColumnType.INTEGER)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(2, 1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A cast pagination value is typed by its cast rather than by its clause,
+     * and a named one is still named after its placeholder.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        value = {
+            "SELECT id FROM users ORDER BY id LIMIT $1::bigint|limit|BIGINT",
+            "SELECT id FROM users ORDER BY id OFFSET $1::bigint|offset|BIGINT",
+            "SELECT id FROM users ORDER BY id LIMIT :pageSize::int|pageSize|INTEGER",
+            "SELECT id FROM users ORDER BY id OFFSET CAST(:skip AS int)|skip|INTEGER"
+        }
+    )
+    void shouldTypeCastPaginationParameterByItsCast(String sql, String name, ColumnType type) {
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, name, type)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+    }
+
     @ParameterizedTest
     @ValueSource(
         strings = {
@@ -1573,33 +1657,68 @@ class QueryAnalyzerTest {
     }
 
     /**
-     * A cast does not make a projected placeholder analyzable, so it stays
-     * rejected by the placeholder accounting in either spelling.
+     * A cast projection whose operand is a placeholder types that placeholder.
+     * No column names it, so it is named after its own index, and the cast
+     * still names the result column after the projection's alias.
      */
-    @ParameterizedTest
-    @CsvSource(
-        delimiter = '|',
-        quoteCharacter = '"',
-        value = {
-            "SELECT $1::int AS x FROM users|[1]",
-            "SELECT :n::int AS x FROM users|[:n]"
-        }
-    )
-    void shouldRejectCastPlaceholderProjection(String sql, String compiled) {
-        Query query = new Query("ListUsers", QueryType.MANY, sql);
-        ParsedSql parsedSql = parser.parse(sql);
+    @Test
+    void shouldResolveCastPlaceholderProjection() {
+        String sql = "SELECT $1::text AS label, id FROM users WHERE id = $2";
 
-        UnsupportedOperationException exception = assertThrows(
-            UnsupportedOperationException.class,
-            () -> analyzer.analyze(query, parsedSql, schema)
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
         );
 
         assertEquals(
-            "SQL placeholders %s are not the analyzed parameters []; "
-                .formatted(compiled)
-                + "a placeholder is in an unsupported location",
-            exception.getMessage()
+            List.of(
+                new QueryColumn("label", ColumnType.TEXT, true),
+                new QueryColumn("id", ColumnType.BIGINT, false)
+            ),
+            model.columns()
         );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "param1", ColumnType.TEXT),
+                new QueryParameter(2, "id", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+
+        assertEquals(
+            "SELECT ?::text AS label, id FROM users WHERE id = ?",
+            model.executableSql()
+        );
+    }
+
+    /**
+     * A named placeholder is numbered by its first textual occurrence, so a
+     * projected one is the query's first logical parameter even though the
+     * {@code WHERE} clause is analyzed before the projection's placeholders.
+     */
+    @Test
+    void shouldNumberNamedProjectionPlaceholderBeforeThePredicateOne() {
+        String sql = "SELECT :label::text AS label, id FROM users WHERE id = :id";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "label", ColumnType.TEXT),
+                new QueryParameter(2, "id", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
     }
 
     @ParameterizedTest
@@ -3437,13 +3556,247 @@ class QueryAnalyzerTest {
     }
 
     /**
-     * A cast does not make a placeholder analyzable in a clause this analyzer
-     * does not traverse, so such a placeholder stays rejected by the
-     * placeholder accounting.
+     * A cast types a placeholder in a clause this analyzer does not otherwise
+     * traverse, which is how a dynamic sort states its type. The sort
+     * placeholder is repeated, so it is one logical parameter bound at both of
+     * its positions, after the predicate parameter.
      */
     @Test
-    void shouldRejectCastPlaceholderInUnanalyzedLocation() {
-        String sql = "SELECT id FROM users WHERE id = $1 ORDER BY $2::int";
+    void shouldResolveCastPlaceholdersOfOrderBy() {
+        String sql = """
+            SELECT id, name
+            FROM users
+            WHERE id = :projectId
+            ORDER BY
+              CASE WHEN :sort::text = 'name' THEN name END,
+              CASE WHEN :sort::text = 'id' THEN id END""";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "projectId", ColumnType.BIGINT),
+                new QueryParameter(2, "sort", ColumnType.TEXT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2, 2), model.bindingParameterIndexes());
+
+        assertEquals(
+            """
+                SELECT id, name
+                FROM users
+                WHERE id = ?
+                ORDER BY
+                  CASE WHEN ?::text = 'name' THEN name END,
+                  CASE WHEN ?::text = 'id' THEN id END""",
+            model.executableSql()
+        );
+    }
+
+    /**
+     * An indexed cast placeholder outside the clauses that name a parameter is
+     * named after its own index, in the {@code ::} and the {@code CAST} form
+     * alike.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "SELECT id FROM users WHERE id = $1 ORDER BY $2::int",
+            "SELECT id FROM users WHERE id = $1 ORDER BY CAST($2 AS int)"
+        }
+    )
+    void shouldNameIndexedCastPlaceholderOfOrderByAfterItsIndex(String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "param2", ColumnType.INTEGER)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A cast types a placeholder in every other clause of a read: the grouping
+     * list, the group predicate, and a computed pagination value, which is not
+     * the whole row count and is therefore named after its own placeholder.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "SELECT name FROM users GROUP BY name, :sort::text|sort|TEXT",
+            "SELECT name FROM users GROUP BY name HAVING COUNT(*) > :minimum::bigint"
+                + "|minimum|BIGINT",
+            "SELECT id FROM users ORDER BY id LIMIT LEAST(:pageSize::int, 100)"
+                + "|pageSize|INTEGER",
+            "SELECT id FROM users ORDER BY id FETCH FIRST :pageSize::int ROWS ONLY"
+                + "|pageSize|INTEGER",
+            "SELECT id FROM users ORDER BY id LIMIT LEAST($1::int, 100)|param1|INTEGER",
+            "SELECT id FROM users ORDER BY id FETCH FIRST $1::int ROWS ONLY|param1|INTEGER"
+        }
+    )
+    void shouldResolveCastPlaceholderOfEveryReadClause(String sql, String name, ColumnType type) {
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, name, type)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * An indexed cast placeholder of a clause that names no parameter is named
+     * after its own index wherever it stands.
+     */
+    @Test
+    void shouldNameIndexedCastPlaceholderOfGroupPredicateAfterItsIndex() {
+        String sql = "SELECT name, COUNT(*) AS total FROM users GROUP BY name HAVING COUNT(*) > $1::bigint";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "param1", ColumnType.BIGINT)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A cast types a placeholder inside a subquery at any depth, in a read and
+     * in a write, even though the subquery itself is not analyzed. Such a
+     * placeholder is named after its own placeholder, because no analyzed
+     * column names it.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "SELECT id FROM users"
+                + " WHERE EXISTS (SELECT 1 FROM orders WHERE orders.total = :amount::numeric)"
+                + "|amount",
+            "SELECT id FROM users"
+                + " WHERE id IN (SELECT user_id FROM orders WHERE orders.total = :amount::numeric)"
+                + "|amount",
+            "SELECT id FROM users WHERE id ="
+                + " (SELECT MAX(user_id) FROM orders WHERE orders.total = :amount::numeric)"
+                + "|amount",
+            "SELECT id FROM users WHERE EXISTS ("
+                + "SELECT 1 FROM orders"
+                + " WHERE EXISTS (SELECT 1 FROM profiles WHERE profiles.nickname = :amount::text))"
+                + "|amount",
+            "DELETE FROM users"
+                + " WHERE id IN (SELECT user_id FROM orders WHERE orders.total = :amount::numeric)"
+                + "|amount"
+        }
+    )
+    void shouldResolveCastPlaceholderOfSubquery(String sql, String name) {
+        QueryType type = sql.startsWith("DELETE")
+            ? QueryType.EXEC
+            : QueryType.MANY;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", type, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(1, model.parameters().size());
+        assertEquals(name, model.parameters().get(0).name());
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A {@code WITH} body is carried unanalyzed, so its cast placeholder is
+     * typed by that cast alone and binds before the analyzed clauses that
+     * follow it.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "WITH recent AS (SELECT id FROM orders WHERE orders.total = $1::numeric)"
+                + " SELECT id FROM users WHERE id = $2|MANY",
+            "WITH recent AS (SELECT id FROM orders WHERE orders.total = $1::numeric)"
+                + " DELETE FROM users WHERE id = $2|EXEC"
+        }
+    )
+    void shouldResolveCastPlaceholderOfWithBody(String sql, QueryType type) {
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", type, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "param1", ColumnType.DECIMAL),
+                new QueryParameter(2, "id", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+    }
+
+    /**
+     * Two occurrences of one placeholder whose casts agree are one logical
+     * parameter, even in different clauses.
+     */
+    @Test
+    void shouldShareOneParameterBetweenAgreeingCastsOfDifferentClauses() {
+        String sql = "SELECT id FROM users WHERE name = :term::text"
+            + " ORDER BY CASE WHEN :term::text = 'name' THEN name END";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "term", ColumnType.TEXT)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * Two occurrences of one placeholder whose casts state different Java types
+     * are rejected like any other conflicting placeholder.
+     */
+    @Test
+    void shouldRejectConflictingCastsOfDifferentClauses() {
+        String sql = "SELECT id FROM users WHERE name = :term::text"
+            + " ORDER BY CASE WHEN :term::int = 1 THEN name END";
 
         Query query = new Query("ListUsers", QueryType.MANY, sql);
         ParsedSql parsedSql = parser.parse(sql);
@@ -3454,8 +3807,62 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(
-            "SQL placeholders [1, 2] are not the analyzed parameters [1]; "
+            "Placeholder :term has conflicting types: String and Integer",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * Only a placeholder a cast states the type of is typed outside the clauses
+     * that name a parameter, so an uncast placeholder, and a placeholder a cast
+     * does not cast directly, stay rejected by the placeholder accounting.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "SELECT id FROM users ORDER BY $1|[1]",
+            "SELECT id FROM users ORDER BY CASE WHEN :sort = 'name' THEN name END|[:sort]",
+            "SELECT id FROM users ORDER BY (:sort)::int|[:sort]",
+            "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.id = :id)|[:id]"
+        }
+    )
+    void shouldRejectUncastPlaceholderOutsideTheAnalyzedClauses(String sql, String compiled) {
+        Query query = new Query("ListUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
+        );
+
+        assertEquals(
+            "SQL placeholders %s are not the analyzed parameters []; "
+                .formatted(compiled)
                 + "a placeholder is in an unsupported location",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A cast type sqlcj does not map is rejected naming the placeholder also
+     * where the placeholder stands outside the clauses that name a parameter.
+     */
+    @Test
+    void shouldRejectUnsupportedCastTypeOutsideTheAnalyzedClauses() {
+        String sql = "SELECT id FROM users ORDER BY $1::interval";
+
+        Query query = new Query("ListUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, schema)
+        );
+
+        assertEquals(
+            "Placeholder $1 has unsupported cast type INTERVAL",
             exception.getMessage()
         );
     }

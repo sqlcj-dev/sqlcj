@@ -3147,6 +3147,91 @@ class SqlcjCompilerIntegrationTest {
     }
 
     /**
+     * A repository generated from cast placeholders outside the clauses that
+     * name a parameter compiles: a projected cast, a dynamic sort, a cast page,
+     * a group predicate, and a subquery each contribute one typed method
+     * parameter, in the logical order of their placeholders.
+     */
+    @Test
+    void shouldGenerateCompilableRepositoryForCastPlaceholdersOfEveryClause() throws IOException {
+        generateAndCompile(
+            """
+                CREATE TABLE users
+                (
+                    id   BIGINT NOT NULL,
+                    name VARCHAR(255)
+                );
+
+                CREATE TABLE orders
+                (
+                    id      BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    total   DECIMAL(10, 2)
+                );
+                """,
+            """
+                -- name: ListUsers :many
+                SELECT :label::text AS label, id, name
+                FROM users
+                WHERE id = :id
+                ORDER BY CASE WHEN :sort::text = 'name' THEN name END
+                LIMIT :pageSize::int OFFSET :skip::int;
+
+                -- name: CountUsersByName :many
+                SELECT name, COUNT(*) AS total
+                FROM users
+                GROUP BY name
+                HAVING COUNT(*) > :minimum::bigint;
+
+                -- name: ListBuyers :many
+                SELECT id, name
+                FROM users
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM orders
+                    WHERE orders.user_id = users.id
+                      AND orders.total = :total::numeric
+                )
+                ORDER BY id;
+                """
+        );
+
+        String repository = Files.readString(
+            tempDir
+                .resolve("generated")
+                .resolve("generated")
+                .resolve("UsersRepository.java")
+        );
+
+        assertTrue(
+            repository.contains(
+                "public List<ListUsersResult> listUsers("
+                    + "String label, Long id, String sort, Integer pageSize, Integer skip)"
+            ),
+            repository
+        );
+
+        assertEquals(
+            List.of("String label", "Long id", "String name"),
+            recordComponents(repository, "ListUsersResult")
+        );
+
+        assertTrue(
+            repository.contains(
+                "public List<CountUsersByNameResult> countUsersByName(Long minimum)"
+            ),
+            repository
+        );
+
+        assertTrue(
+            repository.contains(
+                "public List<ListBuyersResult> listBuyers(BigDecimal total)"
+            ),
+            repository
+        );
+    }
+
+    /**
      * A list predicate generates one {@code List} method parameter of the
      * compared column's element type, bound as one server array, in compilable
      * Java.

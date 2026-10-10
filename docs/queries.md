@@ -179,8 +179,12 @@ WHERE author_id = $1;
   and so whether it can read as `NULL` is unknown at compile time.
 - The operand itself is not analyzed and reaches the database as written, so
   PostgreSQL rather than sqlcj checks its column references and its functions.
-  A placeholder in a projection is still rejected, including a cast placeholder
-  such as `$1::int AS x`.
+- A placeholder the projection's cast casts directly, as in
+  `SELECT $1::text AS label`, is one parameter of the query, typed by that cast
+  and named after its own placeholder, so an indexed one is `param<N>` and a
+  named one keeps its name. It binds before a `WHERE` placeholder written after
+  it, and a named one is also the first logical parameter. An uncast
+  placeholder in a projection is still rejected.
 
 ### Predicates
 
@@ -284,9 +288,30 @@ placeholder takes.
 
 `ORDER BY` over direct columns is supported for a stable list order, as in
 `ORDER BY id`. sqlcj rewrites only `$N` parameter tokens; the rest of the
-statement, including the ordering clause, reaches JDBC exactly as written. A
-placeholder in `ORDER BY` is rejected, because it is not an analyzed parameter
-location.
+statement, including the ordering clause, reaches JDBC exactly as written.
+
+An `ORDER BY` placeholder that states its type with a cast is one parameter of
+the query, which is how a sort key chosen by the caller compiles:
+
+```sql
+-- name: ListAuthorsSorted :many
+SELECT id, name
+FROM authors
+ORDER BY
+    CASE WHEN :sort::text = 'name' THEN name END,
+    CASE WHEN :sort::text = 'id' THEN id END;
+```
+
+- `ListAuthorsSorted` generates `listAuthorsSorted(String sort)`, whose one
+  argument is bound at both of its textual positions, so each accepted value
+  returns the rows in its own order.
+- The clause itself is still not analyzed: the ordering expression, including
+  its column references, reaches the database as written, and sqlcj checks only
+  the cast that types the placeholder.
+- An uncast `ORDER BY` placeholder, such as `ORDER BY $1`, is still rejected,
+  because nothing states its type. sqlcj never pastes a column name or a
+  direction into the SQL, so an ordering column chosen at run time stays
+  outside the subset.
 
 ### Pagination
 
@@ -317,10 +342,18 @@ LIMIT $1 OFFSET $2;
 - A named value is named after its placeholder rather than after its clause, so
   `LIMIT :pageSize OFFSET :skip` generates
   `listAuthorPage(Integer pageSize, Integer skip)`.
-- A placeholder in a computed value, as in `LIMIT $1 + 1` or
-  `OFFSET $1 + 1`, in the `LIMIT a, b` form, as in `LIMIT 5, $1`, and in a
-  `FETCH FIRST $1 ROWS ONLY` clause are rejected as unanalyzed placeholder
-  locations.
+- A value that is a cast placeholder keeps its clause's name and takes the type
+  the cast states, so `LIMIT $1::int OFFSET $2::int` generates the same
+  `(Integer limit, Integer offset)` method parameters as the uncast page, while
+  `LIMIT $1::bigint` generates `Long limit` and `LIMIT :pageSize::int`
+  generates `pageSize`.
+- A placeholder in a computed value, as in `LIMIT $1 + 1` or `OFFSET $1 + 1`,
+  in the `LIMIT a, b` form, as in `LIMIT 5, $1`, and in a
+  `FETCH FIRST $1 ROWS ONLY` clause is rejected as an unanalyzed placeholder
+  location unless a cast states its type. A cast placeholder there is one
+  parameter named after its own placeholder rather than after a pagination
+  clause, so `LIMIT LEAST($1::int, 100)` and `FETCH FIRST $1::int ROWS ONLY`
+  each generate `param1`.
 
 ## Writes
 
@@ -480,8 +513,11 @@ string literal, a quoted identifier, or a comment is not a parameter.
 - The Java type of a placeholder is the type of the column it is compared with,
   assigned to, or inserted into.
 - A placeholder written as the direct operand of `::type` or
-  `CAST(... AS type)` is typed by that cast instead, wherever it appears inside
-  a `WHERE` clause, an `INSERT` value, or an `UPDATE` assignment. The cast type
+  `CAST(... AS type)` is typed by that cast instead, wherever it appears in an
+  accepted statement: a projection, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`,
+  `LIMIT`, `OFFSET`, `FETCH`, an `INSERT` value, an `UPDATE` or
+  `DO UPDATE` assignment, a `WITH` body, and a subquery at any depth, such as
+  `EXISTS`, `IN (SELECT ...)`, or a scalar subquery. The cast type
   may be any type a column may declare and sqlcj maps, including a declared
   enum name, written unquoted and matched case-insensitively, and a
   one-dimensional array, which binds a `List`. A cast type sqlcj does not map,
@@ -493,9 +529,15 @@ string literal, a quoted identifier, or a comment is not a parameter.
   `ILIKE` pattern, which is the shape that accepts an uncast pattern, the
   compared column of an analyzed `= ANY` list, or an inserted or assigned
   column — so `name = $1::text` names `name` as
-  `name = $1` does. Every other indexed cast placeholder is named `param<N>`
+  `name = $1` does. An indexed cast placeholder that is the whole `LIMIT` row
+  count or `OFFSET` value is named `limit` or `offset`, as an uncast one is.
+  Every other indexed cast placeholder is named `param<N>`
   after its own index, as in `param1` for `$1`, and colliding names take the
   usual numeric suffix.
+- Every placeholder occurrence binds in textual order across the clauses and
+  nesting depths above, whatever order sqlcj analyzes those clauses in, so a
+  projected placeholder binds before a `WHERE` one and
+  `OFFSET $2::int LIMIT $1::int` binds the offset first.
 - Occurrences of one placeholder may mix a cast and an uncast location, and the
   parameter keeps the name and type of its first occurrence, so
   `(:name::text IS NULL OR name = :name)` is one `String` parameter named
@@ -503,8 +545,9 @@ string literal, a quoted identifier, or a comment is not a parameter.
 - Mixing `$N` and `:name` placeholders in one query is rejected, as are
   anonymous `?` placeholders, a qualified name such as `:a.b`, a quoted name
   such as `:"x"`, and an `&name` placeholder.
-- A placeholder in a location sqlcj does not analyze — for example `ORDER BY $1`
-  or `lower(name) = :name` — is rejected rather than left unbound.
+- A placeholder that neither a clause nor a cast types — for example
+  `ORDER BY $1`, `lower(name) = :name`, or `(:x)::int`, whose placeholder is not
+  the direct operand of its cast — is rejected rather than left unbound.
 
 ### Logical order versus textual order
 
@@ -773,7 +816,9 @@ name, and its header line.
 - A `FROM` item that is not a table, a comma-separated source list, a join that
   is not a plain inner or left join, a join predicate that is not one qualified
   equality, and a set operation such as `UNION`.
-- A placeholder in a location sqlcj does not analyze, including `ORDER BY $1`, a
+- An uncast placeholder in a location sqlcj does not analyze, including
+  `ORDER BY $1`, a projection such as `SELECT $1 AS x`, a grouping list, a
+  `HAVING` predicate, a subquery, a
   named placeholder under a function such as `lower(name) = :name`, a computed
   `LIKE` pattern such as
   `'%' || $1 || '%'`, a placeholder as the
@@ -782,10 +827,10 @@ name, and its header line.
   `LIMIT $1 + 1` or `OFFSET $1 + 1`, a `LIMIT a, b` row count such as
   `LIMIT 5, $1`, a placeholder inside a write value such as
   `COALESCE($2, bio)`, and a `FETCH FIRST $1 ROWS ONLY` clause, so dynamic `IN`
-  expansion is unavailable. A cast does not widen these locations: a cast
-  placeholder in a projection, `ORDER BY`, a join condition, or a pagination
-  value, such as `ORDER BY $1::int`, stays rejected, as does a placeholder that
-  is not the direct operand of its cast, such as `(:x)::int`.
+  expansion is unavailable. A cast states the type of such a placeholder in
+  every one of those locations except a join condition, where any placeholder
+  stays rejected, and it does not accept a placeholder that is not the direct
+  operand of its cast, such as `(:x)::int`.
 - A cast type sqlcj does not map, such as `$1::interval` or a
   multi-dimensional `$1::int[][]`, which is rejected naming the placeholder and
   the declared type, or the result column and the declared type when the cast
@@ -842,6 +887,12 @@ them:
 - `UPDATE ... FROM` and `DELETE ... USING` on a non-returning `:exec` write,
 - the unique index an accepted `ON CONFLICT` target matches, and the column
   references of an `EXCLUDED` value that is not exactly `EXCLUDED.column`.
+
+A clause that is not analyzed still binds the placeholders a cast types inside
+it, in textual order, and nothing else of it is checked. A cast placeholder in a
+`GROUP BY`, `HAVING`, `ORDER BY`, `WITH` body, or subquery therefore generates
+one typed method parameter while PostgreSQL rather than sqlcj checks the
+surrounding expression, including its tables and columns.
 
 sqlcj itself provides no macros, dynamic `IN` expansion, or query-building API.
 The `= ANY` list predicate is the only analyzed array operator. An array
@@ -965,12 +1016,39 @@ Reads:
   `QueryAnalyzerTest.shouldResolvePaginationParametersInTextualBindingOrder`,
   `QueryAnalyzerTest.shouldResolveOffsetParameterBesideUnanalyzedRowCount`,
   `QueryAnalyzerTest.shouldNotCreateParametersForLiteralPagination`,
-  `QueryAnalyzerTest.shouldNameNamedPaginationParameterAfterItsPlaceholder`, and
+  `QueryAnalyzerTest.shouldNameNamedPaginationParameterAfterItsPlaceholder`,
+  `QueryAnalyzerTest.shouldResolveCastPaginationParameters`,
+  `QueryAnalyzerTest.shouldResolveCastPaginationParametersInTextualBindingOrder`,
+  `QueryAnalyzerTest.shouldTypeCastPaginationParameterByItsCast`, and
   `QueryAnalyzerTest.shouldRejectPlaceholderInUnsupportedPaginationValue` cover
-  pagination, and
-  `PostgresIntegrationTest.shouldExecuteGeneratedPaginationAgainstPostgres`
-  executes a `LIMIT ... OFFSET ...` page and the same page written as
-  `OFFSET ... LIMIT ...` against PostgreSQL 16.
+  pagination, including the cast values and their clause names, and
+  `PostgresIntegrationTest.shouldExecuteGeneratedPaginationAgainstPostgres` and
+  `PostgresIntegrationTest.shouldExecuteGeneratedCastPaginationAgainstPostgres`
+  execute a `LIMIT ... OFFSET ...` page and the same page written as
+  `OFFSET ... LIMIT ...`, uncast and cast, against PostgreSQL 16.
+- `QueryAnalyzerTest.shouldResolveCastPlaceholdersOfOrderBy`,
+  `QueryAnalyzerTest.shouldNameIndexedCastPlaceholderOfOrderByAfterItsIndex`,
+  `QueryAnalyzerTest.shouldResolveCastPlaceholderOfEveryReadClause`,
+  `QueryAnalyzerTest.shouldNameIndexedCastPlaceholderOfGroupPredicateAfterItsIndex`,
+  `QueryAnalyzerTest.shouldResolveCastPlaceholderOfSubquery`,
+  `QueryAnalyzerTest.shouldResolveCastPlaceholderOfWithBody`,
+  `QueryAnalyzerTest.shouldShareOneParameterBetweenAgreeingCastsOfDifferentClauses`,
+  `QueryAnalyzerTest.shouldRejectConflictingCastsOfDifferentClauses`,
+  `QueryAnalyzerTest.shouldRejectUncastPlaceholderOutsideTheAnalyzedClauses`, and
+  `QueryAnalyzerTest.shouldRejectUnsupportedCastTypeOutsideTheAnalyzedClauses`
+  cover the cast placeholders of the ordering, grouping, group-predicate,
+  pagination, `FETCH`, `WITH`, and subquery clauses, their names, their shared
+  and conflicting repetitions, and the uncast, indirect, and unmapped forms that
+  stay rejected, while
+  `SqlParserTest.shouldReportPlaceholderOccurrencesInTextualOrder` and
+  `SqlParserTest.shouldReportTheCastThatCastsAPlaceholderDirectly` cover the
+  syntax-level occurrence order and the cast each occurrence carries,
+  `SqlcjCompilerIntegrationTest.shouldGenerateCompilableRepositoryForCastPlaceholdersOfEveryClause`
+  compiles a repository generated from those clauses, and
+  `PostgresIntegrationTest.shouldExecuteGeneratedDynamicSortAgainstPostgres` and
+  `PostgresIntegrationTest.shouldExecuteGeneratedExistsSubqueryAgainstPostgres`
+  execute a dynamic sort over two sort keys and an `EXISTS` membership check
+  against PostgreSQL 16.
 - `QueryAnalyzerTest.shouldResolveScalarCountColumnFromItsAlias`,
   `QueryAnalyzerTest.shouldResolveScalarCountBesidePredicateParameter`,
   `QueryAnalyzerTest.shouldResolveScalarCountBesideDirectColumn`,
@@ -989,11 +1067,14 @@ Reads:
 - `QueryAnalyzerTest.shouldResolveCastProjectionColumnFromItsAlias`,
   `QueryAnalyzerTest.shouldResolveEnumCastProjectionColumn`,
   `QueryAnalyzerTest.shouldResolveArrayCastProjectionColumn`,
-  `QueryAnalyzerTest.shouldRejectUnsupportedCastProjectionForm`, and
-  `QueryAnalyzerTest.shouldRejectCastPlaceholderProjection` cover both cast
+  `QueryAnalyzerTest.shouldRejectUnsupportedCastProjectionForm`,
+  `QueryAnalyzerTest.shouldResolveCastPlaceholderProjection`, and
+  `QueryAnalyzerTest.shouldNumberNamedProjectionPlaceholderBeforeThePredicateOne`
+  cover both cast
   spellings and both alias spellings, the nullable column of the cast type
   including a declared enum and an array, the missing alias and the unmapped
-  cast type, and the projected placeholder that stays rejected, and
+  cast type, and the projected cast placeholder, its name, and its logical and
+  binding positions, and
   `PostgresIntegrationTest.shouldExecuteGeneratedCastProjectionAgainstPostgres`
   executes a `:one` cast `SUM` against PostgreSQL 16 whose `BigDecimal`
   component is the sum and `null` when no row matches.
@@ -1130,8 +1211,7 @@ Parameters:
   `QueryAnalyzerTest.shouldResolveCastParametersOfInsertValues` cover the cast
   types, the analyzed cast locations, and the name a cast placeholder takes,
   while `QueryAnalyzerTest.shouldRejectUnsupportedCastType`,
-  `QueryAnalyzerTest.shouldRejectCastOccurrenceWithConflictingType`,
-  `QueryAnalyzerTest.shouldRejectCastPlaceholderInUnanalyzedLocation`, and the
+  `QueryAnalyzerTest.shouldRejectCastOccurrenceWithConflictingType`, and the
   cast rows of
   `QueryAnalyzerTest.shouldRejectUnsupportedNamedPlaceholderForm` cover the
   cast rejections.
