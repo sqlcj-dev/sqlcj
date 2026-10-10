@@ -120,6 +120,39 @@ order the files are read in.
   unqualified name always belongs to the one namespace sqlcj models, whatever a
   `SET search_path` statement in the snapshot says.
 
+A `pg_dump --schema-only` file is such a snapshot and loads unchanged: it is
+configured as one schema file, and nothing in it has to be edited, removed, or
+reordered first. This is the schema input of a service that does not keep its
+schema as SQL migrations, for example one with a Liquibase changelog or a
+JPA-generated schema.
+
+A dump states much more than the tables it creates, and sqlcj ignores all of it
+rather than rejecting it:
+
+- the `\restrict` and `\unrestrict` meta-command lines recent releases write,
+  each with a fresh key, and every other psql meta-command line,
+- the `SET` preamble and the `SELECT pg_catalog.set_config(...)` call, including
+  `SET search_path`,
+- the identity form it writes for every identity column,
+  `ALTER TABLE ... ALTER COLUMN ... ADD GENERATED ... AS IDENTITY (SEQUENCE NAME ...)`,
+  which sqlcj's parser cannot read but which cannot change a column either, and
+  its sequences and `SET DEFAULT nextval(...)` statements,
+- its constraint and index statements, its `OWNER TO` statements, and its
+  grants, policies, comments, extensions, domains, composite types, functions,
+  triggers, views, and materialized views, and
+- the tables, types, and statements of every schema other than `public`.
+
+A dump writes a partition as a plain `CREATE TABLE` followed by
+`ALTER TABLE ONLY ... ATTACH PARTITION`, so the partition is modeled with its
+own columns and then linked to its partitioned table, and it qualifies every
+table, type, and column type with `public.`, which is the one namespace sqlcj
+models. A dump of a database built by a migration history that changes the
+schema only through statements sqlcj reads therefore generates the same Java as
+that history. A schema change the history makes indirectly, such as DDL inside
+a `DO` block or a function body, or a column dropped by
+`DROP TYPE ... CASCADE`, stands in the database and in its dump but not in the
+history sqlcj reads; see [Ignored Statements](#ignored-statements).
+
 ## Supported Column Types
 
 Type spellings are matched case-insensitively, after parenthesized type
@@ -796,6 +829,24 @@ sqlcj: Invalid query 'ListTags' in /home/dev/project/queries.sql at line 5: Colu
 ```
 
 ## Verified by
+
+Schema snapshot input:
+
+- `ReferenceServiceIntegrationTest.shouldGenerateIdenticalRepositoriesFromHistorySnapshotAndDump`
+  applies the reference service's ten migrations to PostgreSQL 16 with `psql`,
+  runs `pg_dump --schema-only` against the migrated database, and generates one
+  byte-identical, compiling output tree, manifest included, from the migration
+  history, the hand-written snapshot, and that dump.
+- `ReferenceServiceIntegrationTest.shouldExecuteTheGeneratedReferenceServiceQueries`
+  executes the generated repository against the migrated database, including the
+  replaced enum, the renamed enum label, an optimistic update, the partition
+  that follows the column its partitioned table gained, and the `LIKE` copy that
+  does not.
+- `ReferenceServiceIntegrationTest.shouldRejectTheUnsupportedSetDataTypeMigration`
+  and
+  `ReferenceServiceIntegrationTest.shouldRejectAQueryOnASecondSchemaTable`
+  cover the located `SET DATA TYPE` diagnostic and the unknown-table diagnostic
+  of a query that names a table of the reporting schema, each writing no file.
 
 Type table:
 
