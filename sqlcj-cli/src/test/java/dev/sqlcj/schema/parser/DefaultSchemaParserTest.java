@@ -1279,9 +1279,6 @@ class DefaultSchemaParserTest {
                 + "|Unsupported ALTER TABLE action: ALTER COLUMN name SET FOO 1 at line 1",
             "ALTER TABLE users ALTER COLUMN name text;"
                 + "|Unsupported ALTER TABLE action: ALTER COLUMN name text at line 1",
-            "ALTER TYPE status RENAME TO state;|Unsupported ALTER TYPE action at line 1",
-            "ALTER TYPE status RENAME VALUE 'draft' TO 'new';"
-                + "|Unsupported ALTER TYPE action at line 1",
             "ALTER FOREIGN TABLE ft ADD COLUMN x integer;"
                 + "|Unsupported schema statement: ALTER FOREIGN TABLE at line 1",
             "alter foreign table ft add column x integer;"
@@ -2226,11 +2223,20 @@ class DefaultSchemaParserTest {
         delimiter = '|',
         quoteCharacter = '"',
         value = {
-            "CREATE TYPE stage_setting AS ENUM ('covered');|Type already exists in schema: stage_setting",
             "CREATE TYPE shelf_state AS ENUM ('new', 'new');|Label already exists in type shelf_state: new",
             "ALTER TYPE shelf_state ADD VALUE 'stocked';|Type not found in schema: shelf_state",
             "ALTER TYPE stage_setting ADD VALUE 'indoor';|Label already exists in type stage_setting: indoor",
-            "ALTER TYPE stage_setting ADD VALUE 'hybrid' AFTER 'missing';|Label not found in type stage_setting: missing"
+            "ALTER TYPE stage_setting ADD VALUE 'hybrid' AFTER 'missing';|Label not found in type stage_setting: missing",
+            "ALTER TYPE shelf_state RENAME VALUE 'stocked' TO 'kept';"
+                + "|Type not found in schema: shelf_state",
+            "ALTER TYPE stage_setting RENAME VALUE 'missing' TO 'covered';"
+                + "|Label not found in type stage_setting: missing",
+            "ALTER TYPE stage_setting RENAME VALUE 'indoor' TO 'outdoor';"
+                + "|Label already exists in type stage_setting: outdoor",
+            "ALTER TYPE public.stage_setting RENAME TO stage;"
+                + "|Type not found in schema: public.stage_setting",
+            "ALTER TYPE public.stage_setting SET SCHEMA archive;"
+                + "|Type not found in schema: public.stage_setting"
         }
     )
     void shouldReportTheEnumStatementItCannotApply(String statement, String message) {
@@ -2398,6 +2404,274 @@ class DefaultSchemaParserTest {
         assertEquals(
             List.of(new Column("setting", ColumnType.ENUM, false, null, "stage_setting")),
             table(schema, "stages").columns()
+        );
+    }
+
+    /**
+     * {@code ALTER TYPE ... RENAME VALUE} renames one label in its position, so
+     * the modeled labels keep PostgreSQL's sort order.
+     */
+    @Test
+    void shouldRenameAnEnumLabelInItsPosition() {
+        Schema schema = parser.parse(
+            parser.parse(
+                enumSchema(),
+                "ALTER TYPE stage_setting ADD VALUE 'covered' BEFORE 'outdoor';"
+            ),
+            "ALTER TYPE stage_setting RENAME VALUE 'covered' TO 'partly covered';"
+        );
+
+        assertEquals(
+            List.of(
+                new EnumType("stage_setting", List.of("indoor", "partly covered", "outdoor"))
+            ),
+            schema.enums()
+        );
+    }
+
+    /**
+     * {@code ALTER TYPE ... RENAME TO} renames the enum type in its position,
+     * keeping its labels, and the columns of that type follow it, scalar and
+     * array alike. A column of another enum type keeps its own type.
+     */
+    @Test
+    void shouldRenameAModeledEnumAndTheColumnsOfIt() {
+        Schema schema = parser.parse(
+            parser.parse(
+                parser.parse(enumSchema(), "CREATE TYPE shelf_state AS ENUM ('stocked');"),
+                """
+                    CREATE TABLE stages (
+                        setting       stage_setting NOT NULL,
+                        past_settings stage_setting[],
+                        state         shelf_state
+                    );
+                    """
+            ),
+            "ALTER TYPE stage_setting RENAME TO stage_mood;"
+        );
+
+        assertEquals(
+            List.of(
+                new EnumType("stage_mood", List.of("indoor", "outdoor")),
+                new EnumType("shelf_state", List.of("stocked"))
+            ),
+            schema.enums()
+        );
+
+        assertEquals(
+            List.of(
+                new Column("setting", ColumnType.ENUM, false, null, "stage_mood"),
+                new Column("past_settings", ColumnType.ENUM, true, null, "stage_mood", true),
+                new Column("state", ColumnType.ENUM, true, null, "shelf_state")
+            ),
+            table(schema, "stages").columns()
+        );
+    }
+
+    /**
+     * Both names of a rename are read without their SQL identifier delimiters,
+     * as every other modeled name is.
+     */
+    @Test
+    void shouldUnquoteBothNamesOfARenamedEnumType() {
+        Schema schema = parser.parse(
+            parser.parse(enumSchema(), "CREATE TABLE stages (setting stage_setting);"),
+            "ALTER TYPE \"stage_setting\" RENAME TO \"Stage Mood\";"
+        );
+
+        assertEquals(
+            List.of(new EnumType("Stage Mood", List.of("indoor", "outdoor"))),
+            schema.enums()
+        );
+
+        assertEquals(
+            List.of(new Column("setting", ColumnType.ENUM, true, null, "Stage Mood")),
+            table(schema, "stages").columns()
+        );
+    }
+
+    /**
+     * A {@code CREATE TYPE ... AS ENUM} of a name a modeled enum already has
+     * replaces that enum in its position, because the {@code DROP TYPE} that
+     * freed the name is never seen.
+     */
+    @Test
+    void shouldReplaceAModeledEnumByCreateTypeInItsPosition() {
+        Schema schema = parser.parse(
+            parser.parse(enumSchema(), "CREATE TYPE shelf_state AS ENUM ('stocked');"),
+            "CREATE TYPE stage_setting AS ENUM ('indoor', 'covered', 'outdoor');"
+        );
+
+        assertEquals(
+            List.of(
+                new EnumType("stage_setting", List.of("indoor", "covered", "outdoor")),
+                new EnumType("shelf_state", List.of("stocked"))
+            ),
+            schema.enums()
+        );
+    }
+
+    /**
+     * The replace-an-enum migration that renames the old type away, declares
+     * the new one under the original name, and retypes the column loads, and
+     * the column ends as a column of the newly declared type. The
+     * {@code DROP TYPE} of the renamed type is ignored, so that type stays
+     * modeled.
+     */
+    @Test
+    void shouldLoadTheMigrationThatRenamesTheReplacedEnumAway() {
+        Schema schema = parser.parse(
+            parser.parse(
+                enumSchema(),
+                "CREATE TABLE stages (setting stage_setting NOT NULL);"
+            ),
+            """
+                ALTER TYPE stage_setting RENAME TO stage_setting_old;
+
+                CREATE TYPE stage_setting AS ENUM ('indoor', 'covered', 'outdoor');
+
+                ALTER TABLE stages
+                    ALTER COLUMN setting TYPE stage_setting USING setting::text::stage_setting;
+
+                DROP TYPE stage_setting_old;
+                """
+        );
+
+        assertEquals(
+            List.of(
+                new EnumType("stage_setting_old", List.of("indoor", "outdoor")),
+                new EnumType("stage_setting", List.of("indoor", "covered", "outdoor"))
+            ),
+            schema.enums()
+        );
+
+        assertEquals(
+            List.of(new Column("setting", ColumnType.ENUM, false, null, "stage_setting")),
+            table(schema, "stages").columns()
+        );
+    }
+
+    /**
+     * The replace-an-enum migration that declares the new type beside the old
+     * one, retypes the columns, and renames the new type onto the original name
+     * loads: the one modeled enum carries the original name and the new labels,
+     * and both columns name it again.
+     */
+    @Test
+    void shouldLoadTheMigrationThatRenamesTheNewEnumOntoTheReplacedName() {
+        Schema schema = parser.parse(
+            parser.parse(
+                enumSchema(),
+                """
+                    CREATE TABLE stages (
+                        setting       stage_setting NOT NULL,
+                        past_settings stage_setting[]
+                    );
+                    """
+            ),
+            """
+                CREATE TYPE stage_setting_new AS ENUM ('indoor', 'covered', 'outdoor');
+
+                ALTER TABLE stages
+                    ALTER COLUMN setting TYPE stage_setting_new
+                        USING setting::text::stage_setting_new;
+
+                ALTER TABLE stages
+                    ALTER COLUMN past_settings TYPE stage_setting_new[]
+                        USING past_settings::text[]::stage_setting_new[];
+
+                DROP TYPE stage_setting;
+
+                ALTER TYPE stage_setting_new RENAME TO stage_setting;
+                """
+        );
+
+        assertEquals(
+            List.of(
+                new EnumType("stage_setting", List.of("indoor", "covered", "outdoor"))
+            ),
+            schema.enums()
+        );
+
+        assertEquals(
+            List.of(
+                new Column("setting", ColumnType.ENUM, false, null, "stage_setting"),
+                new Column("past_settings", ColumnType.ENUM, true, null, "stage_setting", true)
+            ),
+            table(schema, "stages").columns()
+        );
+    }
+
+    /**
+     * {@code OWNER TO} and the attribute actions, which belong to a composite
+     * type, cannot change a modeled enum and are ignored without the stated
+     * type being resolved at all, so a type sqlcj does not model, qualified or
+     * not, does not fail.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "ALTER TYPE stage_setting OWNER TO app;",
+            "ALTER TYPE status OWNER TO app;",
+            "ALTER TYPE public.status OWNER TO app;",
+            "ALTER TYPE stage_setting RENAME ATTRIBUTE a TO b;",
+            "ALTER TYPE status RENAME ATTRIBUTE a TO b;",
+            "ALTER TYPE stage_setting ADD ATTRIBUTE c text;",
+            "ALTER TYPE stage_setting DROP ATTRIBUTE c;",
+            "ALTER TYPE stage_setting ALTER ATTRIBUTE c TYPE int;",
+            "ALTER TYPE status ADD ATTRIBUTE c text;"
+        }
+    )
+    void shouldIgnoreTheAlterTypeActionsThatCannotChangeAModeledEnum(String statement) {
+        Schema schema = parser.parse(enumSchema(), statement);
+
+        assertEquals(
+            List.of(new EnumType("stage_setting", List.of("indoor", "outdoor"))),
+            schema.enums()
+        );
+    }
+
+    /**
+     * {@code RENAME TO} and {@code SET SCHEMA} of a type sqlcj does not model
+     * are ignored, because such a type is none of its enum types.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "ALTER TYPE status RENAME TO state;",
+            "ALTER TYPE status SET SCHEMA archive;"
+        }
+    )
+    void shouldIgnoreRenamingAndMovingATypeItDoesNotModel(String statement) {
+        Schema schema = parser.parse(enumSchema(), statement);
+
+        assertEquals(
+            List.of(new EnumType("stage_setting", List.of("indoor", "outdoor"))),
+            schema.enums()
+        );
+    }
+
+    /**
+     * {@code SET SCHEMA} of a modeled enum is rejected, because its columns
+     * keep the type in a namespace sqlcj does not model. The failure names the
+     * action and the line its own statement begins on.
+     */
+    @Test
+    void shouldRejectSetSchemaOfAModeledEnum() {
+        Schema schema = enumSchema();
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> parser.parse(schema, """
+                ALTER TYPE stage_setting OWNER TO app;
+
+                ALTER TYPE stage_setting SET SCHEMA archive;
+                """)
+        );
+
+        assertEquals(
+            "Unsupported ALTER TYPE action: SET SCHEMA archive at line 3",
+            exception.getMessage()
         );
     }
 

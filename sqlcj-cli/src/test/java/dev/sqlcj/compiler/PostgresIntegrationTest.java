@@ -205,6 +205,42 @@ class PostgresIntegrationTest {
         """;
 
     /**
+     * A snapshot that replaces its enum type the way a migration does: the
+     * replacement is declared beside the original type, the enum column and the
+     * enum array column are retyped, the original type is dropped, and the
+     * replacement is renamed onto its name. One of its labels is then renamed,
+     * so PostgreSQL and sqlcj both end with one type named
+     * {@code stage_setting} carrying the replacement's labels.
+     */
+    private static final String REPLACED_STAGE_SETTING_SCHEMA = """
+        CREATE TYPE stage_setting AS ENUM ('indoor', 'outdoor');
+
+        CREATE TABLE stage_events
+        (
+            id      BIGINT PRIMARY KEY,
+            setting stage_setting,
+            past    stage_setting[],
+            title   VARCHAR(255)
+        );
+
+        CREATE TYPE stage_setting_new AS ENUM ('indoor', 'covered', 'outdoor');
+
+        ALTER TABLE stage_events
+            ALTER COLUMN setting TYPE stage_setting_new
+                USING setting::text::stage_setting_new;
+
+        ALTER TABLE stage_events
+            ALTER COLUMN past TYPE stage_setting_new[]
+                USING past::text[]::stage_setting_new[];
+
+        DROP TYPE stage_setting;
+
+        ALTER TYPE stage_setting_new RENAME TO stage_setting;
+
+        ALTER TYPE stage_setting RENAME VALUE 'covered' TO 'partly covered';
+        """;
+
+    /**
      * A snapshot declaring a one-dimensional array of every element type sqlcj
      * maps: each mapped scalar type other than {@code BYTEA}, {@code JSON}, and
      * {@code JSONB}, and a declared enum type.
@@ -507,6 +543,7 @@ class PostgresIntegrationTest {
         execute("DROP TABLE IF EXISTS stage_events");
         execute("DROP TABLE IF EXISTS array_values");
         execute("DROP TYPE IF EXISTS stage_setting");
+        execute("DROP TYPE IF EXISTS stage_setting_new");
         execute("DROP TABLE IF EXISTS albums");
         execute("DROP TABLE IF EXISTS studios");
         execute("DROP TYPE IF EXISTS album_kind");
@@ -2003,6 +2040,88 @@ class PostgresIntegrationTest {
                     Optional.class,
                     findMethod.invoke(repository, new Object[] { null })
                 ).isEmpty()
+            );
+        }
+    }
+
+    /**
+     * Proves the replace-an-enum migration end to end: the schema that renames
+     * the replacement type onto the replaced name and then renames one of its
+     * labels is run as PostgreSQL DDL, and the generated enum carries the
+     * labels PostgreSQL ends with, in its own sort order. A list predicate over
+     * the retyped column binds its labels as a server array of the renamed
+     * type, which PostgreSQL would reject under the replacement's own name, and
+     * the enum array column is read back as constants of the generated enum.
+     */
+    @Test
+    void shouldExecuteGeneratedCodeOverAReplacedEnumTypeAgainstPostgres() throws Exception {
+        execute(REPLACED_STAGE_SETTING_SCHEMA);
+
+        Path classesDirectory = generateAndCompile(
+            REPLACED_STAGE_SETTING_SCHEMA,
+            """
+                -- name: ListStageEventsBySettings :many
+                SELECT id, setting, past, title
+                FROM stage_events
+                WHERE setting = ANY($1)
+                ORDER BY id;
+                """
+        );
+
+        execute("""
+            INSERT INTO stage_events (id, setting, past, title)
+            VALUES
+                (1, 'indoor', '{indoor}', 'Indoor Stage'),
+                (2, 'partly covered', '{indoor,outdoor}', 'Covered Stage'),
+                (3, 'outdoor', '{outdoor,indoor}', 'Outdoor Stage')
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> stageSetting = Class.forName(
+                "generated.StageSetting",
+                true,
+                classLoader
+            );
+
+            Object[] constants = stageSetting.getEnumConstants();
+
+            assertEquals(
+                List.of("INDOOR", "PARTLY_COVERED", "OUTDOOR"),
+                Arrays.stream(constants).map(Object::toString).toList()
+            );
+
+            Method label = stageSetting.getMethod("label");
+
+            List<Object> labels = new ArrayList<>();
+
+            for (Object constant : constants) {
+                labels.add(label.invoke(constant));
+            }
+
+            assertEquals(enumLabels("stage_setting"), labels);
+
+            Object repository = newRepository(classLoader);
+
+            Object rows = repository.getClass()
+                .getMethod("listStageEventsBySettings", List.class)
+                .invoke(repository, List.of(constants[0], constants[2]));
+
+            List<Object> titles = new ArrayList<>();
+
+            for (Object row : (List<?>) rows) {
+                titles.add(component(row, "title"));
+            }
+
+            assertEquals(List.of("Indoor Stage", "Outdoor Stage"), titles);
+
+            Object first = ((List<?>) rows).get(0);
+
+            assertEquals(constants[0], component(first, "setting"));
+            assertEquals(List.of(constants[0]), component(first, "past"));
+
+            assertEquals(
+                List.of(constants[2], constants[0]),
+                component(((List<?>) rows).get(1), "past")
             );
         }
     }
