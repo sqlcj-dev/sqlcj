@@ -21,6 +21,7 @@ import net.sf.jsqlparser.statement.alter.AlterType;
 import net.sf.jsqlparser.statement.create.table.CheckConstraint;
 import net.sf.jsqlparser.statement.create.table.ColumnDefinition;
 import net.sf.jsqlparser.statement.create.table.CreateTable;
+import net.sf.jsqlparser.statement.create.table.ExcludeConstraint;
 import net.sf.jsqlparser.statement.create.table.ForeignKeyIndex;
 import net.sf.jsqlparser.statement.create.table.Index;
 import net.sf.jsqlparser.statement.create.type.CreateType;
@@ -268,10 +269,11 @@ public class DefaultSchemaParser implements SchemaParser {
 
     /**
      * Reports whether the tokens from {@code index} on are {@code words},
-     * compared case-insensitively.
+     * compared case-insensitively. A list the parser did not state at all states
+     * no words.
      */
     private boolean statesWords(List<String> tokens, int index, String... words) {
-        if (index + words.length > tokens.size()) {
+        if (tokens == null || index + words.length > tokens.size()) {
             return false;
         }
 
@@ -519,10 +521,12 @@ public class DefaultSchemaParser implements SchemaParser {
     }
 
     /**
-     * Applies one {@code ALTER TABLE} action and returns the altered table. A
-     * constraint action is accepted and leaves the table unchanged; an action
-     * that cannot be recognized as one of those forms, such as
-     * {@code SET DEFAULT}, is rejected naming the statement it belongs to.
+     * Applies one {@code ALTER TABLE} action and returns the altered table.
+     *
+     * <p>An action that cannot change a modeled column's existence, name, type,
+     * or nullability is accepted and leaves the table unchanged. An action that
+     * would change a column in a way sqlcj does not model, and an action sqlcj
+     * does not recognize, is rejected naming the action's own SQL.
      */
     private Table applyAlterExpression(
         int line,
@@ -554,11 +558,105 @@ public class DefaultSchemaParser implements SchemaParser {
             return alterColumns(line, expression, enums, table);
         }
 
-        if (isIgnoredConstraintAction(expression)) {
+        if (isIgnoredConstraintAction(expression) || isIgnoredTableAction(operation)) {
             return table;
         }
 
-        throw unsupportedAlterTableAction(line);
+        if (operation == AlterOperation.UNSPECIFIC) {
+            return ignoreUnspecificActions(line, expression, table);
+        }
+
+        throw unsupportedAlterTableAction(line, expression);
+    }
+
+    /**
+     * Reports whether one {@code ALTER TABLE} action is a table-level action the
+     * parser has a form of its own for that cannot change a column: the
+     * row-level-security switches and attaching or detaching a partition.
+     */
+    private boolean isIgnoredTableAction(AlterOperation operation) {
+        return switch (operation) {
+            case ENABLE_ROW_LEVEL_SECURITY,
+                DISABLE_ROW_LEVEL_SECURITY,
+                FORCE_ROW_LEVEL_SECURITY,
+                NO_FORCE_ROW_LEVEL_SECURITY,
+                ATTACH_PARTITION,
+                DETACH_PARTITION -> true;
+            default -> false;
+        };
+    }
+
+    /**
+     * Accepts the actions the parser has no form of its own for, which it
+     * reports as one piece of text running to the end of the statement, so
+     * several written actions may stand in it. The text is lexed with the
+     * parser's own lexer and split at the commas outside parentheses, and each
+     * of its actions must begin as a table-level action that cannot change a
+     * column. The first action that does not is rejected, so a modeled action
+     * written after such an action is rejected rather than silently skipped.
+     */
+    private Table ignoreUnspecificActions(int line, AlterExpression expression, Table table) {
+        String specifier = expression.getOptionalSpecifier();
+
+        if (specifier == null) {
+            throw unsupportedAlterTableAction(line, expression);
+        }
+
+        for (List<String> action : topLevelActions(SchemaSourceSplitter.tokens(specifier))) {
+            if (!ignoresTableLevelAction(action)) {
+                throw unsupportedAlterTableAction(line, String.join(" ", action));
+            }
+        }
+
+        return table;
+    }
+
+    /**
+     * Reports whether one action of the unspecific text begins as a
+     * PostgreSQL 16 table-level action that cannot change a column: ownership,
+     * trigger and rule switches, constraint validation, replica identity,
+     * clustering, storage parameters, the tablespace, logging, the access
+     * method, inheritance, and the typed-table form. {@code SET SCHEMA} is not
+     * among them, because it moves the table out of the namespace sqlcj models.
+     */
+    private boolean ignoresTableLevelAction(List<String> action) {
+        return statesWords(action, 0, "OWNER", "TO")
+            || switchesTriggerOrRule(action)
+            || statesWords(action, 0, "VALIDATE", "CONSTRAINT")
+            || statesWords(action, 0, "REPLICA", "IDENTITY")
+            || statesWords(action, 0, "CLUSTER", "ON")
+            || statesWords(action, 0, "SET", "WITHOUT", "CLUSTER")
+            || statesWords(action, 0, "SET", "WITHOUT", "OIDS")
+            || statesWords(action, 0, "SET", "(")
+            || statesWords(action, 0, "RESET", "(")
+            || statesWords(action, 0, "SET", "TABLESPACE")
+            || statesWords(action, 0, "SET", "LOGGED")
+            || statesWords(action, 0, "SET", "UNLOGGED")
+            || statesWords(action, 0, "SET", "ACCESS", "METHOD")
+            || statesWords(action, 0, "INHERIT")
+            || statesWords(action, 0, "NO", "INHERIT")
+            || statesWords(action, 0, "OF")
+            || statesWords(action, 0, "NOT", "OF");
+    }
+
+    /**
+     * Reports whether one action switches a trigger or a rule:
+     * {@code ENABLE} or {@code DISABLE}, and {@code ENABLE REPLICA} or
+     * {@code ENABLE ALWAYS}, of either object.
+     */
+    private boolean switchesTriggerOrRule(List<String> action) {
+        for (String object : List.of("TRIGGER", "RULE")) {
+            if (
+                statesWords(action, 0, "ENABLE", object)
+                    || statesWords(action, 0, "DISABLE", object)
+                    || statesWords(action, 0, "ENABLE", "REPLICA", object)
+                    || statesWords(action, 0, "ENABLE", "ALWAYS", object)
+            ) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -597,7 +695,9 @@ public class DefaultSchemaParser implements SchemaParser {
 
     /**
      * Applies one {@code ALTER COLUMN} action: a new type, which keeps the
-     * column's position and nullability, or a nullability change.
+     * column's position and nullability, or a nullability change. A column
+     * action that cannot change the column sqlcj models leaves the table
+     * unchanged, without its column being resolved.
      */
     private Table alterColumns(
         int line,
@@ -605,12 +705,20 @@ public class DefaultSchemaParser implements SchemaParser {
         List<EnumType> enums,
         Table table
     ) {
+        if (isNotEmpty(expression.getColumnSetDefaultList()) || isNotEmpty(expression.getColumnDropDefaultList())) {
+            return table;
+        }
+
         if (isNotEmpty(expression.getColDataTypeList())) {
-            if (!statesNewTypes(expression.getColDataTypeList())) {
-                throw unsupportedAlterTableAction(line);
+            if (statesNewTypes(expression.getColDataTypeList())) {
+                return changeColumnTypes(expression, enums, table);
             }
 
-            return changeColumnTypes(expression, enums, table);
+            if (ignoresColumnActions(expression.getColDataTypeList())) {
+                return table;
+            }
+
+            throw unsupportedAlterTableAction(line, expression);
         }
 
         if (isNotEmpty(expression.getColumnSetNotNullList())) {
@@ -633,20 +741,60 @@ public class DefaultSchemaParser implements SchemaParser {
             );
         }
 
-        throw unsupportedAlterTableAction(line);
+        throw unsupportedAlterTableAction(line, expression);
     }
 
     /**
      * Reports whether every entry of an {@code ALTER COLUMN} action states a new
      * type. The parser reports other column actions, such as
      * {@code SET STATISTICS} or an identity change, in the same list without a
-     * declared type, and those are not supported.
+     * declared type.
      */
     private boolean statesNewTypes(List<AlterExpression.ColumnDataType> definitions) {
         return definitions.stream()
             .allMatch(
                 definition -> definition.isWithType() && definition.getColDataType() != null
             );
+    }
+
+    /**
+     * Reports whether every entry of an {@code ALTER COLUMN} action states a
+     * column action that cannot change the column sqlcj models.
+     */
+    private boolean ignoresColumnActions(List<AlterExpression.ColumnDataType> definitions) {
+        return definitions.stream().allMatch(this::ignoresColumnAction);
+    }
+
+    /**
+     * Reports whether one entry of an {@code ALTER COLUMN} action states an
+     * identity change, {@code SET STATISTICS}, {@code SET STORAGE},
+     * {@code SET COMPRESSION}, or {@code DROP EXPRESSION}. None of them can
+     * change a column's existence, name, type, or nullability, which comes from
+     * {@code NOT NULL} alone; PostgreSQL requires a column to be
+     * {@code NOT NULL} already before {@code ADD GENERATED ... AS IDENTITY}. The
+     * parser reports each of them in the entry list of the action, without a
+     * declared type.
+     */
+    private boolean ignoresColumnAction(AlterExpression.ColumnDataType definition) {
+        if (definition.isWithType()) {
+            return false;
+        }
+
+        if (isNotEmpty(definition.getIdentityAlterations())) {
+            return true;
+        }
+
+        if (definition.getColDataType() == null) {
+            return statesWords(definition.getColumnSpecs(), 0, "DROP", "EXPRESSION");
+        }
+
+        if (!"SET".equalsIgnoreCase(definition.getColDataType().getDataType())) {
+            return false;
+        }
+
+        return statesWords(definition.getColumnSpecs(), 0, "STATISTICS")
+            || statesWords(definition.getColumnSpecs(), 0, "STORAGE")
+            || statesWords(definition.getColumnSpecs(), 0, "COMPRESSION");
     }
 
     /**
@@ -931,9 +1079,24 @@ public class DefaultSchemaParser implements SchemaParser {
         );
     }
 
-    private UnsupportedOperationException unsupportedAlterTableAction(int line) {
+    /**
+     * The failure of one rejected {@code ALTER TABLE} action, quoting the action
+     * as the parser writes it back, with its whitespace runs collapsed to single
+     * spaces.
+     */
+    private UnsupportedOperationException unsupportedAlterTableAction(
+        int line,
+        AlterExpression expression
+    ) {
+        return unsupportedAlterTableAction(
+            line,
+            expression.toString().replaceAll("\\s+", " ").trim()
+        );
+    }
+
+    private UnsupportedOperationException unsupportedAlterTableAction(int line, String action) {
         return new UnsupportedOperationException(
-            "Unsupported ALTER TABLE action at line %d".formatted(line)
+            "Unsupported ALTER TABLE action: %s at line %d".formatted(action, line)
         );
     }
 
@@ -1095,11 +1258,13 @@ public class DefaultSchemaParser implements SchemaParser {
     }
 
     /**
-     * Foreign key and check constraints are accepted but not modeled, because
-     * they do not affect the generated Java types.
+     * Foreign key, check, and exclusion constraints are accepted but not
+     * modeled, because they do not affect the generated Java types.
      */
     private boolean isIgnoredTableConstraint(Index index) {
-        return index instanceof ForeignKeyIndex || index instanceof CheckConstraint;
+        return index instanceof ForeignKeyIndex
+            || index instanceof CheckConstraint
+            || index instanceof ExcludeConstraint;
     }
 
     private ConstraintType constraintType(Index index) {

@@ -362,6 +362,7 @@ are recorded with their declared type; see
 | Column-level `CHECK (...)` | Accepted and ignored. |
 | Table-level `FOREIGN KEY (...) REFERENCES ...`, named or unnamed | Accepted and ignored. |
 | Table-level `CHECK (...)`, named or unnamed | Accepted and ignored. |
+| Table-level `EXCLUDE USING ... (...)`, named or unnamed | Accepted and ignored. |
 | A table statement sqlcj's parser cannot read, such as `ALTER FOREIGN TABLE` | Rejected; see [Ignored Statements](#ignored-statements). |
 | Any other table-constraint kind | Rejected. |
 | Unparsable SQL | Rejected. |
@@ -395,7 +396,7 @@ statements and files before them left; the enum-type statements are listed in
 | `ALTER TABLE ... ALTER COLUMN ... SET NOT NULL` | Models the column non-null. |
 | `ALTER TABLE ... ALTER COLUMN ... DROP NOT NULL` | Models the column nullable. |
 | `ALTER TABLE IF EXISTS ...` | Does nothing when the table is not modeled. It covers only the table, so a missing column of a modeled table still fails. |
-| Any other `ALTER TABLE` action outside the constraint actions listed in [Ignored Statements](#ignored-statements), such as `SET DEFAULT` | Rejected as `Unsupported ALTER TABLE action at line <n>`. |
+| Any other `ALTER TABLE` action outside the ignored actions listed in [Ignored Statements](#ignored-statements), such as `SET SCHEMA` | Rejected as `Unsupported ALTER TABLE action: <action> at line <n>`, quoting the action's own SQL. |
 | `DROP` of any object other than a table, such as `DROP VIEW` or `DROP INDEX` | Ignored; see [Ignored Statements](#ignored-statements). |
 
 One `ALTER TABLE` may state several actions; they are applied in the written
@@ -462,7 +463,7 @@ what they would do to the schema model:
 
 | Statement | Diagnostic |
 | --- | --- |
-| An `ALTER TABLE` action outside [Ordered Table DDL](#ordered-table-ddl) and the constraint actions below | `Unsupported ALTER TABLE action at line <n>` |
+| An `ALTER TABLE` action outside [Ordered Table DDL](#ordered-table-ddl) and the ignored actions below | `Unsupported ALTER TABLE action: <action> at line <n>`, quoting the action's own SQL |
 | An `ALTER TYPE` action other than `ADD VALUE` | `Unsupported ALTER TYPE action at line <n>` |
 | A statement sqlcj's parser cannot read that opens as table or type DDL, outside the `ALTER TABLE` actions below | The parser's own reason with the line and column of the unexpected token, as in `Encountered unexpected token: "DATA" at line 18, column 41` |
 | A statement sqlcj's parser reports only as opaque text, or as several statements, and that opens as table or type DDL | `Unsupported schema statement: ALTER FOREIGN TABLE at line <n>`, quoting the opening words |
@@ -475,27 +476,60 @@ in upper case, single-spaced, so both
 `ALTER FOREIGN TABLE ft ADD COLUMN x integer` and its lower-case spelling are
 rejected as `Unsupported schema statement: ALTER FOREIGN TABLE at line <n>`.
 
-These `ALTER TABLE` actions are ignored like any other unmodeled statement,
-except that the statement still resolves its table:
+Every `ALTER TABLE` action that cannot change a column's existence, name, type,
+or nullability is ignored like any other unmodeled statement, except that the
+statement still resolves its table:
 
 | Action | Notes |
 | --- | --- |
-| `ALTER TABLE ... ADD [CONSTRAINT name] PRIMARY KEY (...)` | Named or unnamed. |
-| `ALTER TABLE ... ADD [CONSTRAINT name] UNIQUE (...)` | Named or unnamed. |
-| `ALTER TABLE ... ADD [CONSTRAINT name] FOREIGN KEY (...) REFERENCES ...` | Named or unnamed. |
-| `ALTER TABLE ... ADD CONSTRAINT name CHECK (...)` | |
-| `ALTER TABLE ... DROP CONSTRAINT [IF EXISTS] name` | |
-| `ALTER TABLE ... RENAME CONSTRAINT` | |
+| `ADD [CONSTRAINT name] PRIMARY KEY (...)` | Named or unnamed. |
+| `ADD [CONSTRAINT name] UNIQUE (...)` | Named or unnamed. |
+| `ADD [CONSTRAINT name] FOREIGN KEY (...) REFERENCES ...` | Named or unnamed. |
+| `ADD CONSTRAINT name CHECK (...)` | |
+| `DROP CONSTRAINT [IF EXISTS] name` | |
+| `RENAME CONSTRAINT` | |
+| `ALTER [COLUMN] c SET DEFAULT ...` and `DROP DEFAULT` | A `DEFAULT` is accepted and ignored in a `CREATE TABLE` as well. |
+| `ALTER [COLUMN] c SET STATISTICS`, `SET STORAGE`, and `SET COMPRESSION` | Column storage, not the column's type. |
+| `ALTER [COLUMN] c DROP EXPRESSION` | Only the readable spelling; `DROP EXPRESSION IF EXISTS` is unreadable. |
+| `ALTER [COLUMN] c ADD GENERATED ... AS IDENTITY`, `SET GENERATED ...`, a sequence option such as `SET INCREMENT BY 2`, `RESTART`, and `DROP IDENTITY [IF EXISTS]` | PostgreSQL requires the column to be `NOT NULL` already, so an identity never changes nullability. |
+| `ENABLE`, `DISABLE`, `FORCE`, and `NO FORCE ROW LEVEL SECURITY` | |
+| `ATTACH PARTITION` and `DETACH PARTITION` | The partition's own table is modeled by its own statements. |
+| `OWNER TO` | |
+| `ENABLE TRIGGER`, `DISABLE TRIGGER`, `ENABLE REPLICA TRIGGER`, and `ENABLE ALWAYS TRIGGER`, and the same four for `RULE` | |
+| `VALIDATE CONSTRAINT` | |
+| `REPLICA IDENTITY ...` | |
+| `CLUSTER ON` and `SET WITHOUT CLUSTER` | |
+| `SET WITHOUT OIDS` | |
+| `SET (...)` and `RESET (...)` | Storage parameters. |
+| `SET TABLESPACE`, `SET LOGGED`, `SET UNLOGGED`, and `SET ACCESS METHOD` | |
+| `INHERIT` and `NO INHERIT` | A table's columns are modeled from its own statements; inherited columns are not modeled. |
+| `OF type` and `NOT OF` | |
+
+An ignored action resolves its table but not its column, so
+`ALTER TABLE users ALTER COLUMN nickname SET STATISTICS 100` is accepted for a
+column that is not modeled, while `ALTER TABLE payments OWNER TO app` fails as
+`Table not found in schema: payments`, exactly as any other `ALTER TABLE` of a
+missing table does, and `ALTER TABLE IF EXISTS payments OWNER TO app` does
+nothing.
 
 A constraint an `ALTER TABLE` adds is not recorded, so it is not carried into
-the schema model the way a `CREATE TABLE` constraint is. Because the table is
-still resolved,
-`ALTER TABLE payments ADD CONSTRAINT payments_pkey PRIMARY KEY (id)` fails when
-`payments` is not modeled, exactly as any other `ALTER TABLE` of a missing
-table does. Such an action may stand alone or beside modeled actions of one
-`ALTER TABLE`, so
-`ALTER TABLE users ADD COLUMN age INTEGER, ADD CONSTRAINT users_age_check CHECK (age > 0)`
-appends `age` and records nothing for the constraint.
+the schema model the way a `CREATE TABLE` constraint is. An ignored action may
+stand alone or beside modeled actions of one `ALTER TABLE`, which are applied in
+the written order, so
+`ALTER TABLE users ADD COLUMN age INTEGER, ALTER COLUMN name SET DEFAULT 'new', OWNER TO app`
+appends `age` and records nothing else.
+
+sqlcj's parser has no form of its own for the table-level actions listed from
+`OWNER TO` down in the table above. It reports such an action as the text that
+runs to the end of the statement, so sqlcj splits that text at the commas
+outside parentheses, with its own SQL lexer, and every action in it must be one
+of those. `ALTER TABLE users SET SCHEMA archive` is therefore rejected as
+`Unsupported ALTER TABLE action: SET SCHEMA archive at line <n>`, because it
+moves the table out of the one namespace sqlcj models, and a modeled action
+written after such an action is rejected rather than skipped, so
+`ALTER TABLE users OWNER TO app, ADD COLUMN x int` is rejected as
+`Unsupported ALTER TABLE action: ADD COLUMN x int at line <n>`. Written the
+other way round, `ALTER TABLE users ADD COLUMN x int, OWNER TO app` appends `x`.
 
 An `ALTER TABLE` sqlcj's parser cannot read is classified by its words instead,
 and ignored when every one of its top-level actions — the parts separated by
@@ -654,7 +688,7 @@ and recorded type:
 
 ```text
 sqlcj: Invalid schema source /home/dev/project/schema.sql: Unsupported schema statement: ALTER FOREIGN TABLE at line 12
-sqlcj: Invalid schema source /home/dev/project/schema.sql: Unsupported ALTER TABLE action at line 18
+sqlcj: Invalid schema source /home/dev/project/schema.sql: Unsupported ALTER TABLE action: SET SCHEMA archive at line 18
 sqlcj: Invalid schema source /home/dev/project/schema.sql: Encountered unexpected token: ";" at line 4, column 1
 sqlcj: Invalid query 'ListTags' in /home/dev/project/queries.sql at line 5: Column 'tags' has unsupported type JSONB[]
 ```
@@ -803,9 +837,11 @@ Enum types:
   `DefaultSchemaParserTest.shouldParseTableWithoutConstraints`,
   `DefaultSchemaParserTest.shouldCanonicalizeQuotedTableAndColumnNames`,
   `DefaultSchemaParserTest.shouldParseColumnSpecificationsThatDoNotAffectTypes`,
-  `DefaultSchemaParserTest.shouldIgnoreForeignKeyAndCheckTableConstraints`, and
+  `DefaultSchemaParserTest.shouldIgnoreForeignKeyAndCheckTableConstraints`,
+  `DefaultSchemaParserTest.shouldIgnoreExcludeTableConstraints`, and
   `DefaultSchemaParserTest.shouldParseNamedTableConstraintsAlongsideIgnoredOnes`
-  cover the modeled and ignored constructs.
+  cover the modeled and ignored constructs, including a named and an unnamed
+  `EXCLUDE` beside a recorded `PRIMARY KEY`.
 - `DefaultSchemaParserTest.shouldRejectUnsupportedSchemaStatement` and
   `DefaultSchemaParserTest.shouldThrowSchemaParseExceptionForInvalidSql` cover
   the rejected input.
@@ -837,11 +873,9 @@ Ordered table DDL:
 - `DefaultSchemaParserTest.shouldReportTheMissingTableOfAStatement`,
   `DefaultSchemaParserTest.shouldReportTheMissingColumnOfAnAlterTableAction`,
   `DefaultSchemaParserTest.shouldReportAStatementThatRepeatsATableName`,
-  `DefaultSchemaParserTest.shouldReportAStatementThatRepeatsAColumnName`,
-  `DefaultSchemaParserTest.shouldRejectUnsupportedAlterTableAction`,
-  `DefaultSchemaParserTest.shouldRejectAlterColumnSetStatistics`, and
-  `DefaultSchemaParserTest.shouldRejectAlterColumnAddIdentity` cover the
-  rejected statements and their messages.
+  `DefaultSchemaParserTest.shouldReportAStatementThatRepeatsAColumnName`, and
+  `DefaultSchemaParserTest.shouldReportTheLineOfARejectedAlterTableAction`
+  cover the rejected statements and their messages.
 - `SqlcjCompilerIntegrationTest.shouldGenerateTheSameRepositoryFromAlteringMigrationsAndASnapshot`
   generates one compilable repository from migrations that rename, add, drop, and
   alter columns, byte-identical to the one generated from the equivalent
@@ -860,13 +894,24 @@ Ignored statements:
   `ALTER FUNCTION`, `ALTER SCHEMA`, `CREATE AGGREGATE`, and `CREATE CAST`; and
   `DefaultSchemaParserTest.shouldIgnoreConstraintAlterTableActions` covers the
   named and unnamed constraint actions.
+- `DefaultSchemaParserTest.shouldIgnoreTheAlterTableActionsThatCannotChangeAColumn`
+  covers one spelling per ignored `ALTER TABLE` action, including the lower-case
+  and `ALTER TABLE ONLY public.users` spellings and two actions classified by
+  their words in one statement.
 - `DefaultSchemaParserTest.shouldNotResolveAnIgnoredStatementAgainstTheSchema`
   covers that an ignored statement, including a view over an unmodeled table and
-  a `TRUNCATE` of one, may name an unmodeled table or column, and
+  a `TRUNCATE` of one, may name an unmodeled table or column;
   `DefaultSchemaParserTest.shouldReportTheMissingTableOfAnIgnoredConstraintAction`
-  covers that an ignored `ALTER TABLE` action still resolves its table.
-- `DefaultSchemaParserTest.shouldApplyAModeledActionBesideAnIgnoredConstraintAction`
-  covers an ignored action beside a modeled one.
+  and
+  `DefaultSchemaParserTest.shouldReportTheMissingTableOfAnIgnoredAction`
+  cover that an ignored `ALTER TABLE` action still resolves its table and that
+  `IF EXISTS` skips it; and
+  `DefaultSchemaParserTest.shouldIgnoreAnAlterColumnActionOnAMissingColumn`
+  covers that it does not resolve its column.
+- `DefaultSchemaParserTest.shouldApplyAModeledActionBesideAnIgnoredConstraintAction`,
+  `DefaultSchemaParserTest.shouldApplyAnAddedColumnBesideIgnoredActions`, and
+  `DefaultSchemaParserTest.shouldApplyAnAddedColumnAfterARowLevelSecurityAction`
+  cover an ignored action beside a modeled one, in both written orders.
 - `DefaultSchemaParserTest.shouldIgnoreEveryUnreadableStatementThatIsNotTableOrTypeDdl`
   covers one spelling per statement kind sqlcj's parser cannot read, including
   the untagged, tagged, and `LANGUAGE` forms of `DO`, `DROP TYPE`, every
@@ -881,7 +926,9 @@ Ignored statements:
   the schema does not model, including the multi-line `pg_dump` identity form.
 - `DefaultSchemaParserTest.shouldRejectUnsupportedStatementsInSqlTerms` covers
   the exact message and line of each statement and action rejected in SQL terms,
-  including the upper- and lower-case `ALTER FOREIGN TABLE`, and
+  including `SET SCHEMA` alone and after a modeled action, a modeled action
+  written after an ignored one, an unrecognized `ALTER COLUMN` action, and the
+  upper- and lower-case `ALTER FOREIGN TABLE`, and
   `DefaultSchemaParserTest.shouldRejectUnsupportedSchemaStatement`,
   `DefaultSchemaParserTest.shouldReportTheLineOfARejectedStatementAfterCommentsAndAFunctionBody`,
   and
