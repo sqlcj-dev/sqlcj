@@ -11,11 +11,13 @@ import net.sf.jsqlparser.JSQLParserException;
 import net.sf.jsqlparser.expression.StringValue;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.schema.MultiPartName;
+import net.sf.jsqlparser.statement.LikeClause;
 import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.Statements;
 import net.sf.jsqlparser.statement.UnsupportedStatement;
 import net.sf.jsqlparser.statement.alter.Alter;
 import net.sf.jsqlparser.statement.alter.AlterExpression;
+import net.sf.jsqlparser.statement.alter.AlterExpressionPartition;
 import net.sf.jsqlparser.statement.alter.AlterOperation;
 import net.sf.jsqlparser.statement.alter.AlterType;
 import net.sf.jsqlparser.statement.create.table.CheckConstraint;
@@ -24,6 +26,7 @@ import net.sf.jsqlparser.statement.create.table.CreateTable;
 import net.sf.jsqlparser.statement.create.table.ExcludeConstraint;
 import net.sf.jsqlparser.statement.create.table.ForeignKeyIndex;
 import net.sf.jsqlparser.statement.create.table.Index;
+import net.sf.jsqlparser.statement.create.table.TableElement;
 import net.sf.jsqlparser.statement.create.type.CreateType;
 import net.sf.jsqlparser.statement.create.type.EnumTypeDefinition;
 import net.sf.jsqlparser.statement.drop.Drop;
@@ -298,7 +301,7 @@ public class DefaultSchemaParser implements SchemaParser {
      */
     private void apply(Statement statement, int line, List<Table> tables, List<EnumType> enums) {
         if (statement instanceof CreateTable createTable) {
-            applyCreateTable(createTable, enums, tables);
+            applyCreateTable(createTable, line, enums, tables);
         } else if (statement instanceof Alter alter) {
             applyAlterTable(alter, line, enums, tables);
         } else if (statement instanceof Drop drop && drop.getObjectType() == Drop.ObjectType.TABLE) {
@@ -586,7 +589,7 @@ public class DefaultSchemaParser implements SchemaParser {
             );
         }
 
-        return new Table(table.name(), columns, table.constraints());
+        return new Table(table.name(), columns, table.constraints(), table.partitionOf());
     }
 
     /**
@@ -648,10 +651,12 @@ public class DefaultSchemaParser implements SchemaParser {
 
     /**
      * Appends one table. A repeated table name fails, as PostgreSQL rejects it,
-     * unless the statement declares {@code IF NOT EXISTS}.
+     * unless the statement declares {@code IF NOT EXISTS}. A clause that states
+     * columns sqlcj cannot determine is rejected naming the clause.
      */
     private void applyCreateTable(
         CreateTable createTable,
+        int line,
         List<EnumType> enums,
         List<Table> tables
     ) {
@@ -665,17 +670,70 @@ public class DefaultSchemaParser implements SchemaParser {
             throw tableAlreadyExists(tableName);
         }
 
-        tables.add(parseTable(createTable, enums));
+        rejectUnsupportedCreateTableClause(createTable, line);
+
+        tables.add(parseTable(createTable, line, enums, tables));
     }
 
-    /** Removes every named table, keeping the order of the remaining ones. */
+    /**
+     * Rejects the {@code CREATE TABLE} clauses whose columns stand nowhere in
+     * the schema source: a query, a composite type, and an inherited table,
+     * whose parent's columns PostgreSQL copies and keeps following.
+     */
+    private void rejectUnsupportedCreateTableClause(CreateTable createTable, int line) {
+        if (createTable.getSelect() != null) {
+            throw unsupportedCreateTableClause("AS SELECT", line);
+        }
+
+        if (createTable.getOfType() != null) {
+            throw unsupportedCreateTableClause("OF " + createTable.getOfType(), line);
+        }
+
+        if (inheritsAnotherTable(createTable)) {
+            throw unsupportedCreateTableClause("INHERITS", line);
+        }
+    }
+
+    /**
+     * Reports whether a {@code CREATE TABLE} states {@code INHERITS}, which the
+     * parser reports only among the table options, with the case it was written
+     * in.
+     */
+    private boolean inheritsAnotherTable(CreateTable createTable) {
+        List<String> options = createTable.getTableOptionsStrings();
+
+        return options != null && options.stream().anyMatch("INHERITS"::equalsIgnoreCase);
+    }
+
+    /**
+     * Removes every named table, and every partition of one, keeping the order
+     * of the remaining ones. A name a preceding name of the same statement
+     * already removed as a partition of it is left alone, because it is dropped
+     * either way.
+     */
     private void applyDropTable(Drop drop, List<Table> tables) {
+        for (String tableName : droppedTableNames(drop, tables)) {
+            int index = indexOfTable(tables, tableName);
+
+            if (index >= 0) {
+                dropTable(tables, index);
+            }
+        }
+    }
+
+    /**
+     * The modeled names of one {@code DROP TABLE}, all resolved against the
+     * tables as they stand before it drops anything, as PostgreSQL resolves
+     * every name of one statement before deleting any of them. A name that is
+     * not modeled fails, unless the statement declares {@code IF EXISTS}.
+     */
+    private List<String> droppedTableNames(Drop drop, List<Table> tables) {
+        List<String> names = new ArrayList<>();
+
         for (net.sf.jsqlparser.schema.Table dropped : drop.getNames()) {
             String tableName = dropped.getUnquotedName();
 
-            int index = indexOfTable(tables, tableName);
-
-            if (index < 0) {
+            if (indexOfTable(tables, tableName) < 0) {
                 if (drop.isIfExists()) {
                     continue;
                 }
@@ -683,8 +741,41 @@ public class DefaultSchemaParser implements SchemaParser {
                 throw tableNotFound(tableName);
             }
 
-            tables.remove(index);
+            names.add(tableName);
         }
+
+        return names;
+    }
+
+    /**
+     * Removes one table and, recursively, every partition of it, as PostgreSQL
+     * drops the partitions of a partitioned table along with it.
+     */
+    private void dropTable(List<Table> tables, int index) {
+        String tableName = tables.get(index).name();
+
+        tables.remove(index);
+
+        int partition = indexOfPartition(tables, tableName);
+
+        while (partition >= 0) {
+            dropTable(tables, partition);
+
+            partition = indexOfPartition(tables, tableName);
+        }
+    }
+
+    /** The first partition of {@code parentName}, or {@code -1}. */
+    private int indexOfPartition(List<Table> tables, String parentName) {
+        for (int i = 0; i < tables.size(); i++) {
+            String parent = tables.get(i).partitionOf();
+
+            if (parent != null && parent.equalsIgnoreCase(parentName)) {
+                return i;
+            }
+        }
+
+        return -1;
     }
 
     /**
@@ -706,8 +797,76 @@ public class DefaultSchemaParser implements SchemaParser {
         }
 
         for (AlterExpression expression : alter.getAlterExpressions()) {
-            tables.set(index, applyAlterExpression(line, expression, enums, tables, index));
+            applyToTableAndPartitions(line, expression, enums, tables, index);
         }
+    }
+
+    /**
+     * Applies one {@code ALTER TABLE} action to the table at {@code index} and,
+     * when the action changes a modeled column, to every partition of that
+     * table, recursively, because PostgreSQL applies a partitioned table's
+     * column changes to its partitions. A rename of the table itself is not
+     * propagated: a partition keeps its own name.
+     */
+    private void applyToTableAndPartitions(
+        int line,
+        AlterExpression expression,
+        List<EnumType> enums,
+        List<Table> tables,
+        int index
+    ) {
+        String tableName = tables.get(index).name();
+
+        tables.set(index, applyAlterExpression(line, expression, enums, tables, index));
+
+        if (!propagatesToPartitions(expression)) {
+            return;
+        }
+
+        for (int i = 0; i < tables.size(); i++) {
+            String parent = tables.get(i).partitionOf();
+
+            if (parent != null && parent.equalsIgnoreCase(tableName)) {
+                applyToTableAndPartitions(line, expression, enums, tables, i);
+            }
+        }
+    }
+
+    /**
+     * Reports whether one {@code ALTER TABLE} action changes a modeled column
+     * and therefore reaches the partitions of its table: {@code ADD COLUMN},
+     * {@code DROP COLUMN}, {@code RENAME COLUMN}, a new column type,
+     * {@code SET NOT NULL}, and {@code DROP NOT NULL}.
+     */
+    private boolean propagatesToPartitions(AlterExpression expression) {
+        AlterOperation operation = expression.getOperation();
+
+        if (operation == AlterOperation.ADD) {
+            return isNotEmpty(expression.getColDataTypeList());
+        }
+
+        if (operation == AlterOperation.DROP) {
+            return expression.getColumnName() != null;
+        }
+
+        if (operation == AlterOperation.RENAME) {
+            return expression.getColumnOldName() != null;
+        }
+
+        if (operation != AlterOperation.ALTER) {
+            return false;
+        }
+
+        if (isNotEmpty(expression.getColumnSetDefaultList()) || isNotEmpty(expression.getColumnDropDefaultList())) {
+            return false;
+        }
+
+        if (isNotEmpty(expression.getColDataTypeList())) {
+            return statesNewTypes(expression.getColDataTypeList());
+        }
+
+        return isNotEmpty(expression.getColumnSetNotNullList())
+            || isNotEmpty(expression.getColumnDropNotNullList());
     }
 
     /**
@@ -748,6 +907,10 @@ public class DefaultSchemaParser implements SchemaParser {
             return alterColumns(line, expression, enums, table);
         }
 
+        if (operation == AlterOperation.ATTACH_PARTITION || operation == AlterOperation.DETACH_PARTITION) {
+            return changePartitionLink(expression, tables, table);
+        }
+
         if (isIgnoredConstraintAction(expression) || isIgnoredTableAction(operation)) {
             return table;
         }
@@ -760,18 +923,55 @@ public class DefaultSchemaParser implements SchemaParser {
     }
 
     /**
+     * Links or unlinks one partition of the altered table, leaving the altered
+     * table itself unchanged. {@code ATTACH PARTITION} links the stated table to
+     * the altered one, so it follows its column changes from then on, and
+     * {@code DETACH PARTITION} ends that link. A partition sqlcj does not model
+     * is ignored, like any other statement about an unmodeled table.
+     */
+    private Table changePartitionLink(
+        AlterExpression expression,
+        List<Table> tables,
+        Table table
+    ) {
+        if (!(expression instanceof AlterExpressionPartition partition)) {
+            return table;
+        }
+
+        int index = indexOfReferencedTable(tables, partition.getPartitionTable());
+
+        if (index < 0) {
+            return table;
+        }
+
+        Table attached = tables.get(index);
+
+        tables.set(
+            index,
+            new Table(
+                attached.name(),
+                attached.columns(),
+                attached.constraints(),
+                expression.getOperation() == AlterOperation.ATTACH_PARTITION
+                    ? table.name()
+                    : null
+            )
+        );
+
+        return table;
+    }
+
+    /**
      * Reports whether one {@code ALTER TABLE} action is a table-level action the
      * parser has a form of its own for that cannot change a column: the
-     * row-level-security switches and attaching or detaching a partition.
+     * row-level-security switches.
      */
     private boolean isIgnoredTableAction(AlterOperation operation) {
         return switch (operation) {
             case ENABLE_ROW_LEVEL_SECURITY,
                 DISABLE_ROW_LEVEL_SECURITY,
                 FORCE_ROW_LEVEL_SECURITY,
-                NO_FORCE_ROW_LEVEL_SECURITY,
-                ATTACH_PARTITION,
-                DETACH_PARTITION -> true;
+                NO_FORCE_ROW_LEVEL_SECURITY -> true;
             default -> false;
         };
     }
@@ -1010,7 +1210,7 @@ public class DefaultSchemaParser implements SchemaParser {
             constraints.addAll(parseColumnConstraints(definition));
         }
 
-        return new Table(table.name(), columns, constraints);
+        return new Table(table.name(), columns, constraints, table.partitionOf());
     }
 
     /** Removes one column and every constraint that lists it. */
@@ -1035,7 +1235,7 @@ public class DefaultSchemaParser implements SchemaParser {
             .filter(constraint -> !listsColumn(constraint, columnName))
             .toList();
 
-        return new Table(table.name(), columns, constraints);
+        return new Table(table.name(), columns, constraints, table.partitionOf());
     }
 
     /**
@@ -1077,10 +1277,14 @@ public class DefaultSchemaParser implements SchemaParser {
             .map(constraint -> renameConstraintColumn(constraint, oldName, newName))
             .toList();
 
-        return new Table(table.name(), columns, constraints);
+        return new Table(table.name(), columns, constraints, table.partitionOf());
     }
 
-    /** Renames one table in its position, keeping its columns and constraints. */
+    /**
+     * Renames one table in its position, keeping its columns and constraints,
+     * and names the new name in every partition of it, so a partition keeps
+     * following its parent.
+     */
     private Table renameTable(AlterExpression expression, List<Table> tables, int index) {
         String newName = MultiPartName.unquote(expression.getNewTableName());
 
@@ -1092,7 +1296,18 @@ public class DefaultSchemaParser implements SchemaParser {
 
         Table table = tables.get(index);
 
-        return new Table(newName, table.columns(), table.constraints());
+        tables.replaceAll(partition -> renamePartitionParent(partition, table.name(), newName));
+
+        return new Table(newName, table.columns(), table.constraints(), table.partitionOf());
+    }
+
+    /** Names {@code newName} as the parent of a partition of {@code oldName}. */
+    private Table renamePartitionParent(Table table, String oldName, String newName) {
+        if (table.partitionOf() == null || !table.partitionOf().equalsIgnoreCase(oldName)) {
+            return table;
+        }
+
+        return new Table(table.name(), table.columns(), table.constraints(), newName);
     }
 
     /**
@@ -1133,7 +1348,7 @@ public class DefaultSchemaParser implements SchemaParser {
             );
         }
 
-        return new Table(table.name(), columns, table.constraints());
+        return new Table(table.name(), columns, table.constraints(), table.partitionOf());
     }
 
     /** Sets the nullability of each named column in its position. */
@@ -1169,7 +1384,7 @@ public class DefaultSchemaParser implements SchemaParser {
             );
         }
 
-        return new Table(table.name(), columns, table.constraints());
+        return new Table(table.name(), columns, table.constraints(), table.partitionOf());
     }
 
     private boolean listsColumn(Constraint constraint, String columnName) {
@@ -1202,6 +1417,36 @@ public class DefaultSchemaParser implements SchemaParser {
         }
 
         return -1;
+    }
+
+    /**
+     * The position of the table one statement names beside the table it
+     * creates or alters, the source of a {@code LIKE} or {@code PARTITION OF}
+     * and the partition of {@code ATTACH} or {@code DETACH PARTITION}, or
+     * {@code -1} when sqlcj does not model it.
+     *
+     * <p>sqlcj models one namespace, so an unqualified and a
+     * {@code public}-qualified name are the same table. A name qualified with
+     * any other schema names a table sqlcj leaves unmodeled, and fails as a
+     * missing table rather than resolving to a modeled table of the same
+     * unqualified name.
+     */
+    private int indexOfReferencedTable(
+        List<Table> tables,
+        net.sf.jsqlparser.schema.Table referenced
+    ) {
+        String tableName = referenced.getUnquotedName();
+        String declaredSchema = referenced.getSchemaName();
+
+        if (declaredSchema != null) {
+            String schemaName = MultiPartName.unquote(declaredSchema);
+
+            if (!"public".equalsIgnoreCase(schemaName)) {
+                throw tableNotFound(schemaName + "." + tableName);
+            }
+        }
+
+        return indexOfTable(tables, tableName);
     }
 
     /** Enum type names are matched case-insensitively, as a column names them. */
@@ -1299,21 +1544,69 @@ public class DefaultSchemaParser implements SchemaParser {
         );
     }
 
-    private Table parseTable(CreateTable createTable, List<EnumType> enums) {
+    /**
+     * The failure of one rejected {@code CREATE TABLE} clause, naming the
+     * clause.
+     */
+    private UnsupportedOperationException unsupportedCreateTableClause(String clause, int line) {
+        return new UnsupportedOperationException(
+            "Unsupported CREATE TABLE clause: %s at line %d".formatted(clause, line)
+        );
+    }
+
+    /**
+     * Parses one table, whose columns come from its own column definitions, in
+     * written order, from the modeled source of each {@code LIKE} at its
+     * position in the element list, and, for a partition, from its parent
+     * before all of them, as PostgreSQL creates them. A repeated column name
+     * fails, as PostgreSQL rejects it.
+     *
+     * <p>A {@code LIKE}'s {@code INCLUDING} and {@code EXCLUDING} options
+     * cannot change a copied column's type or nullability and are ignored, and
+     * neither {@code LIKE} nor {@code PARTITION OF} copies its source's
+     * recorded constraints. Only the table's own table constraints are
+     * recorded, in a partition as in any other table.
+     *
+     * <p>A {@code CREATE TABLE} with neither an element list, the empty element
+     * list {@code ()}, nor {@code PARTITION OF} states columns sqlcj cannot
+     * determine and is rejected as unsupported table DDL.
+     */
+    private Table parseTable(
+        CreateTable createTable,
+        int line,
+        List<EnumType> enums,
+        List<Table> tables
+    ) {
         String tableName = createTable.getTable().getUnquotedName();
 
         List<Column> columns = new ArrayList<>();
         List<Constraint> constraints = new ArrayList<>();
+        String partitionOf = null;
 
-        for (ColumnDefinition definition : createTable.getColumnDefinitions()) {
-            Column column = parseColumn(definition, enums);
+        if (createTable.getPartitionOf() != null) {
+            Table parent = referencedTable(tables, createTable.getPartitionOf());
 
-            if (indexOfColumn(columns, column.name()) >= 0) {
-                throw columnAlreadyExists(tableName, column.name());
+            partitionOf = parent.name();
+            columns.addAll(parent.columns());
+        }
+
+        List<TableElement> elements = createTable.getTableElements();
+
+        if (elements == null) {
+            if (partitionOf == null && !statesEmptyElementList(createTable)) {
+                throw unsupportedOpening("CREATE TABLE", line);
             }
-
-            columns.add(column);
-            constraints.addAll(parseColumnConstraints(definition));
+        } else {
+            for (TableElement element : elements) {
+                if (element instanceof ColumnDefinition definition) {
+                    addColumn(columns, tableName, parseColumn(definition, enums));
+                    constraints.addAll(parseColumnConstraints(definition));
+                } else if (element instanceof LikeClause like) {
+                    for (Column column : referencedTable(tables, like.getTable()).columns()) {
+                        addColumn(columns, tableName, column);
+                    }
+                }
+            }
         }
 
         constraints.addAll(parseTableConstraints(createTable));
@@ -1321,8 +1614,46 @@ public class DefaultSchemaParser implements SchemaParser {
         return new Table(
             tableName,
             columns,
-            constraints
+            constraints,
+            partitionOf
         );
+    }
+
+    /**
+     * Reports whether a {@code CREATE TABLE} states the empty element list
+     * {@code ()}, a table without columns, which the parser reports as the
+     * first of the table options instead of as an element list.
+     */
+    private boolean statesEmptyElementList(CreateTable createTable) {
+        List<String> options = createTable.getTableOptionsStrings();
+
+        return options != null && !options.isEmpty() && "()".equals(options.get(0));
+    }
+
+    /**
+     * The modeled table a {@code LIKE} or {@code PARTITION OF} names as the
+     * source of its columns. A source sqlcj does not model fails as a missing
+     * table, because the created table's columns would otherwise be unknown.
+     */
+    private Table referencedTable(
+        List<Table> tables,
+        net.sf.jsqlparser.schema.Table referenced
+    ) {
+        int index = indexOfReferencedTable(tables, referenced);
+
+        if (index < 0) {
+            throw tableNotFound(referenced.getUnquotedName());
+        }
+
+        return tables.get(index);
+    }
+
+    private void addColumn(List<Column> columns, String tableName, Column column) {
+        if (indexOfColumn(columns, column.name()) >= 0) {
+            throw columnAlreadyExists(tableName, column.name());
+        }
+
+        columns.add(column);
     }
 
     /**

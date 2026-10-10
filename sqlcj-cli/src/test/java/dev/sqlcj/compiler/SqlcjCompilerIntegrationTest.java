@@ -3192,6 +3192,78 @@ class SqlcjCompilerIntegrationTest {
         );
     }
 
+    /**
+     * A table whose columns come from a {@code LIKE} and a partition whose
+     * columns come from its parent are modeled with those columns, so a
+     * {@code SELECT *} over either of them generates a row record and a
+     * repository that compile. The parent's later added column reaches its
+     * partition but not the independent {@code LIKE} copy.
+     */
+    @Test
+    void shouldGenerateCompilableRepositoriesOverCopiedTableColumns() throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE events
+                (
+                    id      BIGINT NOT NULL,
+                    tenant  VARCHAR(64) NOT NULL,
+                    payload TEXT
+                );
+
+                CREATE TABLE events_copy (LIKE events INCLUDING ALL);
+
+                CREATE TABLE events_recent PARTITION OF events
+                    FOR VALUES FROM (1) TO (100);
+
+                ALTER TABLE events ADD COLUMN note TEXT;
+                """
+        );
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: ListCopiedEvents :many
+                SELECT *
+                FROM events_copy
+                WHERE tenant = $1;
+
+                -- name: ListRecentEvents :many
+                SELECT *
+                FROM events_recent
+                WHERE tenant = $1;
+                """
+        );
+
+        generateUsersRepository(
+            List.of(schemaFile.toString()),
+            queriesFile,
+            generatedDirectory
+        );
+
+        assertEquals(
+            List.of("Long id", "String tenant", "String payload"),
+            recordComponents(
+                Files.readString(generatedDirectory.resolve("generated/EventsCopyRow.java")),
+                "EventsCopyRow"
+            )
+        );
+
+        assertEquals(
+            List.of("Long id", "String tenant", "String payload", "String note"),
+            recordComponents(
+                Files.readString(generatedDirectory.resolve("generated/EventsRecentRow.java")),
+                "EventsRecentRow"
+            )
+        );
+
+        assertCompiles(generatedDirectory, tempDir.resolve("classes"));
+    }
+
     /** Generates the one repository of the {@code Users} group. */
     private Path generateUsersRepository(
         List<String> schema,

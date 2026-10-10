@@ -376,6 +376,12 @@ are recorded with their declared type; see
 | Table-level `FOREIGN KEY (...) REFERENCES ...`, named or unnamed | Accepted and ignored. |
 | Table-level `CHECK (...)`, named or unnamed | Accepted and ignored. |
 | Table-level `EXCLUDE USING ... (...)`, named or unnamed | Accepted and ignored. |
+| `LIKE t`, with any `INCLUDING` and `EXCLUDING` options | Accepted. Copies the columns, types, and nullability of the modeled table `t` at the position the clause stands in. |
+| `PARTITION OF t`, with `FOR VALUES FROM ... TO ...`, `FOR VALUES IN (...)`, `FOR VALUES WITH (MODULUS ...)`, or `DEFAULT` | Accepted. Copies the columns, types, and nullability of the modeled table `t` and keeps following its column changes; see [Ordered Table DDL](#ordered-table-ddl). |
+| An empty element list, `()` | Accepted and modeled as a table without columns. |
+| `AS SELECT ...` | Rejected as `Unsupported CREATE TABLE clause: AS SELECT at line <n>`. |
+| `OF <type>` | Rejected as `Unsupported CREATE TABLE clause: OF <type> at line <n>`. |
+| `INHERITS (p)` | Rejected as `Unsupported CREATE TABLE clause: INHERITS at line <n>`. |
 | A table statement sqlcj's parser cannot read, such as `ALTER FOREIGN TABLE` | Rejected; see [Ignored Statements](#ignored-statements). |
 | Any other table-constraint kind | Rejected. |
 | Unparsable SQL | Rejected. |
@@ -385,6 +391,36 @@ constraint is kept in the parsed schema model, but no code in the compilation
 pipeline reads it, so it changes no generated type, method, parameter, or
 result component. "Ignored" means the construct is accepted as valid schema
 input and is not carried into the model at all.
+
+A `CREATE TABLE` element list may state column definitions, table constraints,
+and `LIKE` clauses in any order, and the table's columns are modeled in that
+written order, as PostgreSQL creates them, each `LIKE` contributing its source's
+columns at its own position. A partition starts with its parent's columns,
+before every element of its own list. A column name that is repeated, by two
+column definitions, by a `LIKE` and a column definition, or by two `LIKE`
+clauses, fails as `Column already exists in table <t>: <c>`.
+
+A `LIKE`'s `INCLUDING` and `EXCLUDING` options cannot change a copied column's
+type or nullability and are ignored, and neither `LIKE` nor `PARTITION OF`
+copies its source's recorded constraints: a copy records only the constraints
+its own statement states. A `LIKE` copy is independent of its source afterwards,
+as in PostgreSQL. A `LIKE` or `PARTITION OF` source sqlcj does not model fails
+as `Table not found in schema: <t>`.
+
+Because sqlcj models one namespace, a `LIKE` or `PARTITION OF` source and an
+`ATTACH` or `DETACH PARTITION` partition resolve by their unqualified name, so
+`public.t` is `t`. Until sqlcj models namespaces, such a name qualified with any
+other schema names a table sqlcj leaves unmodeled and fails as
+`Table not found in schema: <schema>.<t>` rather than resolving to a modeled `t`.
+
+A `CREATE TABLE` with neither an element list, `()`, nor `PARTITION OF`, such as
+`CREATE TABLE c LIKE t` without the parentheses PostgreSQL requires, states no
+columns at all and is rejected as
+`Unsupported schema statement: CREATE TABLE at line <n>`. A form sqlcj's parser
+cannot read, such as the column options `PARTITION OF` and `OF <type>` allow
+(`id WITH OPTIONS NOT NULL`) or `AS SELECT ... WITH NO DATA`, is rejected as
+unreadable table DDL with the parser's reason; see
+[Ignored Statements](#ignored-statements).
 
 ## Ordered Table DDL
 
@@ -397,14 +433,16 @@ statements and files before them left; the enum-type statements are listed in
 | --- | --- |
 | `CREATE TABLE` | Adds the table after the tables already modeled. |
 | `CREATE TABLE IF NOT EXISTS` | Does nothing when the table already exists. |
-| `DROP TABLE`, with one or several names | Removes each named table. |
+| `DROP TABLE`, with one or several names | Removes each named table and, recursively, every partition of it, as PostgreSQL does. |
 | `DROP TABLE IF EXISTS` | Does nothing for a name that is not modeled. |
 | `ALTER TABLE ... ADD COLUMN` | Appends the column, typed exactly as a `CREATE TABLE` column of the same declaration, and records its column-level `PRIMARY KEY` or `UNIQUE`. |
 | `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` | Does nothing when the column already exists. |
 | `ALTER TABLE ... DROP COLUMN` | Removes the column and every recorded constraint that lists it. |
 | `ALTER TABLE ... DROP COLUMN IF EXISTS` | Does nothing when the column is not modeled. |
 | `ALTER TABLE ... RENAME COLUMN` | Renames the column in its position and in the constraints that list it. |
-| `ALTER TABLE ... RENAME TO` | Renames the table in its position, keeping its columns and constraints. |
+| `ALTER TABLE ... RENAME TO` | Renames the table in its position, keeping its columns and constraints, and keeps every partition of it linked to the new name. |
+| `ALTER TABLE ... ATTACH PARTITION` | Links a modeled table to the altered one, so it follows its column changes from then on. A partition sqlcj does not model is ignored. |
+| `ALTER TABLE ... DETACH PARTITION` | Ends the link of a modeled partition. A partition sqlcj does not model is ignored. |
 | `ALTER TABLE ... ALTER COLUMN ... TYPE` | Maps or records the new type as a `CREATE TABLE` column of that type is mapped or recorded, keeping the column's position and its nullability, which a type change does not state. |
 | `ALTER TABLE ... ALTER COLUMN ... SET NOT NULL` | Models the column non-null. |
 | `ALTER TABLE ... ALTER COLUMN ... DROP NOT NULL` | Models the column nullable. |
@@ -415,6 +453,16 @@ statements and files before them left; the enum-type statements are listed in
 One `ALTER TABLE` may state several actions; they are applied in the written
 order. Table and column names are matched case-insensitively, as query analysis
 looks them up, after their SQL identifier delimiters are removed.
+
+PostgreSQL applies every column change of a partitioned table to its partitions,
+so a partition created by `PARTITION OF`, or attached by `ATTACH PARTITION` when
+sqlcj models its table, stays linked to its parent: `ADD COLUMN`,
+`DROP COLUMN`, `RENAME COLUMN`, `ALTER COLUMN ... TYPE`, `SET NOT NULL`, and
+`DROP NOT NULL` on the parent are applied to its partitions as well,
+recursively, so a nested partition follows too. A partition keeps its own name
+when its parent is renamed, `DROP TABLE` of the parent removes it, and
+`DETACH PARTITION` ends the link, after which the parent's later column changes
+no longer reach it. A `LIKE` copy is never linked to its source.
 
 Outside the `IF [NOT] EXISTS` forms above, a statement that refers to a table or
 a column that is not modeled is rejected, and so is a statement that would give
@@ -476,6 +524,7 @@ what they would do to the schema model:
 | Statement | Diagnostic |
 | --- | --- |
 | An `ALTER TABLE` action outside [Ordered Table DDL](#ordered-table-ddl) and the ignored actions below | `Unsupported ALTER TABLE action: <action> at line <n>`, quoting the action's own SQL |
+| A `CREATE TABLE ... AS SELECT`, `OF <type>`, or `INHERITS`, whose columns sqlcj cannot determine | `Unsupported CREATE TABLE clause: <clause> at line <n>`, naming `AS SELECT`, `OF <type>`, or `INHERITS` |
 | An `ALTER TYPE ... SET SCHEMA` of a modeled enum type | `Unsupported ALTER TYPE action: SET SCHEMA <schema> at line <n>` |
 | A statement sqlcj's parser cannot read that opens as table or type DDL, outside the `ALTER TABLE` actions below | The parser's own reason with the line and column of the unexpected token, as in `Encountered unexpected token: "DATA" at line 18, column 41` |
 | A statement sqlcj's parser reports only as opaque text, or as several statements, and that opens as table or type DDL | `Unsupported schema statement: ALTER FOREIGN TABLE at line <n>`, quoting the opening words |
@@ -505,7 +554,7 @@ statement still resolves its table:
 | `ALTER [COLUMN] c DROP EXPRESSION` | Only the readable spelling; `DROP EXPRESSION IF EXISTS` is unreadable. |
 | `ALTER [COLUMN] c ADD GENERATED ... AS IDENTITY`, `SET GENERATED ...`, a sequence option such as `SET INCREMENT BY 2`, `RESTART`, and `DROP IDENTITY [IF EXISTS]` | PostgreSQL requires the column to be `NOT NULL` already, so an identity never changes nullability. |
 | `ENABLE`, `DISABLE`, `FORCE`, and `NO FORCE ROW LEVEL SECURITY` | |
-| `ATTACH PARTITION` and `DETACH PARTITION` | The partition's own table is modeled by its own statements. |
+| `ATTACH PARTITION` and `DETACH PARTITION` of a table sqlcj does not model | A modeled partition is linked or unlinked instead, as [Ordered Table DDL](#ordered-table-ddl) states. |
 | `OWNER TO` | |
 | `ENABLE TRIGGER`, `DISABLE TRIGGER`, `ENABLE REPLICA TRIGGER`, and `ENABLE ALWAYS TRIGGER`, and the same four for `RULE` | |
 | `VALIDATE CONSTRAINT` | |
@@ -701,6 +750,8 @@ and recorded type:
 ```text
 sqlcj: Invalid schema source /home/dev/project/schema.sql: Unsupported schema statement: ALTER FOREIGN TABLE at line 12
 sqlcj: Invalid schema source /home/dev/project/schema.sql: Unsupported ALTER TABLE action: SET SCHEMA archive at line 18
+sqlcj: Invalid schema source /home/dev/project/schema.sql: Unsupported CREATE TABLE clause: AS SELECT at line 24
+sqlcj: Invalid schema source /home/dev/project/schema.sql: Table not found in schema: reporting.events
 sqlcj: Invalid schema source /home/dev/project/schema.sql: Encountered unexpected token: ";" at line 4, column 1
 sqlcj: Invalid query 'ListTags' in /home/dev/project/queries.sql at line 5: Column 'tags' has unsupported type JSONB[]
 ```
@@ -857,6 +908,29 @@ Enum types:
 - `DefaultSchemaParserTest.shouldRejectUnsupportedSchemaStatement` and
   `DefaultSchemaParserTest.shouldThrowSchemaParseExceptionForInvalidSql` cover
   the rejected input.
+- `DefaultSchemaParserTest.shouldCopyTheColumnsOfALikeSource` covers a `LIKE`
+  alone with its options and a `public`-qualified source,
+  `DefaultSchemaParserTest.shouldModelTheColumnsOfAnElementListInWrittenOrder`
+  covers a `LIKE` written before and after a column definition and two `LIKE`
+  clauses, and
+  `DefaultSchemaParserTest.shouldRecordOnlyTheOwnConstraintsOfALikeTable`
+  covers the source constraints that are not copied beside the copy's own.
+- `DefaultSchemaParserTest.shouldCopyTheColumnsOfAPartitionParent` covers the
+  range, list, hash, and `DEFAULT` bounds and the `public`-qualified parent,
+  `DefaultSchemaParserTest.shouldRecordTheTableConstraintsOfAPartition` covers
+  the constraint list a `PARTITION OF` may state, and
+  `DefaultSchemaParserTest.shouldModelAnEmptyElementListAsATableWithoutColumns`
+  covers `()`.
+- `DefaultSchemaParserTest.shouldReportARepeatedColumnNameOfALikeSource`,
+  `DefaultSchemaParserTest.shouldReportTheMissingSourceOfACreatedTable`,
+  `DefaultSchemaParserTest.shouldRejectTheCreateTableClausesWhoseColumnsItCannotDetermine`,
+  and `DefaultSchemaParserTest.shouldRejectASourceOrPartitionOfAnotherSchema`
+  cover the repeated column name, the missing source, each rejected clause at
+  the line of its own statement, and the interim rule for a source and a
+  partition qualified with another schema.
+- `SqlcjCompilerIntegrationTest.shouldGenerateCompilableRepositoriesOverCopiedTableColumns`
+  generates and compiles `SELECT *` row records and a repository over a `LIKE`
+  table and a `PARTITION OF` table.
 - `PostgresIntegrationTest.shouldExecuteGeneratedQueryForSnapshotWithIgnoredTableConstraints`
   proves that such a snapshot is valid PostgreSQL DDL and compiles and executes.
 
@@ -882,6 +956,19 @@ Ordered table DDL:
   `DefaultSchemaParserTest.shouldIgnoreDropColumnIfExistsForAMissingColumn`, and
   `DefaultSchemaParserTest.shouldReportTheMissingColumnOfAnAlterTableIfExists`
   cover the `IF [NOT] EXISTS` variants.
+- `DefaultSchemaParserTest.shouldApplyEveryColumnActionOfAParentToItsPartition`
+  and `DefaultSchemaParserTest.shouldApplyAColumnActionToANestedPartition`
+  cover each propagated column action and a nested partition;
+  `DefaultSchemaParserTest.shouldKeepThePartitionLinkThroughARenameOfTheParent`
+  and `DefaultSchemaParserTest.shouldDropThePartitionsOfADroppedParent` cover
+  the parent's rename and `DROP TABLE`, and
+  `DefaultSchemaParserTest.shouldDropAParentNamedBeforeItsPartition` covers the
+  one `DROP TABLE` that names a parent before one of its partitions;
+  `DefaultSchemaParserTest.shouldStopPropagationAfterDetachPartition` and
+  `DefaultSchemaParserTest.shouldStartPropagationAfterAttachPartition` cover the
+  ended and the started link; and
+  `DefaultSchemaParserTest.shouldNotFollowTheSourceOfALikeCopy` covers the
+  `LIKE` copy that stays independent of its source.
 - `DefaultSchemaParserTest.shouldReportTheMissingTableOfAStatement`,
   `DefaultSchemaParserTest.shouldReportTheMissingColumnOfAnAlterTableAction`,
   `DefaultSchemaParserTest.shouldReportAStatementThatRepeatsATableName`,
@@ -908,8 +995,9 @@ Ignored statements:
   named and unnamed constraint actions.
 - `DefaultSchemaParserTest.shouldIgnoreTheAlterTableActionsThatCannotChangeAColumn`
   covers one spelling per ignored `ALTER TABLE` action, including the lower-case
-  and `ALTER TABLE ONLY public.users` spellings and two actions classified by
-  their words in one statement.
+  and `ALTER TABLE ONLY public.users` spellings, the unqualified and
+  `public`-qualified `ATTACH` and `DETACH PARTITION` of a partition sqlcj does
+  not model, and two actions classified by their words in one statement.
 - `DefaultSchemaParserTest.shouldNotResolveAnIgnoredStatementAgainstTheSchema`
   covers that an ignored statement, including a view over an unmodeled table and
   a `TRUNCATE` of one, may name an unmodeled table or column;
