@@ -292,9 +292,9 @@ public class DefaultSchemaParser implements SchemaParser {
      *
      * <p>Only the statements sqlcj models are applied: {@code CREATE TABLE},
      * {@code ALTER TABLE}, {@code DROP TABLE},
-     * {@code CREATE TYPE ... AS ENUM}, and {@code ALTER TYPE ... ADD VALUE}.
-     * Every other statement a schema source may record is ignored and is not
-     * resolved against the schema at all.
+     * {@code CREATE TYPE ... AS ENUM}, and {@code ALTER TYPE}. Every other
+     * statement a schema source may record is ignored and is not resolved
+     * against the schema at all.
      */
     private void apply(Statement statement, int line, List<Table> tables, List<EnumType> enums) {
         if (statement instanceof CreateTable createTable) {
@@ -309,11 +309,7 @@ public class DefaultSchemaParser implements SchemaParser {
         ) {
             applyCreateEnumType(createType, definition, enums);
         } else if (statement instanceof AlterType alterType) {
-            if (alterType.getAction() != AlterType.Action.ADD_VALUE) {
-                throw unsupportedAlterTypeAction(line);
-            }
-
-            applyAddEnumValue(alterType, enums);
+            applyAlterType(alterType, line, enums, tables);
         }
     }
 
@@ -367,10 +363,12 @@ public class DefaultSchemaParser implements SchemaParser {
     }
 
     /**
-     * Appends one enum type with its declared labels. A repeated type name
-     * fails, as PostgreSQL rejects it, and so does a repeated label. An enum is
-     * the only type sqlcj models; a {@code CREATE TYPE} of any other kind is
-     * ignored, and a column of such a type is recorded with its declared type.
+     * Appends one enum type with its declared labels, and replaces a modeled
+     * enum of the same name in its position, because the {@code DROP TYPE} that
+     * freed the name is never seen. A repeated label fails, as PostgreSQL
+     * rejects it. An enum is the only type sqlcj models; a {@code CREATE TYPE}
+     * of any other kind is ignored, and a column of such a type is recorded
+     * with its declared type.
      */
     private void applyCreateEnumType(
         CreateType createType,
@@ -379,9 +377,7 @@ public class DefaultSchemaParser implements SchemaParser {
     ) {
         String typeName = MultiPartName.unquote(createType.getName());
 
-        if (indexOfEnum(enums, typeName) >= 0) {
-            throw typeAlreadyExists(typeName);
-        }
+        int index = indexOfEnum(enums, typeName);
 
         List<String> labels = new ArrayList<>();
 
@@ -395,14 +391,208 @@ public class DefaultSchemaParser implements SchemaParser {
             labels.add(label);
         }
 
-        enums.add(new EnumType(typeName, labels));
+        EnumType enumType = new EnumType(typeName, labels);
+
+        if (index < 0) {
+            enums.add(enumType);
+
+            return;
+        }
+
+        enums.set(index, enumType);
+    }
+
+    /**
+     * Applies one {@code ALTER TYPE} action, resolving the stated type name,
+     * with its SQL identifier delimiters removed, among the modeled enum types.
+     *
+     * <p>An action that cannot change a modeled enum is ignored without the
+     * type being resolved at all: ownership and the attribute actions of a
+     * composite type. Every other action sqlcj models resolves the type, and an
+     * action sqlcj does not model is rejected naming the action.
+     */
+    private void applyAlterType(
+        AlterType alterType,
+        int line,
+        List<EnumType> enums,
+        List<Table> tables
+    ) {
+        AlterType.Action action = alterType.getAction();
+
+        if (ignoresAlterTypeAction(action)) {
+            return;
+        }
+
+        if (action == AlterType.Action.ADD_VALUE) {
+            applyAddEnumValue(alterType, enums);
+
+            return;
+        }
+
+        String typeName = MultiPartName.unquote(alterType.getName());
+        int index = indexOfEnum(enums, typeName);
+
+        switch (action) {
+            case RENAME_VALUE -> renameEnumLabel(alterType, typeName, index, enums);
+            case RENAME -> renameEnumType(alterType, typeName, index, enums, tables);
+            case SET_SCHEMA -> moveEnumTypeToSchema(alterType, line, typeName, index);
+            default -> throw unsupportedAlterTypeAction(String.valueOf(action), line);
+        }
+    }
+
+    /**
+     * Reports whether one {@code ALTER TYPE} action cannot change a modeled
+     * enum type: {@code OWNER TO} and the attribute actions, which belong to a
+     * composite type.
+     */
+    private boolean ignoresAlterTypeAction(AlterType.Action action) {
+        return switch (action) {
+            case OWNER, RENAME_ATTRIBUTE, ATTRIBUTES -> true;
+            default -> false;
+        };
+    }
+
+    /**
+     * Renames one label of an enum type in its position, so the modeled labels
+     * keep PostgreSQL's sort order. A missing old label and a new label the
+     * type already has both fail, as PostgreSQL rejects them.
+     */
+    private void renameEnumLabel(
+        AlterType alterType,
+        String typeName,
+        int index,
+        List<EnumType> enums
+    ) {
+        if (index < 0) {
+            throw typeNotFound(typeName);
+        }
+
+        EnumType enumType = enums.get(index);
+        String label = alterType.getValue().getNotExcapedValue();
+        String newLabel = alterType.getNewValue().getNotExcapedValue();
+
+        int position = enumType.labels().indexOf(label);
+
+        if (position < 0) {
+            throw labelNotFound(typeName, label);
+        }
+
+        if (enumType.labels().contains(newLabel)) {
+            throw labelAlreadyExists(typeName, newLabel);
+        }
+
+        List<String> labels = new ArrayList<>(enumType.labels());
+
+        labels.set(position, newLabel);
+
+        enums.set(index, new EnumType(enumType.name(), labels));
+    }
+
+    /**
+     * Renames one enum type in its position, keeping its labels, and renames
+     * the type of every column of it, scalar and array alike, because a column
+     * names its enum type by that name. A modeled enum of the new name is
+     * removed, because the {@code DROP TYPE} that freed the name is never seen;
+     * a column still naming it keeps that name, so it is modeled as a column of
+     * the renamed enum with its labels, the column PostgreSQL would have
+     * removed.
+     */
+    private void renameEnumType(
+        AlterType alterType,
+        String typeName,
+        int index,
+        List<EnumType> enums,
+        List<Table> tables
+    ) {
+        if (index < 0) {
+            ignoreUnmodeledType(alterType, typeName);
+
+            return;
+        }
+
+        String newName = MultiPartName.unquote(alterType.getNewName());
+        int replaced = indexOfEnum(enums, newName);
+        int renamed = index;
+
+        if (replaced >= 0 && replaced != index) {
+            enums.remove(replaced);
+
+            if (replaced < index) {
+                renamed--;
+            }
+        }
+
+        enums.set(renamed, new EnumType(newName, enums.get(renamed).labels()));
+
+        tables.replaceAll(table -> renameColumnEnumType(table, typeName, newName));
+    }
+
+    /**
+     * Rejects {@code SET SCHEMA} of a modeled enum type, because its columns
+     * keep the type in a namespace sqlcj does not model.
+     */
+    private void moveEnumTypeToSchema(
+        AlterType alterType,
+        int line,
+        String typeName,
+        int index
+    ) {
+        if (index < 0) {
+            ignoreUnmodeledType(alterType, typeName);
+
+            return;
+        }
+
+        throw unsupportedAlterTypeAction("SET SCHEMA " + alterType.getNewName(), line);
+    }
+
+    /**
+     * Ignores an {@code ALTER TYPE} action on a type sqlcj does not model,
+     * because such a type is none of its enum types.
+     *
+     * <p>A type name is the statement's own name with its SQL identifier
+     * delimiters removed, so {@code public.mood} and {@code mood} are different
+     * names. A qualified name that matches no modeled enum may therefore still
+     * state one, and fails as a missing type rather than being ignored.
+     */
+    private void ignoreUnmodeledType(AlterType alterType, String typeName) {
+        if (alterType.getName().contains(".")) {
+            throw typeNotFound(typeName);
+        }
+    }
+
+    /** Renames the enum type of every column of {@code oldName}. */
+    private Table renameColumnEnumType(Table table, String oldName, String newName) {
+        List<Column> columns = new ArrayList<>(table.columns());
+
+        for (int i = 0; i < columns.size(); i++) {
+            Column column = columns.get(i);
+
+            if (column.enumType() == null || !column.enumType().equalsIgnoreCase(oldName)) {
+                continue;
+            }
+
+            columns.set(
+                i,
+                new Column(
+                    column.name(),
+                    column.type(),
+                    column.nullable(),
+                    column.unsupportedType(),
+                    newName,
+                    column.array(),
+                    column.blankPadded()
+                )
+            );
+        }
+
+        return new Table(table.name(), columns, table.constraints());
     }
 
     /**
      * Inserts one label into an enum type: after the last label by default, and
      * otherwise directly before or after the stated neighbor, so the modeled
-     * labels stay in PostgreSQL's sort order. Adding a value is the only
-     * {@code ALTER TYPE} action sqlcj models; every other action is rejected.
+     * labels stay in PostgreSQL's sort order.
      *
      * <p>As PostgreSQL does, {@code IF NOT EXISTS} is decided by the label
      * alone: a label the type already has is a no-op even when the stated
@@ -1063,10 +1253,6 @@ public class DefaultSchemaParser implements SchemaParser {
         return new IllegalArgumentException("Type not found in schema: " + typeName);
     }
 
-    private IllegalArgumentException typeAlreadyExists(String typeName) {
-        return new IllegalArgumentException("Type already exists in schema: " + typeName);
-    }
-
     private IllegalArgumentException labelNotFound(String typeName, String label) {
         return new IllegalArgumentException(
             "Label not found in type %s: %s".formatted(typeName, label)
@@ -1100,9 +1286,10 @@ public class DefaultSchemaParser implements SchemaParser {
         );
     }
 
-    private UnsupportedOperationException unsupportedAlterTypeAction(int line) {
+    /** The failure of one rejected {@code ALTER TYPE} action, naming the action. */
+    private UnsupportedOperationException unsupportedAlterTypeAction(String action, int line) {
         return new UnsupportedOperationException(
-            "Unsupported ALTER TYPE action at line %d".formatted(line)
+            "Unsupported ALTER TYPE action: %s at line %d".formatted(action, line)
         );
     }
 

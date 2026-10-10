@@ -94,9 +94,10 @@ order the files are read in.
 
 - One rule decides every statement: only the `CREATE TABLE`, `DROP TABLE`, and
   `ALTER TABLE` forms listed in [Ordered Table DDL](#ordered-table-ddl) and the
-  `CREATE TYPE ... AS ENUM` and `ALTER TYPE ... ADD VALUE` forms listed in
-  [Enum Types](#enum-types) update the schema model, and every other statement
-  a schema file records is accepted and leaves it unchanged. Only the few
+  `CREATE TYPE ... AS ENUM` and `ALTER TYPE ... ADD VALUE`, `RENAME TO`, and
+  `RENAME VALUE` forms listed in [Enum Types](#enum-types) update the schema
+  model, and every other statement a schema file records is accepted and
+  leaves it unchanged. Only the few
   statements listed in [Ignored Statements](#ignored-statements) are rejected
   instead, because sqlcj cannot tell what they would do to the model.
 - The statements of the schema files of one entry are applied in order to one
@@ -247,17 +248,29 @@ left:
 | `ALTER TYPE ... ADD VALUE '<label>' BEFORE '<neighbour>'` | Inserts the label directly before the neighbour. |
 | `ALTER TYPE ... ADD VALUE '<label>' AFTER '<neighbour>'` | Inserts the label directly after the neighbour. |
 | `ALTER TYPE ... ADD VALUE IF NOT EXISTS '<label>'` | Does nothing when the type already has the label. As PostgreSQL does, the existing label decides before the neighbour, so a neighbour the type does not have is not resolved at all. |
-| Any other `ALTER TYPE` action, such as `RENAME TO`, `RENAME VALUE`, `OWNER TO`, `SET SCHEMA`, or an attribute change | Rejected as `Unsupported ALTER TYPE action at line <n>`. |
+| `ALTER TYPE ... RENAME TO <name>` | Renames the type in its position, keeping its labels, and every column of that type, scalar and array alike, follows it. |
+| `ALTER TYPE ... RENAME VALUE '<label>' TO '<new label>'` | Renames the label in its position, so the modeled labels keep PostgreSQL's sort order. |
+| A `CREATE TYPE ... AS ENUM (...)` or an `ALTER TYPE ... RENAME TO` whose name a modeled enum already has | Replaces that enum in its position with the newly declared or renamed one, because the `DROP TYPE ... CASCADE` that freed the name is never seen. This is how the migration that replaces an enum loads, in either of its usual shapes: renaming the old type away before declaring the new one under its name, or declaring the new type beside it and renaming the new type onto its name once the columns are retyped. A column that still names a replaced enum keeps that name, so it is modeled as a column of the replacing enum with its labels, which is the same unseen `DROP TYPE ... CASCADE` case: PostgreSQL would have removed the column. |
+| `ALTER TYPE ... OWNER TO`, `RENAME ATTRIBUTE`, `ADD ATTRIBUTE`, `DROP ATTRIBUTE`, and `ALTER ATTRIBUTE` | Ignored. Ownership cannot change a modeled enum and the attribute actions belong to a composite type, so the stated type is not resolved at all. |
+| `ALTER TYPE ... SET SCHEMA <schema>` | Rejected for a modeled enum as `Unsupported ALTER TYPE action: SET SCHEMA <schema> at line <n>`, because the columns of that type would keep it in a namespace sqlcj does not model. Ignored for a type sqlcj does not model. |
+| `ALTER TYPE ... RENAME TO` of a type sqlcj does not model | Ignored, because such a type is none of its enum types. |
 | `CREATE TYPE` of a composite, range, or shell type | Ignored. A column of such a type is recorded with its declared type, as [Unsupported Types and DDL](#unsupported-types-and-ddl) describes. |
 | `DROP TYPE` | Ignored. sqlcj's parser cannot read the statement, and an unreadable statement that does not open as table or type DDL is ignored, so an enum the schema models stays modeled with its labels and the columns of that type stay modeled; see [Ignored Statements](#ignored-statements). |
 
+An `ALTER TYPE` written in a form sqlcj's parser cannot read, such as a
+qualified `RENAME TO` target, several actions joined by commas, or
+`SET (...)`, is rejected as unreadable type DDL; see
+[Ignored Statements](#ignored-statements).
+
 Type names are matched case-insensitively, after their SQL identifier
-delimiters are removed, and labels are matched exactly. A statement that repeats
-a type or a label, or that refers to a type or a label that is not modeled, is
-rejected as PostgreSQL rejects it:
+delimiters are removed, and labels are matched exactly. A type name is the
+statement's own name, so `public.stage_setting` and `stage_setting` are
+different names: a `RENAME TO` or `SET SCHEMA` of a qualified name that matches
+no modeled enum fails as a missing type rather than being ignored, because it
+may state one. A statement that repeats a label, or that refers to a type or a
+label that is not modeled, is rejected as PostgreSQL rejects it:
 
 ```text
-sqlcj: Invalid schema source /home/dev/project/sql/migrations/V2__stages.sql: Type already exists in schema: stage_setting
 sqlcj: Invalid schema source /home/dev/project/sql/migrations/V2__stages.sql: Type not found in schema: stage_setting
 sqlcj: Invalid schema source /home/dev/project/sql/migrations/V2__stages.sql: Label already exists in type stage_setting: indoor
 sqlcj: Invalid schema source /home/dev/project/sql/migrations/V2__stages.sql: Label not found in type stage_setting: covered
@@ -424,9 +437,8 @@ keep up to date.
 
 The modeled statements are the `CREATE TABLE`, `DROP TABLE`, and `ALTER TABLE`
 forms of [Ordered Table DDL](#ordered-table-ddl) and the
-`CREATE TYPE ... AS ENUM` and `ALTER TYPE ... ADD VALUE` forms of
-[Enum Types](#enum-types). Everything else a migration history holds is ignored,
-including
+`CREATE TYPE ... AS ENUM` and `ALTER TYPE` forms of [Enum Types](#enum-types).
+Everything else a migration history holds is ignored, including
 
 - `CREATE INDEX`, `CREATE UNIQUE INDEX`, `ALTER INDEX`, and `DROP INDEX`,
 - `COMMENT ON` of any target, including `TABLE`, `COLUMN`, `VIEW`, `TYPE`,
@@ -464,7 +476,7 @@ what they would do to the schema model:
 | Statement | Diagnostic |
 | --- | --- |
 | An `ALTER TABLE` action outside [Ordered Table DDL](#ordered-table-ddl) and the ignored actions below | `Unsupported ALTER TABLE action: <action> at line <n>`, quoting the action's own SQL |
-| An `ALTER TYPE` action other than `ADD VALUE` | `Unsupported ALTER TYPE action at line <n>` |
+| An `ALTER TYPE ... SET SCHEMA` of a modeled enum type | `Unsupported ALTER TYPE action: SET SCHEMA <schema> at line <n>` |
 | A statement sqlcj's parser cannot read that opens as table or type DDL, outside the `ALTER TABLE` actions below | The parser's own reason with the line and column of the unexpected token, as in `Encountered unexpected token: "DATA" at line 18, column 41` |
 | A statement sqlcj's parser reports only as opaque text, or as several statements, and that opens as table or type DDL | `Unsupported schema statement: ALTER FOREIGN TABLE at line <n>`, quoting the opening words |
 
