@@ -16,7 +16,6 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -79,7 +78,7 @@ class DefaultSchemaParserTest {
 
     /**
      * The second migration file, whose {@code COMMENT ON TYPE} statement
-     * JSqlParser does not parse.
+     * JSqlParser does not parse and which is therefore ignored.
      */
     private static final String STAGE_MIGRATION = """
         CREATE TYPE stage_setting AS ENUM ('indoor', 'outdoor');
@@ -106,9 +105,6 @@ class DefaultSchemaParserTest {
         ALTER TABLE stage DROP COLUMN legacy_code;
         ALTER TABLE stage ADD COLUMN opened_at TIMESTAMP NOT NULL DEFAULT now();
         """;
-
-    /** The statement of {@link #STAGE_MIGRATION} that fails to parse. */
-    private static final String COMMENT_ON_TYPE_STATEMENT = "COMMENT ON TYPE stage_setting IS 'Whether a stage is covered';\n";
 
     private final SchemaParser parser = new DefaultSchemaParser();
 
@@ -951,6 +947,108 @@ class DefaultSchemaParserTest {
     }
 
     /**
+     * A statement sqlcj's parser cannot read at all is ignored like any parsed
+     * statement outside the modeled forms, because it does not open as table or
+     * type DDL and therefore cannot change what the schema models.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "DO $$ BEGIN RAISE NOTICE 'x'; END $$;",
+            "DO $do$ BEGIN RAISE NOTICE 'x'; END $do$;",
+            "DO LANGUAGE plpgsql $$ BEGIN END $$;",
+            "DROP TYPE stage_setting;",
+            "COMMENT ON TYPE stage_setting IS 'the setting';",
+            "COMMENT ON INDEX users_email_idx IS 'the index';",
+            "COMMENT ON FUNCTION touch() IS 'the trigger function';",
+            "COMMENT ON SCHEMA public IS 'the schema';",
+            "COMMENT ON EXTENSION pgcrypto IS 'the extension';",
+            "COMMENT ON CONSTRAINT users_email_key ON users IS 'the constraint';",
+            "SET search_path TO app, public;",
+            "DROP POLICY users_owner ON users;",
+            "DROP DOMAIN positive;",
+            "VACUUM;",
+            "VACUUM ANALYZE users;",
+            "LOCK TABLE users IN ACCESS EXCLUSIVE MODE;",
+            "BEGIN;",
+            "COPY users (id, email) TO stdout;",
+            "CREATE RULE users_nodelete AS ON DELETE TO users DO NOTHING;",
+            "CREATE EVENT TRIGGER users_ddl ON ddl_command_start EXECUTE FUNCTION touch();",
+            "CREATE FUNCTION one() RETURNS integer AS 'SELECT 1' LANGUAGE sql;",
+            "CREATE PROCEDURE one() AS 'SELECT 1' LANGUAGE sql;",
+            "CREATE FUNCTION two() RETURNS integer LANGUAGE sql RETURN 1;",
+            "CREATE FUNCTION touch() RETURNS trigger AS $fn$BEGIN RETURN NEW; END$fn$ "
+                + "LANGUAGE plpgsql;"
+        }
+    )
+    void shouldIgnoreEveryUnreadableStatementThatIsNotTableOrTypeDdl(String statement) {
+        Schema base = parser.parse(BASE_SCHEMA);
+        Schema schema = applied(statement);
+
+        assertEquals(base.tables(), schema.tables());
+        assertEquals(base.enums(), schema.enums());
+    }
+
+    /**
+     * An unreadable {@code ALTER TABLE} whose every top-level action adds a
+     * constraint or an identity is ignored without its table being resolved, so
+     * it is ignored for a table the schema does not model at all.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "ALTER TABLE payments ALTER id ADD GENERATED;",
+            "ALTER TABLE payments ALTER COLUMN id ADD GENERATED;",
+            "ALTER TABLE payments ADD CONSTRAINT payments_excl EXCLUDE USING gist (id WITH =);",
+            "ALTER TABLE payments ADD EXCLUDE USING gist (id WITH =);",
+            "ALTER TABLE payments ADD CONSTRAINT payments_key UNIQUE (id) "
+                + "DEFERRABLE INITIALLY DEFERRED;",
+            "ALTER TABLE payments ADD UNIQUE (id) DEFERRABLE INITIALLY DEFERRED;",
+            "ALTER TABLE payments ADD CONSTRAINT payments_key UNIQUE USING INDEX payments_idx;",
+            "ALTER TABLE payments ADD PRIMARY KEY USING INDEX payments_idx;",
+            "ALTER TABLE payments ADD FOREIGN KEY (id) REFERENCES users (id) NOT VALID;",
+            "ALTER TABLE payments ADD CONSTRAINT payments_check CHECK (id > 0) NOT VALID;",
+            "ALTER TABLE payments ADD CHECK (id > 0) NOT VALID;",
+            "ALTER TABLE payments ADD CHECK (id > 0);",
+            "alter table payments add check (id > 0) not valid;",
+            "ALTER TABLE IF EXISTS ONLY payments ADD CHECK (id > 0);",
+            "ALTER TABLE payments ADD CHECK (id > 0), "
+                + "ADD CONSTRAINT payments_key UNIQUE (id) DEFERRABLE;"
+        }
+    )
+    void shouldIgnoreTheUnreadableAlterTableActionsThatCannotChangeAColumn(String statement) {
+        Schema base = parser.parse(BASE_SCHEMA);
+        Schema schema = applied(statement);
+
+        assertEquals(base.tables(), schema.tables());
+        assertEquals(base.enums(), schema.enums());
+    }
+
+    /**
+     * The identity form {@code pg_dump} writes for every identity column spans
+     * several lines and names a sequence, and is ignored like the single-line
+     * forms.
+     */
+    @Test
+    void shouldIgnoreThePgDumpIdentityAlterTableAction() {
+        Schema base = parser.parse(BASE_SCHEMA);
+
+        Schema schema = applied("""
+            ALTER TABLE ONLY public.payments ALTER COLUMN id ADD GENERATED BY DEFAULT AS IDENTITY (
+                SEQUENCE NAME public.payments_id_seq
+                START WITH 1
+                INCREMENT BY 1
+                NO MINVALUE
+                NO MAXVALUE
+                CACHE 1
+            );
+            """);
+
+        assertEquals(base.tables(), schema.tables());
+        assertEquals(base.enums(), schema.enums());
+    }
+
+    /**
      * A {@code CREATE TYPE} that is not an enum is ignored rather than modeled,
      * so a column of that type is recorded with the canonical spelling of its
      * declared type, like a column of any type sqlcj cannot map.
@@ -1056,12 +1154,6 @@ class DefaultSchemaParserTest {
             "ALTER TYPE status RENAME TO state;|Unsupported ALTER TYPE action at line 1",
             "ALTER TYPE status RENAME VALUE 'draft' TO 'new';"
                 + "|Unsupported ALTER TYPE action at line 1",
-            "CREATE FUNCTION one() RETURNS integer AS 'SELECT 1' LANGUAGE sql;"
-                + "|Unsupported schema statement: CREATE FUNCTION without a dollar-quoted body"
-                + " at line 1",
-            "CREATE PROCEDURE one() AS 'SELECT 1' LANGUAGE sql;"
-                + "|Unsupported schema statement: CREATE PROCEDURE without a dollar-quoted body"
-                + " at line 1",
             "ALTER FOREIGN TABLE ft ADD COLUMN x integer;"
                 + "|Unsupported schema statement: ALTER FOREIGN TABLE at line 1",
             "alter foreign table ft add column x integer;"
@@ -1080,29 +1172,22 @@ class DefaultSchemaParserTest {
     }
 
     /**
-     * A single-quoted function body captures the rest of the source, including a
-     * later dollar-quoted body, so the function is still rejected at the line it
-     * begins on and nothing after it is applied.
+     * A function body that is not dollar-quoted ends at its own separator, so it
+     * is ignored like any other function and the statements after it, including a
+     * later dollar-quoted body, are applied.
      */
     @Test
-    void shouldRejectASingleQuotedFunctionBodyThatCapturesALaterDollarQuotedBody() {
-        String sql = """
+    void shouldApplyTheStatementsAfterAFunctionBodyThatIsNotDollarQuoted() {
+        Schema schema = parser.parse("""
             CREATE TABLE users (id BIGINT);
             CREATE FUNCTION one() RETURNS integer AS 'SELECT 1' LANGUAGE sql;
             CREATE TABLE later (id BIGINT);
             DROP TABLE users;
             CREATE FUNCTION touch() RETURNS trigger AS $$ BEGIN RETURN NEW; END; $$ LANGUAGE plpgsql;
-            """;
+            CREATE TABLE last (id BIGINT);
+            """);
 
-        UnsupportedOperationException exception = assertThrows(
-            UnsupportedOperationException.class,
-            () -> parser.parse(sql)
-        );
-
-        assertEquals(
-            "Unsupported schema statement: CREATE FUNCTION without a dollar-quoted body at line 2",
-            exception.getMessage()
-        );
+        assertEquals(List.of("later", "last"), tableNames(schema));
     }
 
     /**
@@ -1137,6 +1222,186 @@ class DefaultSchemaParserTest {
 
         assertEquals(
             "Unsupported schema statement: ALTER FOREIGN TABLE at line 15",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * An unreadable {@code ALTER TABLE} action outside the ignored ones is
+     * rejected with the parser's own reason at the line and column the
+     * unexpected token stands at in the file.
+     */
+    @Test
+    void shouldRejectAnUnreadableAlterColumnActionAtItsFileLineAndColumn() {
+        Schema schema = parser.parse(BASE_SCHEMA);
+
+        SchemaParseException exception = assertThrows(
+            SchemaParseException.class,
+            () -> parser.parse(schema, """
+                CREATE INDEX users_email_idx ON users (email);
+
+                ALTER TABLE users ALTER COLUMN name SET DATA TYPE text;
+                """)
+        );
+
+        assertEquals(
+            "Encountered unexpected token: \"DATA\" at line 3, column 41",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * An ignored action beside an unreadable one does not make the statement
+     * ignored, and a statement that begins in the middle of a line is reported
+     * at the column it begins at.
+     */
+    @Test
+    void shouldRejectAnUnreadableAlterTableActionBesideAnIgnoredOne() {
+        Schema schema = parser.parse(BASE_SCHEMA);
+
+        SchemaParseException exception = assertThrows(
+            SchemaParseException.class,
+            () -> parser.parse(
+                schema,
+                "CREATE INDEX users_email_idx ON users (email); "
+                    + "ALTER TABLE users ALTER COLUMN name SET DATA TYPE text, "
+                    + "ADD CHECK (id > 0);\n"
+            )
+        );
+
+        assertEquals(
+            "Encountered unexpected token: \"DATA\" at line 1, column 88",
+            exception.getMessage()
+        );
+    }
+
+    /** An unreadable {@code CREATE TYPE} is rejected at its file position too. */
+    @Test
+    void shouldRejectAnUnreadableCreateTypeAtItsFileLineAndColumn() {
+        SchemaParseException exception = assertThrows(
+            SchemaParseException.class,
+            () -> parser.parse("""
+                CREATE TABLE payments (id BIGINT NOT NULL);
+
+                CREATE TYPE pair AS (a int, b);
+                """)
+        );
+
+        assertEquals(
+            "Encountered unexpected token: \")\" at line 3, column 30",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * Each statement is parsed alone, so the statements before and after an
+     * unreadable one are applied. A dollar-quoted body is kept whole whether its
+     * delimiter is tagged or not, and whether the tag is glued to the body or
+     * not, so DDL the body states is not modeled and a {@code DROP TABLE} it
+     * states drops nothing.
+     */
+    @Test
+    void shouldApplyTheStatementsAroundUnreadableOnesAndNotModelDdlInsideABody() {
+        Schema schema = parser.parse("""
+            CREATE TABLE users (id BIGINT NOT NULL);
+            DO $$ BEGIN RAISE NOTICE 'start'; END $$;
+            DO $do$ BEGIN RAISE NOTICE 'tagged'; END $do$;
+            CREATE FUNCTION touch() RETURNS trigger AS $fn$BEGIN
+                CREATE TABLE glued_inner (id BIGINT);
+            END$fn$ LANGUAGE plpgsql;
+            CREATE FUNCTION bump() RETURNS integer AS $body$
+            BEGIN
+                CREATE TABLE tagged_inner (id BIGINT);
+                DROP TABLE users;
+                RETURN 1;
+            END
+            $body$ LANGUAGE plpgsql;
+            COMMENT ON TYPE stage_setting IS 'ignored';
+            CREATE TABLE orders (id BIGINT NOT NULL);
+            """);
+
+        assertEquals(List.of("users", "orders"), tableNames(schema));
+    }
+
+    /**
+     * A rejected statement keeps its own line after a blanked psql meta-command
+     * line, unreadable statements, and a multi-line tagged body, each of which
+     * the schema source keeps its line numbering through.
+     */
+    @Test
+    void shouldReportTheLineOfARejectedStatementAfterUnreadableOnesAndATaggedBody() {
+        String sql = """
+            \\restrict aBcD1234
+            CREATE TABLE users (id BIGINT NOT NULL);
+            DO $$ BEGIN RAISE NOTICE 'start'; END $$;
+            CREATE FUNCTION bump() RETURNS integer AS $body$
+            BEGIN
+                CREATE TABLE tagged_inner (id BIGINT);
+                RETURN 1;
+            END
+            $body$ LANGUAGE plpgsql;
+            COMMENT ON TYPE stage_setting IS 'ignored';
+            ALTER FOREIGN TABLE users ADD COLUMN label TEXT;
+            """;
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> parser.parse(sql)
+        );
+
+        assertEquals(
+            "Unsupported schema statement: ALTER FOREIGN TABLE at line 11",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A psql meta-command line, which recent {@code pg_dump} releases write
+     * around the dumped statements, is skipped rather than lexed, because its
+     * first character is a lexical error.
+     */
+    @Test
+    void shouldSkipPsqlMetaCommandLines() {
+        Schema schema = parser.parse("""
+            \\restrict aBcD1234
+
+            CREATE TABLE users (
+                id BIGINT NOT NULL
+            );
+
+            \\unrestrict aBcD1234
+            """);
+
+        assertEquals(List.of("users"), tableNames(schema));
+
+        assertEquals(
+            List.of(new Column("id", ColumnType.BIGINT, false)),
+            table(schema, "users").columns()
+        );
+    }
+
+    /**
+     * A tagged dollar-quoted body that is never closed fails the schema source
+     * at the delimiter that opened it, because everything after it would belong
+     * to that body.
+     */
+    @Test
+    void shouldRejectAnUnterminatedDollarQuotedBody() {
+        String sql = """
+            CREATE TABLE users (id BIGINT NOT NULL);
+            CREATE FUNCTION bump() RETURNS integer AS $body$
+            BEGIN
+                RETURN 1;
+            END;
+            """;
+
+        SchemaParseException exception = assertThrows(
+            SchemaParseException.class,
+            () -> parser.parse(sql)
+        );
+
+        assertEquals(
+            "Unterminated dollar-quoted string at line 2, column 43",
             exception.getMessage()
         );
     }
@@ -1673,45 +1938,18 @@ class DefaultSchemaParserTest {
     }
 
     /**
-     * A migration file of the kind published sqlc examples use fails on its
-     * {@code COMMENT ON TYPE} statement, which JSqlParser does not parse, and
-     * the failure states the reason and the location of that statement.
+     * Migration files of the kind published sqlc examples use load in order and
+     * unchanged: the {@code COMMENT ON TYPE} statement JSqlParser cannot read is
+     * ignored beside the targets it reads, the enum type and the reshaping
+     * statements are applied, the enum column is modeled from the declared type,
+     * and the enum-array and text-array columns are recorded as unsupported.
      */
     @Test
-    void shouldRejectTheCommentOnTypeStatementOfAMigrationFile() {
-        Schema schema = parser.parse(REGION_MIGRATION);
-
-        SchemaParseException exception = assertThrows(
-            SchemaParseException.class,
-            () -> parser.parse(schema, STAGE_MIGRATION)
-        );
-
-        assertEquals(
-            "Encountered unexpected token: \"TYPE\" at line 14, column 12",
-            exception.getMessage()
-        );
-    }
-
-    /**
-     * Without that one statement the same migration files load in order: the
-     * remaining {@code COMMENT ON} targets, the enum type, and the reshaping
-     * statements are applied, the enum column is modeled from the declared
-     * type, and the enum-array and text-array columns are recorded as
-     * unsupported.
-     */
-    @Test
-    void shouldLoadTheMigrationFilesInOrderWithoutTheCommentOnTypeStatement() {
-        String loadableStageMigration = STAGE_MIGRATION.replace(
-            COMMENT_ON_TYPE_STATEMENT,
-            ""
-        );
-
-        assertNotEquals(STAGE_MIGRATION, loadableStageMigration);
-
+    void shouldLoadTheMigrationFilesInOrder() {
         Schema schema = parser.parse(
             parser.parse(
                 parser.parse(REGION_MIGRATION),
-                loadableStageMigration
+                STAGE_MIGRATION
             ),
             RESHAPE_STAGE_MIGRATION
         );
@@ -1987,22 +2225,28 @@ class DefaultSchemaParserTest {
     }
 
     /**
-     * {@code DROP TYPE} removes an enum type sqlcj models, so it stays
-     * rejected. sqlcj's parser does not read the statement at all, so it is
-     * reported as a syntax error rather than as an unsupported statement.
+     * {@code DROP TYPE} is ignored, because sqlcj's parser cannot read it and it
+     * does not open as table or type DDL, so a modeled enum survives it and the
+     * columns of that type stay modeled.
      */
     @Test
-    void shouldRejectDropType() {
-        Schema schema = enumSchema();
-
-        SchemaParseException exception = assertThrows(
-            SchemaParseException.class,
-            () -> parser.parse(schema, "DROP TYPE stage_setting;")
+    void shouldIgnoreDropTypeAndKeepTheModeledEnum() {
+        Schema schema = parser.parse(
+            parser.parse(
+                enumSchema(),
+                "CREATE TABLE stages (setting stage_setting NOT NULL);"
+            ),
+            "DROP TYPE stage_setting;"
         );
 
         assertEquals(
-            "Encountered unexpected token: \"TYPE\" at line 1, column 6",
-            exception.getMessage()
+            List.of(new EnumType("stage_setting", List.of("indoor", "outdoor"))),
+            schema.enums()
+        );
+
+        assertEquals(
+            List.of(new Column("setting", ColumnType.ENUM, false, null, "stage_setting")),
+            table(schema, "stages").columns()
         );
     }
 

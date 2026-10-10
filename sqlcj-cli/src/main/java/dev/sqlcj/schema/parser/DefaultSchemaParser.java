@@ -9,12 +9,8 @@ import dev.sqlcj.schema.Table;
 import dev.sqlcj.sql.SqlParseReason;
 import net.sf.jsqlparser.JSQLParserException;
 import net.sf.jsqlparser.expression.StringValue;
-import net.sf.jsqlparser.parser.CCJSqlParser;
-import net.sf.jsqlparser.parser.CCJSqlParserConstants;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
-import net.sf.jsqlparser.parser.Token;
 import net.sf.jsqlparser.schema.MultiPartName;
-import net.sf.jsqlparser.statement.CreateFunctionalStatement;
 import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.Statements;
 import net.sf.jsqlparser.statement.UnsupportedStatement;
@@ -35,7 +31,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicReference;
 
 public class DefaultSchemaParser implements SchemaParser {
 
@@ -57,67 +52,236 @@ public class DefaultSchemaParser implements SchemaParser {
 
     @Override
     public Schema parse(Schema schema, String sql) {
-        AtomicReference<CCJSqlParser> parser = new AtomicReference<>();
+        List<Table> tables = new ArrayList<>(schema.tables());
+        List<EnumType> enums = new ArrayList<>(schema.enums());
+
+        for (SchemaSourceSplitter.SourceStatement statement : SchemaSourceSplitter.split(sql)) {
+            apply(statement, tables, enums);
+        }
+
+        return new Schema(tables, enums);
+    }
+
+    /**
+     * Parses one statement of a schema source alone and applies it, so that a
+     * statement the parser cannot read fails only itself.
+     *
+     * <p>A statement the parser reads as exactly one statement of a kind of its
+     * own is applied as any parsed statement is. Every other statement is
+     * unreadable: the parser states a syntax failure for it, reports it only as
+     * opaque text, or reads it as several statements. An unreadable statement is
+     * ignored unless it opens as table or type DDL, which may change what the
+     * schema models, and an unreadable {@code ALTER TABLE} is ignored as well
+     * when every one of its top-level actions cannot change a modeled column.
+     */
+    private void apply(
+        SchemaSourceSplitter.SourceStatement statement,
+        List<Table> tables,
+        List<EnumType> enums
+    ) {
+        Statements parsed = null;
+        JSQLParserException failure = null;
 
         try {
-            Statements statements = CCJSqlParserUtil.parseStatements(sql, parser::set);
-
-            List<Table> tables = new ArrayList<>(schema.tables());
-            List<EnumType> enums = new ArrayList<>(schema.enums());
-
-            if (!statements.isEmpty()) {
-                List<Integer> lines = statementLines(parser.get());
-
-                for (int i = 0; i < statements.size(); i++) {
-                    apply(statements.get(i), statementLine(lines, i), tables, enums);
-                }
-            }
-
-            return new Schema(tables, enums);
+            parsed = CCJSqlParserUtil.parseStatements(statement.sql());
         } catch (JSQLParserException e) {
-            throw new SchemaParseException(SqlParseReason.of(e, true), e);
+            failure = e;
         }
+
+        if (
+            parsed != null
+                && parsed.size() == 1
+                && !(parsed.get(0) instanceof UnsupportedStatement)
+        ) {
+            apply(parsed.get(0), statement.line(), tables, enums);
+
+            return;
+        }
+
+        String opening = tableOrTypeOpening(statement.tokens());
+
+        if (opening == null || ignoresEveryAlterTableAction(opening, statement.tokens())) {
+            return;
+        }
+
+        if (failure != null) {
+            throw unreadableStatement(statement, failure);
+        }
+
+        throw unsupportedOpening(opening, statement.line());
     }
 
     /**
-     * The line each statement of one parsed source begins on, in order.
-     *
-     * <p>The parser reports no position per statement, so the lines are read
-     * from the token chain of its parse tree: the first token, and the first
-     * token after each statement separator, begins a statement. A comment is a
-     * special token outside the chain and a dollar-quoted function body is one
-     * literal token, so neither contributes a separator.
+     * The failure of an unreadable statement, stating the parser's reason at the
+     * position of the unexpected token in the file. The parser reads one
+     * statement at a time and therefore reports positions within it, so a
+     * rejected statement alone is parsed a second time preceded by the line
+     * breaks and spaces that stand before it in the file. A second parse that
+     * unexpectedly succeeds leaves the first reason, which names a position
+     * within the statement.
      */
-    private List<Integer> statementLines(CCJSqlParser parser) {
-        List<Integer> lines = new ArrayList<>();
+    private SchemaParseException unreadableStatement(
+        SchemaSourceSplitter.SourceStatement statement,
+        JSQLParserException failure
+    ) {
+        String padded = "\n".repeat(statement.line() - 1)
+            + " ".repeat(statement.column() - 1)
+            + statement.sql();
 
-        Token token = parser.getASTRoot().jjtGetFirstToken();
-        boolean starting = true;
+        JSQLParserException located = failure;
 
-        while (token != null && token.kind != CCJSqlParserConstants.EOF) {
-            if (token.kind == CCJSqlParserConstants.ST_SEMICOLON) {
-                starting = true;
-            } else {
-                if (starting) {
-                    lines.add(token.beginLine);
-                }
+        try {
+            CCJSqlParserUtil.parseStatements(padded);
+        } catch (JSQLParserException e) {
+            located = e;
+        }
 
-                starting = false;
+        return new SchemaParseException(SqlParseReason.of(located, true), located);
+    }
+
+    /**
+     * Reports whether an unreadable statement is an {@code ALTER TABLE} whose
+     * every top-level action is ignored, which is decided from the statement's
+     * tokens alone, without rewriting it and without resolving its table.
+     *
+     * <p>None of those actions can change a modeled column's existence, name,
+     * type, or nullability: nullability comes from {@code NOT NULL} alone, and
+     * PostgreSQL requires a column to be {@code NOT NULL} already before
+     * {@code ADD GENERATED ... AS IDENTITY}. Without this rule no
+     * {@code pg_dump} snapshot with an identity column loads, because the parser
+     * reads neither the identity form {@code pg_dump} writes nor an
+     * {@code EXCLUDE}, {@code DEFERRABLE INITIALLY DEFERRED},
+     * {@code UNIQUE USING INDEX}, or {@code NOT VALID} constraint, nor an
+     * unnamed {@code ADD CHECK}.
+     */
+    private boolean ignoresEveryAlterTableAction(String opening, List<String> tokens) {
+        if (!"ALTER TABLE".equals(opening)) {
+            return false;
+        }
+
+        int index = afterAlteredTableName(tokens);
+
+        if (index < 0) {
+            return false;
+        }
+
+        return topLevelActions(tokens.subList(index, tokens.size())).stream()
+            .allMatch(this::ignoresAlterTableAction);
+    }
+
+    /**
+     * The index of the first action token of an {@code ALTER TABLE}, after the
+     * optional {@code IF EXISTS} and {@code ONLY} and the altered table's
+     * possibly qualified name, or {@code -1} when the statement ends inside
+     * that name.
+     */
+    private int afterAlteredTableName(List<String> tokens) {
+        int index = 2;
+
+        if (statesWords(tokens, index, "IF", "EXISTS")) {
+            index += 2;
+        }
+
+        if (statesWords(tokens, index, "ONLY")) {
+            index++;
+        }
+
+        if (index >= tokens.size()) {
+            return -1;
+        }
+
+        index++;
+
+        while (statesWords(tokens, index, ".")) {
+            if (index + 1 >= tokens.size()) {
+                return -1;
             }
 
-            token = token.next;
+            index += 2;
         }
 
-        return lines;
+        return index;
     }
 
     /**
-     * The line of the statement at {@code index}, clamped to the last line
-     * found. The clamp only covers a source whose statements are not separated
-     * by semicolons, which PostgreSQL itself rejects.
+     * The actions of one {@code ALTER TABLE}, split at the commas that stand
+     * outside parentheses, so a comma of a column or parameter list belongs to
+     * its action.
      */
-    private int statementLine(List<Integer> lines, int index) {
-        return lines.get(Math.min(index, lines.size() - 1));
+    private List<List<String>> topLevelActions(List<String> tokens) {
+        List<List<String>> actions = new ArrayList<>();
+        List<String> action = new ArrayList<>();
+        int depth = 0;
+
+        for (String token : tokens) {
+            if ("(".equals(token)) {
+                depth++;
+            } else if (")".equals(token)) {
+                depth--;
+            } else if (",".equals(token) && depth == 0) {
+                actions.add(action);
+                action = new ArrayList<>();
+
+                continue;
+            }
+
+            action.add(token);
+        }
+
+        actions.add(action);
+
+        return actions;
+    }
+
+    /**
+     * Reports whether one action of an unreadable {@code ALTER TABLE} begins as
+     * an added constraint or as {@code ALTER [COLUMN] <name> ADD GENERATED}. The
+     * words are compared case-insensitively, as PostgreSQL reads them.
+     */
+    private boolean ignoresAlterTableAction(List<String> action) {
+        if (statesWords(action, 0, "ADD")) {
+            return addsIgnoredConstraint(action);
+        }
+
+        if (!statesWords(action, 0, "ALTER")) {
+            return false;
+        }
+
+        int index = statesWords(action, 1, "COLUMN")
+            ? 2
+            : 1;
+
+        return index < action.size() && statesWords(action, index + 1, "ADD", "GENERATED");
+    }
+
+    private boolean addsIgnoredConstraint(List<String> action) {
+        if (statesWords(action, 1, "CONSTRAINT")) {
+            return action.size() > 2;
+        }
+
+        return statesWords(action, 1, "CHECK")
+            || statesWords(action, 1, "UNIQUE")
+            || statesWords(action, 1, "EXCLUDE")
+            || statesWords(action, 1, "PRIMARY", "KEY")
+            || statesWords(action, 1, "FOREIGN", "KEY");
+    }
+
+    /**
+     * Reports whether the tokens from {@code index} on are {@code words},
+     * compared case-insensitively.
+     */
+    private boolean statesWords(List<String> tokens, int index, String... words) {
+        if (index + words.length > tokens.size()) {
+            return false;
+        }
+
+        for (int i = 0; i < words.length; i++) {
+            if (!words[i].equalsIgnoreCase(tokens.get(index + i))) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**
@@ -128,10 +292,7 @@ public class DefaultSchemaParser implements SchemaParser {
      * {@code ALTER TABLE}, {@code DROP TABLE},
      * {@code CREATE TYPE ... AS ENUM}, and {@code ALTER TYPE ... ADD VALUE}.
      * Every other statement a schema source may record is ignored and is not
-     * resolved against the schema at all, with two exceptions the parser forces:
-     * a function or procedure whose body it captures through the end of the
-     * source, and a statement it reports only as opaque text that opens as table
-     * or type DDL, which may change what the schema models.
+     * resolved against the schema at all.
      */
     private void apply(Statement statement, int line, List<Table> tables, List<EnumType> enums) {
         if (statement instanceof CreateTable createTable) {
@@ -151,22 +312,7 @@ public class DefaultSchemaParser implements SchemaParser {
             }
 
             applyAddEnumValue(alterType, enums);
-        } else if (statement instanceof CreateFunctionalStatement functional) {
-            if (!hasDollarQuotedBody(functional)) {
-                throw unsupportedFunctionBody(functional, line);
-            }
-        } else if (statement instanceof UnsupportedStatement unsupported) {
-            String opening = tableOrTypeOpening(words(unsupported.toString()));
-
-            if (opening != null) {
-                throw unsupportedOpening(opening, line);
-            }
         }
-    }
-
-    /** The whitespace-separated words of a statement's text. */
-    private List<String> words(String text) {
-        return List.of(text.trim().split("\\s+"));
     }
 
     /**
@@ -306,25 +452,6 @@ public class DefaultSchemaParser implements SchemaParser {
         return position == AlterType.Position.BEFORE
             ? index
             : index + 1;
-    }
-
-    /**
-     * Reports whether a {@code CREATE FUNCTION} or {@code CREATE PROCEDURE}
-     * states a dollar-quoted body, which the parser lexes as one literal token.
-     * It captures a body written any other way through the end of the source, so
-     * such a function or procedure is rejected instead of ignored.
-     *
-     * <p>A captured statement separator and everything after it is part of a
-     * later statement rather than of this function, so only the parts before the
-     * first {@code ";"} part decide.
-     */
-    private boolean hasDollarQuotedBody(CreateFunctionalStatement functional) {
-        List<String> parts = functional.getFunctionDeclarationParts();
-
-        return parts != null
-            && parts.stream()
-                .takeWhile(part -> !";".equals(part))
-                .anyMatch(part -> StringValue.getDollarQuoteDelimiter(part) != null);
     }
 
     /**
@@ -813,16 +940,6 @@ public class DefaultSchemaParser implements SchemaParser {
     private UnsupportedOperationException unsupportedAlterTypeAction(int line) {
         return new UnsupportedOperationException(
             "Unsupported ALTER TYPE action at line %d".formatted(line)
-        );
-    }
-
-    private UnsupportedOperationException unsupportedFunctionBody(
-        CreateFunctionalStatement functional,
-        int line
-    ) {
-        return new UnsupportedOperationException(
-            "Unsupported schema statement: CREATE %s without a dollar-quoted body at line %d"
-                .formatted(upperCase(functional.getKind()), line)
         );
     }
 
