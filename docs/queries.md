@@ -525,9 +525,12 @@ collation or an operator class.
 A supported `INSERT`, `UPDATE`, or `DELETE` declared `:one`, `:optional`, or
 `:many` may end with a `RETURNING` clause that lists either:
 
-- unaliased direct columns of the target table, in the order they are declared,
-  or
+- direct columns of the target table, in the order they are declared, or
 - a bare `*`, which expands in the target table's schema column order.
+
+A returned column may carry an alias, written as `id AS user_id` or `id user_id`,
+which names its result component exactly as a `SELECT` item's alias does, while
+its type and nullability still come from the schema column.
 
 A returning write produces the same generated record, positional row mapper, and
 cardinality behavior as a read, so a database-generated `SERIAL` or `BIGSERIAL`
@@ -535,11 +538,12 @@ value is read back with its declared type. A clause that is exactly `*` returns
 the target table's shared `<TableName>Row` record, while a `RETURNING` column
 list keeps the query's own `<QueryName>Result` record.
 
-An aliased or computed `RETURNING` item, a qualified `table.*`, an unknown
-column, and `RETURNING` on `:exec` are rejected. Multi-row `VALUES`,
-`INSERT ... SELECT`, `UPDATE ... FROM`, `DELETE ... USING`, and common table
-expressions are rejected in a returning write, while an accepted `ON CONFLICT`
-clause is analyzed the same way with and without `RETURNING`.
+An aliased `*`, a computed `RETURNING` item with or without an alias, a
+qualified `table.*`, an unknown column, and `RETURNING` on `:exec` are rejected.
+Multi-row `VALUES`, `INSERT ... SELECT`, `UPDATE ... FROM`, `DELETE ... USING`,
+and common table expressions are rejected in a returning write, while an
+accepted `ON CONFLICT` clause is analyzed the same way with and without
+`RETURNING`.
 
 ## Parameters
 
@@ -917,7 +921,7 @@ name, and its header line.
   unqualified conflict-predicate column that both the inserted table and
   `EXCLUDED` carry, or a predicate column qualified with a name its own
   predicate does not read, such as `EXCLUDED` in a conflict-target predicate.
-- An aliased, computed, qualified-wildcard, or unknown `RETURNING` item;
+- An aliased `*`, a computed, qualified-wildcard, or unknown `RETURNING` item;
   `RETURNING` on `:exec`; and `UPDATE ... FROM`, `DELETE ... USING`, or a common
   table expression in a returning write.
 - Any annotation other than `:one`, `:optional`, `:many`, and `:exec`.
@@ -1179,6 +1183,20 @@ Writes and `RETURNING`:
   `QueryAnalyzerTest.shouldRejectUnknownReturningColumn`, and
   `QueryAnalyzerTest.shouldRejectExcludedReturningWriteForm` cover the write
   shapes.
+- `QueryAnalyzerTest.shouldNameInsertReturningColumnsFromTheirAliases`,
+  `QueryAnalyzerTest.shouldNameUpdateReturningColumnFromABareAlias`,
+  `QueryAnalyzerTest.shouldNameDeleteReturningColumnQualifiedThroughTheTargetAlias`,
+  and `QueryAnalyzerTest.shouldNameReturningColumnFromAQuotedAlias` cover an
+  aliased returned column on each write statement, both alias spellings, a
+  quoted alias, a column qualified through the target alias, and the schema
+  type, nullability, parameters, and binding order an alias leaves unchanged,
+  while `QueryAnalyzerTest.shouldRejectUnsupportedReturningItem` covers the
+  aliased `*` and aliased computed items that stay rejected.
+  `SqlcjCompilerIntegrationTest.shouldGenerateCompilableJavaForAliasedReturningWrites`
+  compiles result records named from the aliases, and
+  `PostgresIntegrationTest.shouldExecuteGeneratedAliasedReturningWritesAgainstPostgres`
+  executes the three aliased returning writes against PostgreSQL 16 and reads
+  the aliased components.
 - `QueryAnalyzerTest.shouldAnalyzeInsertWithNonBindingValues`,
   `QueryAnalyzerTest.shouldAnalyzeNamedInsertWithNonBindingValues`,
   `QueryAnalyzerTest.shouldAnalyzeReturningInsertWithNonBindingValues`,

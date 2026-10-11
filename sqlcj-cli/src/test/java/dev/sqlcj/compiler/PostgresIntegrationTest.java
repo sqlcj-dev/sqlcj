@@ -3429,6 +3429,76 @@ class PostgresIntegrationTest {
     }
 
     /**
+     * Covers aliased {@code RETURNING} items end to end for the three write
+     * statements: PostgreSQL executes the alias, and the generated result
+     * record names its components from the alias instead of the schema
+     * column, while the values stay the written ones.
+     */
+    @Test
+    void shouldExecuteGeneratedAliasedReturningWritesAgainstPostgres() throws Exception {
+        Path classesDirectory = generateAndCompile("""
+            -- name: InsertUser :one
+            INSERT INTO users (id, code, name)
+            VALUES ($1, $2, $3)
+            RETURNING id AS user_id, name;
+
+            -- name: RenameUser :one
+            UPDATE users
+            SET name = $2
+            WHERE id = $1
+            RETURNING id new_id, name AS full_name;
+
+            -- name: DeleteUser :one
+            DELETE FROM users u
+            WHERE u.id = $1
+            RETURNING u.id AS uid, u.code AS user_code;
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Object inserted = repository
+                .getClass()
+                .getMethod("insertUser", Long.class, Integer.class, String.class)
+                .invoke(repository, 1L, 42, "Alice");
+
+            assertEquals(
+                List.of("userId", "name"),
+                recordComponentNames(inserted)
+            );
+
+            assertEquals(1L, component(inserted, "userId"));
+            assertEquals("Alice", component(inserted, "name"));
+
+            Object renamed = repository
+                .getClass()
+                .getMethod("renameUser", Long.class, String.class)
+                .invoke(repository, 1L, "Renamed");
+
+            assertEquals(
+                List.of("newId", "fullName"),
+                recordComponentNames(renamed)
+            );
+
+            assertEquals(1L, component(renamed, "newId"));
+            assertEquals("Renamed", component(renamed, "fullName"));
+
+            Object deleted = repository
+                .getClass()
+                .getMethod("deleteUser", Long.class)
+                .invoke(repository, 1L);
+
+            assertEquals(
+                List.of("uid", "userCode"),
+                recordComponentNames(deleted)
+            );
+
+            assertEquals(1L, component(deleted, "uid"));
+            assertEquals(42, component(deleted, "userCode"));
+        }
+    }
+
+    /**
      * Covers the three result annotations over zero, one, and two matching rows
      * of a non-unique column, through both executor construction paths: a
      * {@code :one} query requires exactly one row, {@code :optional} accepts
