@@ -368,6 +368,84 @@ class SqlParserTest {
         assertEquals(List.of(1, 2, 1), parsedSql.parameters().indexes());
     }
 
+    /**
+     * Where a placeholder stands is the smallest expression the parse tree
+     * reports around it, written as the source writes it: an {@code IN} list is
+     * not an expression of its own, so its placeholders stand in the whole
+     * {@code IN} predicate, and an expression written across lines is written
+     * on one line, with whatever separates two tokens written as one space.
+     */
+    @Test
+    void shouldReportTheEnclosingExpressionOfAPlaceholder() {
+        assertEquals(
+            List.of("lower(name) = :name"),
+            enclosings("SELECT id FROM users WHERE lower(name) = :name")
+        );
+
+        assertEquals(
+            List.of("id IN (:a, :b)", "id IN (:a, :b)"),
+            enclosings("SELECT id FROM users WHERE id IN (:a, :b)")
+        );
+
+        assertEquals(
+            List.of("name LIKE '%' || :q || '%'"),
+            enclosings("""
+                SELECT id
+                FROM users
+                WHERE name LIKE '%' ||   -- the prefix
+                      :q || '%'""")
+        );
+    }
+
+    /**
+     * A placeholder the parse tree reports no expression around stands alone in
+     * its clause, which the keyword that opens that clause names in upper case.
+     */
+    @Test
+    void shouldReportTheClauseOfAPlaceholderThatStandsAlone() {
+        assertEquals(
+            List.of("ORDER BY"),
+            enclosings("SELECT id FROM users ORDER BY name, :sort")
+        );
+
+        assertEquals(
+            List.of("GROUP BY"),
+            enclosings("SELECT id FROM users GROUP BY :grouping")
+        );
+
+        assertEquals(
+            List.of("HAVING"),
+            enclosings("SELECT id FROM users GROUP BY name HAVING $1")
+        );
+
+        assertEquals(
+            List.of("FETCH"),
+            enclosings("SELECT id FROM users FETCH FIRST :rows ROWS ONLY")
+        );
+
+        assertEquals(
+            List.of("ON"),
+            enclosings("SELECT u.id FROM users u JOIN profiles p ON :matches")
+        );
+
+        assertEquals(
+            List.of("DISTINCT ON"),
+            enclosings("SELECT DISTINCT ON (:sort) id FROM users")
+        );
+
+        assertEquals(
+            List.of("WHERE"),
+            enclosings("UPDATE users SET name = 'x' WHERE :matches")
+        );
+    }
+
+    /** Where each placeholder occurrence of a source stands. */
+    private List<String> enclosings(String sql) {
+        return parser.parse(sql).placeholders().stream()
+            .map(PlaceholderOccurrence::enclosing)
+            .toList();
+    }
+
     private List<String> placeholderNames(ParsedSql parsedSql) {
         return parsedSql.placeholders().stream()
             .map(occurrence -> ((JdbcNamedParameter) occurrence.placeholder()).getName())

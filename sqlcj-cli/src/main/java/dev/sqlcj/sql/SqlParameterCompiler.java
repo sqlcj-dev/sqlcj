@@ -4,12 +4,15 @@ import net.sf.jsqlparser.expression.CastExpression;
 import net.sf.jsqlparser.expression.Expression;
 import net.sf.jsqlparser.expression.JdbcNamedParameter;
 import net.sf.jsqlparser.expression.JdbcParameter;
+import net.sf.jsqlparser.expression.operators.relational.ExpressionList;
 import net.sf.jsqlparser.parser.CCJSqlParserConstants;
 import net.sf.jsqlparser.parser.Node;
 import net.sf.jsqlparser.parser.Token;
+import net.sf.jsqlparser.statement.select.Select;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.regex.Pattern;
 
 /**
@@ -29,8 +32,9 @@ import java.util.regex.Pattern;
  * anonymous {@code ?} placeholder, which has no parameter to bind.
  *
  * <p>The same walk reports the placeholder occurrences of the source in
- * textual order, each with the cast that casts it, which is the syntax-level
- * order in which semantic analysis binds them.
+ * textual order, each with the cast that casts it and with where it stands as
+ * the source writes it, which is the syntax-level order in which semantic
+ * analysis binds them.
  */
 final class SqlParameterCompiler {
 
@@ -63,6 +67,28 @@ final class SqlParameterCompiler {
      * {@code ?|} and {@code ?&} are reported with their own images.
      */
     private static final String ANONYMOUS_PARAMETER = "?";
+
+    /**
+     * The clause keywords whose own image names the clause a placeholder stands
+     * alone in, compared ignoring case and written in upper case.
+     */
+    private static final List<String> CLAUSE_KEYWORDS = List.of(
+        "WHERE",
+        "HAVING",
+        "LIMIT",
+        "OFFSET",
+        "FETCH",
+        "SELECT",
+        "VALUES",
+        "SET",
+        "RETURNING"
+    );
+
+    /** The image that opens a parenthesized group. */
+    private static final String OPEN_PARENTHESIS = "(";
+
+    /** The image that closes a parenthesized group. */
+    private static final String CLOSE_PARENTHESIS = ")";
 
     /**
      * {@link Token#absoluteBegin} and {@link Token#absoluteEnd} count the first
@@ -187,11 +213,11 @@ final class SqlParameterCompiler {
             Expression operand = innermost.getLeftExpression();
 
             collectUncompiledPlaceholder(operand, names, uncompiled);
-            collectPlaceholder(operand, innermost, placeholders);
+            collectPlaceholder(operand, innermost, node, placeholders);
         }
 
         if (value instanceof Expression expression) {
-            collectPlaceholder(expression, null, placeholders);
+            collectPlaceholder(expression, null, node, placeholders);
         }
 
         for (int child = 0; child < node.jjtGetNumChildren(); child++) {
@@ -214,12 +240,14 @@ final class SqlParameterCompiler {
      * walk reaches it.
      *
      * <p>One expression can hang under two parse-tree nodes, so a placeholder
-     * is recorded once, identified by the expression itself, and the cast that
-     * casts it is kept whichever node reports it first.
+     * is recorded once, identified by the expression itself, with where it
+     * stands under the node that reports it first, and the cast that casts it
+     * is kept whichever node reports it first.
      */
     private void collectPlaceholder(
         Object value,
         CastExpression cast,
+        Node node,
         List<PlaceholderOccurrence> placeholders
     ) {
         if (!(value instanceof JdbcParameter) && !(value instanceof JdbcNamedParameter)) {
@@ -233,14 +261,175 @@ final class SqlParameterCompiler {
 
             if (collected.placeholder() == placeholder) {
                 if (cast != null && collected.cast() == null) {
-                    placeholders.set(index, new PlaceholderOccurrence(placeholder, cast));
+                    placeholders.set(
+                        index,
+                        new PlaceholderOccurrence(placeholder, cast, collected.enclosing())
+                    );
                 }
 
                 return;
             }
         }
 
-        placeholders.add(new PlaceholderOccurrence(placeholder, cast));
+        placeholders.add(
+            new PlaceholderOccurrence(placeholder, cast, enclosing(node, placeholder))
+        );
+    }
+
+    /**
+     * Where one placeholder stands, written as the source writes it: the
+     * smallest expression the parse tree encloses it in, or, when the parse
+     * tree encloses it in none, the clause it stands alone in.
+     */
+    private String enclosing(Node node, Expression placeholder) {
+        String expression = enclosingExpression(node, placeholder);
+
+        return expression == null
+            ? clauseKeyword(node)
+            : expression;
+    }
+
+    /**
+     * The smallest expression the parse tree reports around one placeholder,
+     * written on one line, and {@code null} when the placeholder stands alone
+     * in its clause.
+     *
+     * <p>A node of no value, a node of the placeholder itself, and an
+     * expression list, such as the {@code (:a, :b)} of an {@code IN} predicate,
+     * name nothing of their own, so the search steps through them to the
+     * expression around them. A query, a subquery included, and a node that is
+     * not an expression at all, such as a select item or a join, open the
+     * clause the placeholder stands in.
+     */
+    private String enclosingExpression(Node node, Expression placeholder) {
+        for (Node ancestor = node; ancestor != null; ancestor = ancestor.jjtGetParent()) {
+            Object value = ancestor.jjtGetValue();
+
+            if (value == null || value == placeholder || value instanceof ExpressionList<?>) {
+                continue;
+            }
+
+            if (value instanceof Select || !(value instanceof Expression)) {
+                return null;
+            }
+
+            return writtenText(ancestor.jjtGetFirstToken(), ancestor.jjtGetLastToken());
+        }
+
+        return null;
+    }
+
+    /**
+     * One span of tokens as the source writes it, on one line: each token
+     * carries its own source image, and whatever separates two tokens, which is
+     * whitespace, a comment, or both, is written as one space.
+     */
+    private String writtenText(Token first, Token last) {
+        StringBuilder text = new StringBuilder();
+        int previousEnd = -1;
+
+        for (Token token = first; token != null; token = token.next) {
+            if (previousEnd >= 0 && token.absoluteBegin > previousEnd) {
+                text.append(' ');
+            }
+
+            text.append(token.image);
+
+            if (token == last) {
+                break;
+            }
+
+            previousEnd = token.absoluteEnd;
+        }
+
+        return text.toString();
+    }
+
+    /**
+     * The keyword of the clause one placeholder stands alone in, which is the
+     * nearest clause keyword written before it at its own parenthesis depth or
+     * at a depth enclosing it, in upper case.
+     *
+     * <p>The scan therefore forgets a keyword of a parenthesized group that
+     * closed before the placeholder and keeps one written outside a group the
+     * placeholder stands inside. A source whose clause no keyword of the subset
+     * opens is named by the keyword that opens the statement.
+     */
+    private String clauseKeyword(Node node) {
+        Token placeholder = node.jjtGetFirstToken();
+        Token first = statementRoot(node).jjtGetFirstToken();
+
+        List<String> enclosingKeywords = new ArrayList<>();
+        String keyword = first.image.toUpperCase(Locale.ROOT);
+        Token previous = null;
+
+        for (Token token = first; token != null && token != placeholder; token = token.next) {
+            if (OPEN_PARENTHESIS.equals(token.image)) {
+                enclosingKeywords.add(keyword);
+            } else if (CLOSE_PARENTHESIS.equals(token.image)) {
+                if (!enclosingKeywords.isEmpty()) {
+                    keyword = enclosingKeywords.remove(enclosingKeywords.size() - 1);
+                }
+            } else {
+                String clause = clauseKeyword(token, previous);
+
+                if (clause != null) {
+                    keyword = clause;
+                }
+            }
+
+            previous = token;
+        }
+
+        return keyword;
+    }
+
+    /**
+     * The clause one token opens, and {@code null} when the token opens none.
+     * {@code ON} opens a join condition on its own and a distinct list after
+     * {@code DISTINCT}, and {@code BY} opens the clause {@code ORDER} or
+     * {@code GROUP} names.
+     */
+    private String clauseKeyword(Token token, Token previous) {
+        String image = token.image.toUpperCase(Locale.ROOT);
+
+        if (CLAUSE_KEYWORDS.contains(image)) {
+            return image;
+        }
+
+        return switch (image) {
+            case "ON" -> isImage(previous, "DISTINCT")
+                ? "DISTINCT ON"
+                : "ON";
+            case "BY" -> byKeyword(previous);
+            default -> null;
+        };
+    }
+
+    /** The clause a {@code BY} keyword opens, which the token before it names. */
+    private String byKeyword(Token previous) {
+        if (isImage(previous, "ORDER")) {
+            return "ORDER BY";
+        }
+
+        return isImage(previous, "GROUP")
+            ? "GROUP BY"
+            : null;
+    }
+
+    private boolean isImage(Token token, String image) {
+        return token != null && image.equalsIgnoreCase(token.image);
+    }
+
+    /** The parse-tree root of the statement one node belongs to. */
+    private Node statementRoot(Node node) {
+        Node root = node;
+
+        while (root.jjtGetParent() != null) {
+            root = root.jjtGetParent();
+        }
+
+        return root;
     }
 
     /**
