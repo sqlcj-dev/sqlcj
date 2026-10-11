@@ -9,6 +9,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIf;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.postgresql.ds.PGSimpleDataSource;
 import org.testcontainers.DockerClientFactory;
 import org.testcontainers.containers.Container;
@@ -86,7 +88,103 @@ class ReferenceServiceIntegrationTest {
         "V7__roles_and_row_level_security.sql",
         "V8__enum_and_column_changes.sql",
         "V9__status_index.sql",
-        "V10__seed_and_view_refresh.sql"
+        "V10__seed_and_view_refresh.sql",
+        "V11__assignees_and_soft_deleted_users.sql"
+    );
+
+    /**
+     * The unsupported query catalogue: one query file per shape the supported
+     * subset excludes, with the query name and the reason sqlcj reports for it.
+     */
+    private static final List<UnsupportedQuery> UNSUPPORTED_QUERIES = List.of(
+        new UnsupportedQuery(
+            "union.sql",
+            "ListProjectAndTaskTitles",
+            "UNION, INTERSECT, and EXCEPT are not supported; write one query per SELECT."
+        ),
+        new UnsupportedQuery(
+            "union_all.sql",
+            "ListEveryProjectAndTaskTitle",
+            "UNION, INTERSECT, and EXCEPT are not supported; write one query per SELECT."
+        ),
+        new UnsupportedQuery(
+            "right_join.sql",
+            "ListProjectsWithTasks",
+            "RIGHT JOIN is not supported; write a LEFT JOIN with the two sources swapped."
+        ),
+        new UnsupportedQuery(
+            "full_join.sql",
+            "ListProjectsAndTasks",
+            "FULL JOIN is not supported."
+        ),
+        new UnsupportedQuery(
+            "using_join.sql",
+            "ListTaskComments",
+            "JOIN ... USING is not supported; write the join condition with ON."
+        ),
+        new UnsupportedQuery(
+            "natural_join.sql",
+            "ListNaturallyJoinedTasks",
+            "NATURAL JOIN is not supported; write the join condition with ON."
+        ),
+        new UnsupportedQuery(
+            "cross_join.sql",
+            "ListOrganizationProjectPairs",
+            "CROSS JOIN is not supported; write JOIN ... ON TRUE."
+        ),
+        new UnsupportedQuery(
+            "comma_join.sql",
+            "ListCommaJoinedTasks",
+            "A comma-separated FROM list is not supported; "
+                + "write JOIN ... ON with the join condition."
+        ),
+        new UnsupportedQuery(
+            "lateral_join.sql",
+            "ListProjectsWithLatestTask",
+            "LATERAL is not supported."
+        ),
+        new UnsupportedQuery(
+            "cte_source.sql",
+            "ListOpenTaskTitles",
+            "A common table expression used as a source is not supported: open_tasks"
+        ),
+        new UnsupportedQuery(
+            "from_subquery.sql",
+            "ListRecentTaskTitles",
+            "A subquery in FROM is not supported."
+        ),
+        new UnsupportedQuery(
+            "multi_row_values.sql",
+            "CreateTwoProjects",
+            "INSERT requires a single VALUES row."
+        ),
+        new UnsupportedQuery(
+            "insert_select.sql",
+            "ArchiveAuditLog",
+            "INSERT ... SELECT is not supported."
+        ),
+        new UnsupportedQuery(
+            "update_from.sql",
+            "RaiseProjectTaskPriority",
+            "UPDATE ... FROM and joined updates are not supported."
+        ),
+        new UnsupportedQuery(
+            "delete_using.sql",
+            "DeleteProjectComments",
+            "DELETE ... USING and joined deletes are not supported."
+        ),
+        new UnsupportedQuery(
+            "uncast_lower.sql",
+            "FindUserByEmail",
+            "Cannot infer the type of :email in lower(:email); "
+                + "state it with a cast, such as :email::text"
+        ),
+        new UnsupportedQuery(
+            "subscripted_column.sql",
+            "ListTasksByFirstLabel",
+            "Cannot infer the type of :label in labels[1] = :label; "
+                + "state it with a cast, such as :label::text"
+        )
     );
 
     /** The files the three schema inputs generate, relative to {@code java.out}. */
@@ -403,6 +501,336 @@ class ReferenceServiceIntegrationTest {
     }
 
     /**
+     * The generated repository executes the query shapes this milestone adds
+     * against the migrated database: the dynamic sort and the cast page, the
+     * {@code EXISTS}, {@code IN (SELECT ...)}, and scalar subqueries, the
+     * composite-key join, the filtered left join, the conflict clauses that
+     * bind nothing, and the aliased {@code RETURNING} of an optimistic update.
+     *
+     * <p>The database is shared with the other tests of this class, so this one
+     * works inside its own organization, project, and users, and writes no
+     * audit entry.
+     */
+    @Test
+    void shouldExecuteTheGeneratedMilestoneQueryShapes() throws Exception {
+        Path generatedDirectory = tempDir.resolve("generated-shapes");
+
+        generate(List.of(migrations().toString()), generatedDirectory);
+
+        Path classesDirectory = compile(generatedDirectory, tempDir.resolve("classes-shapes"));
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Long organizationId = (Long) component(
+                invoke(repository, "createOrganization", "Shape Test", "{}"),
+                "id"
+            );
+
+            Long assigneeId = (Long) component(
+                invoke(repository, "createUser", organizationId, "lin@example.com", "Lin Shu"),
+                "id"
+            );
+
+            Long retiredId = (Long) component(
+                invoke(repository, "createUser", organizationId, "kurt@example.com", "Kurt Godel"),
+                "id"
+            );
+
+            Object project = invoke(repository, "createProject", organizationId, "SHAPE", "Shapes");
+
+            Long projectId = (Long) component(project, "id");
+
+            Object open = enumConstant(classLoader, "TaskStatus", "OPEN");
+            Object maintainer = enumConstant(classLoader, "MembershipRole", "MAINTAINER");
+
+            Long betaId = (Long) component(
+                createShapeTask(repository, projectId, "Beta", (short) 3, open),
+                "id"
+            );
+
+            Long alphaId = (Long) component(
+                createShapeTask(repository, projectId, "Alpha", (short) 1, open),
+                "id"
+            );
+
+            Long gammaId = (Long) component(
+                createShapeTask(repository, projectId, "Gamma", (short) 2, open),
+                "id"
+            );
+
+            assertEquals(
+                List.of("Alpha", "Beta", "Gamma"),
+                componentsOf(
+                    (List<?>) invoke(repository, "listTasksPage", projectId, "title", 3, 0),
+                    "title"
+                ),
+                "the dynamic sort orders by title"
+            );
+
+            assertEquals(
+                List.of("Alpha", "Gamma", "Beta"),
+                componentsOf(
+                    (List<?>) invoke(repository, "listTasksPage", projectId, "priority", 3, 0),
+                    "title"
+                ),
+                "the same query orders by priority"
+            );
+
+            assertEquals(
+                List.of("Beta", "Gamma"),
+                componentsOf(
+                    (List<?>) invoke(repository, "listTasksPage", projectId, "title", 2, 1),
+                    "title"
+                ),
+                "the cast page skips its offset"
+            );
+
+            assertEquals(
+                1,
+                invoke(repository, "joinOrganization", organizationId, assigneeId),
+                "the untargeted ON CONFLICT DO NOTHING inserts the first membership"
+            );
+
+            assertEquals(
+                0,
+                invoke(repository, "joinOrganization", organizationId, assigneeId),
+                "the untargeted ON CONFLICT DO NOTHING keeps the existing membership"
+            );
+
+            assertEquals(
+                1,
+                invoke(repository, "changeMemberRole", organizationId, assigneeId, maintainer),
+                "ON CONFLICT ON CONSTRAINT updates the changed role"
+            );
+
+            assertEquals(
+                0,
+                invoke(repository, "changeMemberRole", organizationId, assigneeId, maintainer),
+                "DO UPDATE ... WHERE skips the unchanged role"
+            );
+
+            List<?> visibleProjects = (List<?>) invoke(
+                repository,
+                "listVisibleProjects",
+                assigneeId
+            );
+
+            assertEquals(1, visibleProjects.size(), "EXISTS keeps only the member's projects");
+
+            assertEquals(projectId, component(visibleProjects.get(0), "id"));
+
+            assertEquals("SHAPE", component(visibleProjects.get(0), "code"));
+
+            assertEquals(
+                List.of("Beta", "Alpha", "Gamma"),
+                componentsOf(
+                    (List<?>) invoke(repository, "listOrganizationTasks", organizationId),
+                    "title"
+                ),
+                "IN (SELECT ...) keeps the tasks of the organization's projects"
+            );
+
+            assertNotNull(invoke(repository, "addComment", alphaId, assigneeId, "First."));
+
+            assertNotNull(invoke(repository, "addComment", alphaId, assigneeId, "Second."));
+
+            OffsetDateTime beforeTheComments = OffsetDateTime.of(
+                2026,
+                1,
+                1,
+                0,
+                0,
+                0,
+                0,
+                ZoneOffset.UTC
+            );
+
+            List<?> recentComments = (List<?>) invoke(
+                repository,
+                "listTasksWithRecentComments",
+                beforeTheComments,
+                projectId
+            );
+
+            assertEquals(
+                List.of(betaId, alphaId, gammaId),
+                componentsOf(recentComments, "id")
+            );
+
+            assertEquals(
+                List.of(0L, 2L, 0L),
+                componentsOf(recentComments, "recentComments"),
+                "the scalar subquery counts each task's recent comments"
+            );
+
+            assertEquals(
+                List.of(0L, 0L, 0L),
+                componentsOf(
+                    (List<?>) invoke(
+                        repository,
+                        "listTasksWithRecentComments",
+                        beforeTheComments.plusYears(100),
+                        projectId
+                    ),
+                    "recentComments"
+                ),
+                "the scalar subquery binds its own cast placeholder"
+            );
+
+            Object assignment = ((Optional<?>) invoke(
+                repository,
+                "assignTask",
+                assigneeId,
+                alphaId,
+                1
+            )).orElseThrow();
+
+            assertEquals(
+                alphaId,
+                component(assignment, "taskId"),
+                "the aliased RETURNING names its own components"
+            );
+
+            assertEquals(2, component(assignment, "newVersion"));
+
+            assertEquals(
+                Optional.empty(),
+                invoke(repository, "assignTask", assigneeId, alphaId, 1),
+                "an optimistic update of a stale version returns no row"
+            );
+
+            assertEquals(
+                2,
+                component(
+                    ((Optional<?>) invoke(repository, "assignTask", retiredId, betaId, 1))
+                        .orElseThrow(),
+                    "newVersion"
+                )
+            );
+
+            assertEquals(
+                1,
+                invoke(repository, "softDeleteUser", retiredId),
+                "the soft delete marks the assignee deleted"
+            );
+
+            List<?> assignedTasks = (List<?>) invoke(repository, "listAssignedTasks", projectId);
+
+            assertEquals(
+                1,
+                assignedTasks.size(),
+                "the composite-key join keeps only tasks assigned to a member"
+            );
+
+            assertEquals(alphaId, component(assignedTasks.get(0), "id"));
+
+            assertEquals(
+                maintainer,
+                component(assignedTasks.get(0), "role"),
+                "the composite-key join reads the membership role"
+            );
+
+            List<?> withAssignee = (List<?>) invoke(repository, "listTasksWithAssignee", projectId);
+
+            assertEquals(
+                List.of(betaId, alphaId, gammaId),
+                componentsOf(withAssignee, "id")
+            );
+
+            assertEquals(
+                Arrays.asList(null, "Lin Shu", null),
+                componentsOf(withAssignee, "assigneeName"),
+                "the filtered left join names the live assignee and no other"
+            );
+
+            Object claimed = ((Optional<?>) invoke(
+                repository,
+                "claimHandle",
+                organizationId,
+                "ida@example.com",
+                "ida",
+                "Ida Rhodes"
+            )).orElseThrow();
+
+            assertNotNull(component(claimed, "id"));
+
+            assertEquals(
+                "Ida Rhodes",
+                component(claimed, "displayName"),
+                "the conflict-target predicate claims a free handle"
+            );
+
+            assertEquals(
+                Optional.empty(),
+                invoke(
+                    repository,
+                    "claimHandle",
+                    organizationId,
+                    "ida.rhodes@example.com",
+                    "ida",
+                    "Ida Rhodes"
+                ),
+                "the conflict-target predicate leaves a live handle to its owner"
+            );
+        }
+    }
+
+    /**
+     * Every entry of the unsupported query catalogue is rejected with its whole
+     * located diagnostic line against the migration history, and writes no
+     * file.
+     */
+    @ParameterizedTest
+    @MethodSource("unsupportedQueries")
+    void shouldRejectEachUnsupportedCatalogueQuery(UnsupportedQuery entry) throws Exception {
+        Path queriesFile = resource("unsupported/queries/" + entry.fileName());
+
+        Path generatedDirectory = tempDir.resolve("generated-unsupported");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> generate(
+                List.of(migrations().toString()),
+                queriesFile,
+                generatedDirectory
+            )
+        );
+
+        assertEquals(
+            "Invalid query '%s' in %s at line 2: %s".formatted(
+                entry.queryName(),
+                queriesFile,
+                entry.reason()
+            ),
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    /** The catalogue directory holds exactly the catalogued query files. */
+    @Test
+    void shouldCatalogueExactlyTheUnsupportedQueryFiles() throws Exception {
+        try (Stream<Path> files = Files.list(resource("unsupported/queries"))) {
+            assertEquals(
+                UNSUPPORTED_QUERIES.stream()
+                    .map(UnsupportedQuery::fileName)
+                    .sorted()
+                    .toList(),
+                files
+                    .map(file -> file.getFileName().toString())
+                    .sorted()
+                    .toList()
+            );
+        }
+    }
+
+    static List<UnsupportedQuery> unsupportedQueries() {
+        return UNSUPPORTED_QUERIES;
+    }
+
+    /**
      * The unsupported catalogue's {@code SET DATA TYPE}, applied after the
      * history, is rejected with its file, line, and column, and nothing is
      * written.
@@ -659,11 +1087,54 @@ class ReferenceServiceIntegrationTest {
             .invoke(record);
     }
 
+    /** One component of every row of a result list, in the list's order. */
+    private List<Object> componentsOf(List<?> rows, String componentName) throws Exception {
+        List<Object> values = new ArrayList<>();
+
+        for (Object row : rows) {
+            values.add(component(row, componentName));
+        }
+
+        return values;
+    }
+
+    /** One task of the milestone shapes, with the labels and metadata it needs. */
+    private Object createShapeTask(
+        Object repository,
+        Long projectId,
+        String title,
+        Short priority,
+        Object status
+    ) throws Exception {
+        return invoke(
+            repository,
+            "createTask",
+            projectId,
+            title,
+            status,
+            priority,
+            List.of("shape"),
+            "{\"source\": \"fixture\"}"
+        );
+    }
+
     private List<String> recordComponentNames(Class<?> recordClass) {
         assertTrue(recordClass.isRecord());
 
         return Arrays.stream(recordClass.getRecordComponents())
             .map(RecordComponent::getName)
             .toList();
+    }
+
+    /**
+     * One entry of the unsupported query catalogue: the query file, the name of
+     * the single query it holds, and the reason sqlcj reports for it.
+     */
+    record UnsupportedQuery(String fileName, String queryName, String reason) {
+
+        @Override
+        public String toString() {
+            return fileName;
+        }
     }
 }

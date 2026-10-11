@@ -39,8 +39,11 @@ CREATE TABLE users
     handle          citext,
     display_name    text          NOT NULL,
     last_login_ip   inet,
-    created_at      timestamptz   NOT NULL DEFAULT now()
+    created_at      timestamptz   NOT NULL DEFAULT now(),
+    deleted_at      timestamptz
 );
+
+CREATE UNIQUE INDEX users_live_handle_key ON users (organization_id, handle) WHERE deleted_at IS NULL;
 
 CREATE TABLE projects
 (
@@ -73,6 +76,7 @@ CREATE TABLE tasks
     estimate_hours numeric,
     title_length   integer GENERATED ALWAYS AS (length(title)) STORED,
     created_at     timestamptz NOT NULL DEFAULT now(),
+    assignee_id    bigint REFERENCES users (id) ON DELETE SET NULL,
     CHECK (priority BETWEEN 1 AND 5)
 );
 

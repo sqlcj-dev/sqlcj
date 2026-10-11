@@ -838,7 +838,7 @@ sqlcj: Invalid query 'ListTags' in /home/dev/project/queries.sql at line 5: Colu
 Schema snapshot input:
 
 - `ReferenceServiceIntegrationTest.shouldGenerateIdenticalRepositoriesFromHistorySnapshotAndDump`
-  applies the reference service's ten migrations to PostgreSQL 16 with `psql`,
+  applies the reference service's eleven migrations to PostgreSQL 16 with `psql`,
   runs `pg_dump --schema-only` against the migrated database, and generates one
   byte-identical, compiling output tree, manifest included, from the migration
   history, the hand-written snapshot, and that dump.
