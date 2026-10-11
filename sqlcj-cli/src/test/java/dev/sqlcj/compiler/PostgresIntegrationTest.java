@@ -1702,6 +1702,167 @@ class PostgresIntegrationTest {
     }
 
     /**
+     * Covers the conflict clauses that name no column target end to end: a
+     * {@code DO NOTHING} without a target, a named constraint with either
+     * action, a conflict-target predicate selecting a partial unique index, and
+     * a {@code DO UPDATE ... WHERE} predicate that compares a stored column
+     * with the proposed {@code EXCLUDED} one and with a named placeholder.
+     *
+     * <p>PostgreSQL resolves the constraint name and matches the partial index
+     * from the target predicate, and it applies the {@code DO UPDATE}
+     * predicate itself, so the returning upsert writes and returns a row only
+     * while that predicate holds.
+     */
+    @Test
+    void shouldExecuteGeneratedConflictClausesAgainstPostgres() throws Exception {
+        Path classesDirectory = generateAndCompile("""
+            -- name: InsertUserOrIgnore :exec
+            INSERT INTO users (id, code, name)
+            VALUES ($1, $2, $3)
+            ON CONFLICT DO NOTHING;
+
+            -- name: FindOrInsertUser :optional
+            INSERT INTO users (id, code, name)
+            VALUES ($1, $2, $3)
+            ON CONFLICT ON CONSTRAINT users_pkey DO NOTHING
+            RETURNING id, name;
+
+            -- name: RenameUserOnConstraint :exec
+            INSERT INTO users (id, code, name)
+            VALUES ($1, $2, $3)
+            ON CONFLICT ON CONSTRAINT users_pkey DO UPDATE
+            SET name = EXCLUDED.name;
+
+            -- name: InsertActiveUserOrIgnore :exec
+            INSERT INTO users (id, code, name, active)
+            VALUES ($1, $2, $3, TRUE)
+            ON CONFLICT (code) WHERE active DO NOTHING;
+
+            -- name: UpsertUserIfNewer :optional
+            INSERT INTO users (id, code, name)
+            VALUES (:id, :code, :name)
+            ON CONFLICT (id) DO UPDATE
+            SET name = EXCLUDED.name
+            WHERE users.code < EXCLUDED.code
+              AND users.name <> :blocked
+            RETURNING id, code, name;
+
+            -- name: GetUser :one
+            SELECT id, code, name
+            FROM users
+            WHERE id = $1;
+            """);
+
+        execute("CREATE UNIQUE INDEX users_active_code_key ON users (code) WHERE active");
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method getUser = repository.getClass().getMethod("getUser", Long.class);
+
+            Method insertOrIgnore = repository.getClass().getMethod(
+                "insertUserOrIgnore",
+                Long.class,
+                Integer.class,
+                String.class
+            );
+
+            assertEquals(1, insertOrIgnore.invoke(repository, 1L, 10, "New"));
+            assertEquals(0, insertOrIgnore.invoke(repository, 1L, 11, "Ignored"));
+
+            Object kept = getUser.invoke(repository, 1L);
+
+            assertEquals(10, component(kept, "code"));
+            assertEquals("New", component(kept, "name"));
+
+            Method findOrInsert = repository.getClass().getMethod(
+                "findOrInsertUser",
+                Long.class,
+                Integer.class,
+                String.class
+            );
+
+            Optional<?> inserted = assertInstanceOf(
+                Optional.class,
+                findOrInsert.invoke(repository, 2L, 20, "Returned")
+            );
+
+            assertEquals(2L, component(inserted.orElseThrow(), "id"));
+            assertEquals("Returned", component(inserted.orElseThrow(), "name"));
+
+            assertTrue(
+                assertInstanceOf(
+                    Optional.class,
+                    findOrInsert.invoke(repository, 2L, 21, "Ignored")
+                ).isEmpty()
+            );
+
+            Method renameOnConstraint = repository.getClass().getMethod(
+                "renameUserOnConstraint",
+                Long.class,
+                Integer.class,
+                String.class
+            );
+
+            assertEquals(1, renameOnConstraint.invoke(repository, 2L, 22, "Renamed"));
+
+            Object renamed = getUser.invoke(repository, 2L);
+
+            assertEquals(20, component(renamed, "code"));
+            assertEquals("Renamed", component(renamed, "name"));
+
+            Method insertActiveOrIgnore = repository.getClass().getMethod(
+                "insertActiveUserOrIgnore",
+                Long.class,
+                Integer.class,
+                String.class
+            );
+
+            assertEquals(1, insertActiveOrIgnore.invoke(repository, 3L, 30, "Active"));
+            assertEquals(0, insertActiveOrIgnore.invoke(repository, 4L, 30, "Skipped"));
+
+            Method upsertIfNewer = repository.getClass().getMethod(
+                "upsertUserIfNewer",
+                Long.class,
+                Integer.class,
+                String.class,
+                String.class
+            );
+
+            Object created = assertInstanceOf(
+                Optional.class,
+                upsertIfNewer.invoke(repository, 5L, 50, "First", "Blocked")
+            ).orElseThrow();
+
+            assertEquals(List.of("id", "code", "name"), recordComponentNames(created));
+
+            assertEquals(5L, component(created, "id"));
+            assertEquals(50, component(created, "code"));
+            assertEquals("First", component(created, "name"));
+
+            Object updated = assertInstanceOf(
+                Optional.class,
+                upsertIfNewer.invoke(repository, 5L, 60, "Second", "Blocked")
+            ).orElseThrow();
+
+            assertEquals(50, component(updated, "code"));
+            assertEquals("Second", component(updated, "name"));
+
+            assertTrue(
+                assertInstanceOf(
+                    Optional.class,
+                    upsertIfNewer.invoke(repository, 5L, 70, "Third", "Second")
+                ).isEmpty()
+            );
+
+            Object unchanged = getUser.invoke(repository, 5L);
+
+            assertEquals(50, component(unchanged, "code"));
+            assertEquals("Second", component(unchanged, "name"));
+        }
+    }
+
+    /**
      * Covers null parameter binding and null result reading for every nullable
      * column type of the schema snapshot: the row is written through the
      * generated write method with null arguments and read back through the
