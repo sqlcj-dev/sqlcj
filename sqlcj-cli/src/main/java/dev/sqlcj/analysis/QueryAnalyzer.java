@@ -511,14 +511,12 @@ public final class QueryAnalyzer {
         List<QueryColumn> columns = new ArrayList<>();
 
         for (SelectItem<?> returningItem : returningClause) {
-            if (returningItem.getAlias() != null) {
-                throw new UnsupportedOperationException(
-                    "RETURNING items must not be aliased."
-                );
-            }
-
             columns.addAll(
-                resolveReturningItem(returningItem.getExpression(), source)
+                resolveReturningItem(
+                    returningItem.getExpression(),
+                    returningItem.getAlias(),
+                    source
+                )
             );
         }
 
@@ -544,10 +542,11 @@ public final class QueryAnalyzer {
 
     /**
      * Resolves one returned item, which is either a bare {@code *} or a direct
-     * column of the write target. A computed item has no schema type to
-     * generate, so it is rejected instead of analyzed.
+     * column of the write target, whose alias names its result component. A
+     * computed item has no schema type to generate, so it is rejected instead
+     * of analyzed.
      */
-    private List<QueryColumn> resolveReturningItem(Expression expression, Source source) {
+    private List<QueryColumn> resolveReturningItem(Expression expression, Alias alias, Source source) {
         if (expression instanceof AllTableColumns) {
             throw new UnsupportedOperationException(
                 "Only an unqualified RETURNING * is supported."
@@ -555,6 +554,12 @@ public final class QueryAnalyzer {
         }
 
         if (expression instanceof AllColumns allColumns) {
+            if (alias != null) {
+                throw new UnsupportedOperationException(
+                    "RETURNING * must not be aliased."
+                );
+            }
+
             if (allColumns.getExceptColumns() != null || allColumns.getReplaceExpressions() != null) {
                 throw new UnsupportedOperationException(
                     "RETURNING * must not be modified."
@@ -569,7 +574,7 @@ public final class QueryAnalyzer {
 
             return List.of(
                 new QueryColumn(
-                    schemaColumn.name(),
+                    selectedColumnName(alias, schemaColumn),
                     requireSupportedType(schemaColumn),
                     schemaColumn.nullable(),
                     schemaColumn.enumType(),

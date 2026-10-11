@@ -2447,6 +2447,7 @@ class QueryAnalyzerTest {
             "SELECT *, id FROM users",
             "SELECT id, * FROM users",
             "INSERT INTO users (id) VALUES ($1) RETURNING id, name, active",
+            "INSERT INTO users (id) VALUES ($1) RETURNING id AS a, name AS b, active AS c",
             "DELETE FROM users WHERE id = $1 RETURNING id"
         }
     )
@@ -4273,15 +4274,138 @@ class QueryAnalyzerTest {
         );
     }
 
+    /**
+     * An alias on a returned column names its result component, as on a
+     * projected column, while its type and nullability stay the schema
+     * column's and the executed SQL keeps the alias.
+     */
+    @Test
+    void shouldNameInsertReturningColumnsFromTheirAliases() {
+        Query query = new Query(
+            "InsertUser",
+            QueryType.ONE,
+            """
+                INSERT INTO users (id, name)
+                VALUES ($1, $2)
+                RETURNING id AS user_id, name
+                """
+        );
+
+        QueryModel model = analyzer.analyze(
+            query,
+            parser.parse(query.sql()),
+            schema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("user_id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+
+        assertNull(model.rowTable());
+
+        assertEquals(
+            """
+                INSERT INTO users (id, name)
+                VALUES (?, ?)
+                RETURNING id AS user_id, name
+                """,
+            model.executableSql()
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+    }
+
+    @Test
+    void shouldNameUpdateReturningColumnFromABareAlias() {
+        String sql = "UPDATE users SET name = $2 WHERE id = $1 RETURNING id new_id";
+
+        QueryModel model = analyzer.analyze(
+            new Query("UpdateUser", QueryType.ONE, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("new_id", ColumnType.BIGINT, false)),
+            model.columns()
+        );
+
+        assertNull(model.rowTable());
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(2, 1), model.bindingParameterIndexes());
+    }
+
+    @Test
+    void shouldNameDeleteReturningColumnQualifiedThroughTheTargetAlias() {
+        String sql = "DELETE FROM users u WHERE u.id = $1 RETURNING u.id AS uid";
+
+        QueryModel model = analyzer.analyze(
+            new Query("DeleteUser", QueryType.ONE, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("uid", ColumnType.BIGINT, false)),
+            model.columns()
+        );
+
+        assertNull(model.rowTable());
+    }
+
+    @Test
+    void shouldNameReturningColumnFromAQuotedAlias() {
+        String sql = """
+            INSERT INTO users (id) VALUES ($1) RETURNING id AS "User Id"
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("InsertUser", QueryType.ONE, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("User Id", ColumnType.BIGINT, false)),
+            model.columns()
+        );
+    }
+
     @ParameterizedTest
     @CsvSource(
         delimiter = '|',
         value = {
-            "INSERT INTO users (id) VALUES ($1) RETURNING id AS user_id"
-                + "|RETURNING items must not be aliased.",
+            "INSERT INTO users (id) VALUES ($1) RETURNING * AS x"
+                + "|RETURNING * must not be aliased.",
+            "INSERT INTO users (id) VALUES ($1) RETURNING * x"
+                + "|RETURNING * must not be aliased.",
             "INSERT INTO users (id) VALUES ($1) RETURNING id + 1"
                 + "|Unsupported RETURNING expression: Addition",
+            "INSERT INTO users (id) VALUES ($1) RETURNING id + 1 AS x"
+                + "|Unsupported RETURNING expression: Addition",
             "INSERT INTO users (id) VALUES ($1) RETURNING users.*"
+                + "|Only an unqualified RETURNING * is supported.",
+            "INSERT INTO users (id) VALUES ($1) RETURNING users.* AS x"
                 + "|Only an unqualified RETURNING * is supported.",
             "DELETE FROM users WHERE id = $1 RETURNING count(id)"
                 + "|Unsupported RETURNING expression: Function"

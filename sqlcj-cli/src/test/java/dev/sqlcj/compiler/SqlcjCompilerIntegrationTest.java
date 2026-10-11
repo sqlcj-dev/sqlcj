@@ -2614,6 +2614,102 @@ class SqlcjCompilerIntegrationTest {
         assertTrue(Files.exists(classesDirectory.resolve("generated/UsersRepository.class")));
     }
 
+    /**
+     * An alias on a returned column names the result record's component, for
+     * every returning write kind, and the executed SQL keeps the alias.
+     */
+    @Test
+    void shouldGenerateCompilableJavaForAliasedReturningWrites() throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+        Path classesDirectory = tempDir.resolve("classes");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE users
+                (
+                    id     BIGINT NOT NULL,
+                    name   VARCHAR(255),
+                    active BOOLEAN
+                );
+                """
+        );
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: InsertUser :one
+                INSERT INTO users (id, name)
+                VALUES ($1, $2)
+                RETURNING id AS user_id, name;
+
+                -- name: UpdateUser :one
+                UPDATE users
+                SET name = $2
+                WHERE id = $1
+                RETURNING id new_id;
+
+                -- name: DeleteUsers :many
+                DELETE FROM users u
+                WHERE u.active = $1
+                RETURNING u.id AS uid, u.name AS full_name;
+                """
+        );
+
+        Config config = new Config(
+            List.of(
+                new SqlConfig(
+                    "Users",
+                    schemaFile.toString(),
+                    queriesFile.toString()
+                )
+            ),
+            new JavaConfig(
+                generatedDirectory.toString(),
+                "generated"
+            )
+        );
+
+        new SqlcjCompiler().compile(config);
+
+        String repository = Files.readString(
+            generatedDirectory.resolve("generated/UsersRepository.java")
+        );
+
+        assertTrue(repository.contains("public InsertUserResult insertUser(Long id, String name)"));
+
+        assertEquals(
+            List.of("Long userId", "String name"),
+            recordComponents(repository, "InsertUserResult")
+        );
+
+        assertTrue(repository.contains("RETURNING id AS user_id, name"));
+
+        assertTrue(repository.contains("public UpdateUserResult updateUser(Long id, String name)"));
+
+        assertEquals(
+            List.of("Long newId"),
+            recordComponents(repository, "UpdateUserResult")
+        );
+
+        assertTrue(repository.contains("RETURNING id new_id"));
+
+        assertTrue(repository.contains("public List<DeleteUsersResult> deleteUsers(Boolean active)"));
+
+        assertEquals(
+            List.of("Long uid", "String fullName"),
+            recordComponents(repository, "DeleteUsersResult")
+        );
+
+        assertTrue(repository.contains("RETURNING u.id AS uid, u.name AS full_name"));
+
+        assertCompiles(generatedDirectory, classesDirectory);
+
+        assertTrue(Files.exists(classesDirectory.resolve("generated/UsersRepository.class")));
+    }
+
     private void compileUsersQueries(String queries, Path generatedDirectory) throws IOException {
         Path schemaFile = tempDir.resolve("schema.sql");
         Path queriesFile = tempDir.resolve("queries.sql");
