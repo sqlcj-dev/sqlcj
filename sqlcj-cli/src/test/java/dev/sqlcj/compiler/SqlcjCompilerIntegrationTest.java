@@ -2313,6 +2313,40 @@ class SqlcjCompilerIntegrationTest {
         assertFalse(Files.exists(generatedDirectory));
     }
 
+    /**
+     * An untyped placeholder is reported as one located line that names the
+     * placeholder, the expression the query writes it in, and the cast that
+     * types it, even when that expression spans lines in the source.
+     */
+    @Test
+    void shouldRejectUntypedPlaceholderBeforeWriting() {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileUsersQueries(
+                """
+                    -- name: ListUsers :many
+                    SELECT id
+                    FROM users
+                    WHERE lower(name) =
+                        :name;
+                    """,
+                generatedDirectory
+            )
+        );
+
+        assertEquals(
+            "Invalid query 'ListUsers' in %s at line 1: "
+                .formatted(tempDir.resolve("queries.sql"))
+                + "Cannot infer the type of :name in lower(name) = :name; "
+                + "state it with a cast, such as :name::text",
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
     @Test
     void shouldRejectRepeatedRepositoryMethodBeforeWriting() throws IOException {
         Path generatedDirectory = tempDir.resolve("generated");

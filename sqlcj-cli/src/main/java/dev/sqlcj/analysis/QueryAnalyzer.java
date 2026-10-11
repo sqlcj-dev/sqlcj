@@ -81,6 +81,15 @@ public final class QueryAnalyzer {
     private static final String MIXED_PLACEHOLDER_REJECTION = """
         Indexed '$N' and named ':name' placeholders must not be mixed in one query""";
 
+    /**
+     * The rejection of a placeholder that no clause of the query types and no
+     * cast states the type of, which names the placeholder as the query spells
+     * it and where the query writes it. The suggested cast is always
+     * {@code ::text}, because sqlcj infers no type for such a placeholder.
+     */
+    private static final String UNTYPED_PLACEHOLDER_REJECTION = """
+        Cannot infer the type of %s in %s; state it with a cast, such as %s::text""";
+
     /** The character that opens a supported named placeholder. */
     private static final String NAME_PREFIX = ":";
 
@@ -337,7 +346,7 @@ public final class QueryAnalyzer {
 
         List<Source> sources = resolveSources(plainSelect, table, schema);
 
-        List<QueryColumn> columns = resolveColumns(plainSelect, sources, schema);
+        List<QueryColumn> columns = resolveColumns(plainSelect, parsedSql, sources, schema);
 
         Placeholders placeholders = toPlaceholders(parsedSql, schema);
 
@@ -864,8 +873,9 @@ public final class QueryAnalyzer {
      * <p>An occurrence a clause of the query typed is that clause's parameter.
      * Every other occurrence is typed by the cast it is the direct operand of,
      * wherever in the statement it stands, and is named after its own
-     * placeholder. A placeholder neither a clause nor a cast types contributes
-     * no parameter, so the accounting reports it as unaccounted.
+     * placeholder. A placeholder neither a clause nor a cast types has no type
+     * to generate, so the first such occurrence in textual order is rejected
+     * naming where the query writes it.
      */
     private List<QueryParameter> resolveOccurrences(ParsedSql parsedSql, Placeholders placeholders) {
         List<QueryParameter> occurrences = new ArrayList<>();
@@ -881,16 +891,59 @@ public final class QueryAnalyzer {
 
             CastPlaceholder cast = placeholders.ofCast(occurrence.cast());
 
-            if (cast != null) {
-                occurrences.add(
-                    toCastParameter(cast, indexedParameterName(cast.placeholder()))
-                );
+            if (cast == null) {
+                throw untypedPlaceholder(occurrence);
             }
+
+            occurrences.add(
+                toCastParameter(cast, indexedParameterName(cast.placeholder()))
+            );
         }
 
         placeholders.requireReportedOccurrences();
 
         return occurrences;
+    }
+
+    /**
+     * The rejection of one placeholder occurrence no clause of the query typed
+     * and no cast states the type of, which the SQL parser reported together
+     * with where the query writes it.
+     */
+    private UnsupportedOperationException untypedPlaceholder(PlaceholderOccurrence occurrence) {
+        String spelled = spelledPlaceholder(occurrence.placeholder());
+
+        return new UnsupportedOperationException(
+            UNTYPED_PLACEHOLDER_REJECTION.formatted(spelled, occurrence.enclosing(), spelled)
+        );
+    }
+
+    /**
+     * One placeholder expression as the query spells it, which is its own name
+     * for a named placeholder and its index for an indexed one. Every other
+     * placeholder form is already rejected before a placeholder is spelled.
+     */
+    private String spelledPlaceholder(Expression placeholder) {
+        if (placeholder instanceof JdbcNamedParameter named) {
+            return NAME_PREFIX + named.getName();
+        }
+
+        return "$" + ((JdbcParameter) placeholder).getIndex();
+    }
+
+    /**
+     * The occurrence the SQL parser reported for one placeholder expression of
+     * the parsed source, which every placeholder of that source has.
+     */
+    private PlaceholderOccurrence occurrenceOf(ParsedSql parsedSql, Expression placeholder) {
+        return parsedSql.placeholders().stream()
+            .filter(occurrence -> occurrence.placeholder() == placeholder)
+            .findFirst()
+            .orElseThrow(
+                () -> new IllegalStateException(
+                    "A placeholder is not a reported placeholder occurrence."
+                )
+            );
     }
 
     /**
@@ -2048,9 +2101,14 @@ public final class QueryAnalyzer {
      *
      * <p>An aliased scalar count and an aliased cast each resolve to one column
      * in their own position, so either may stand beside any other item.
+     *
+     * <p>A bare placeholder projection is a placeholder a cast makes a
+     * supported result column, so it is rejected as an untyped placeholder
+     * rather than as an unsupported result expression.
      */
     private List<QueryColumn> resolveColumns(
         PlainSelect plainSelect,
+        ParsedSql parsedSql,
         List<Source> sources,
         Schema schema
     ) {
@@ -2107,6 +2165,10 @@ public final class QueryAnalyzer {
                 columns.add(castColumn(cast, selectItem.getAlias(), schema));
 
                 continue;
+            }
+
+            if (expression instanceof JdbcParameter || expression instanceof JdbcNamedParameter) {
+                throw untypedPlaceholder(occurrenceOf(parsedSql, expression));
             }
 
             throw new UnsupportedOperationException(

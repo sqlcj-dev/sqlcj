@@ -171,6 +171,25 @@ class QueryAnalyzerTest {
         )
     );
 
+    /**
+     * A schema whose {@code users} table carries the text and {@code JSONB}
+     * columns the untyped-placeholder diagnostics read around a placeholder.
+     */
+    private static final Schema untypedSchema = new Schema(
+        List.of(
+            new Table(
+                "users",
+                List.of(
+                    new Column("id", ColumnType.BIGINT, false),
+                    new Column("name", ColumnType.VARCHAR, true),
+                    new Column("email", ColumnType.TEXT, true),
+                    new Column("metadata", ColumnType.JSONB, true)
+                ),
+                List.of()
+            )
+        )
+    );
+
     private static final Schema joinSchema = new Schema(
         List.of(
             new Table(
@@ -3032,8 +3051,8 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(
-            "SQL placeholders [1, 2] are not the analyzed parameters [1]; "
-                + "a placeholder is in an unsupported location",
+            "Cannot infer the type of $2 in $2 + 1;"
+                + " state it with a cast, such as $2::text",
             exception.getMessage()
         );
     }
@@ -3319,8 +3338,8 @@ class QueryAnalyzerTest {
 
     /**
      * A named placeholder in a location this analyzer does not visit is
-     * reported by the placeholder accounting, which writes the placeholder as
-     * the query does.
+     * rejected as an untyped placeholder, which writes the placeholder and the
+     * expression it stands in as the query does.
      */
     @Test
     void shouldRejectNamedPlaceholderInUnanalyzedLocation() {
@@ -3335,8 +3354,8 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(
-            "SQL placeholders [:name] are not the analyzed parameters []; "
-                + "a placeholder is in an unsupported location",
+            "Cannot infer the type of :name in lower(name) = :name;"
+                + " state it with a cast, such as :name::text",
             exception.getMessage()
         );
     }
@@ -3981,20 +4000,27 @@ class QueryAnalyzerTest {
     /**
      * Only a placeholder a cast states the type of is typed outside the clauses
      * that name a parameter, so an uncast placeholder, and a placeholder a cast
-     * does not cast directly, stay rejected by the placeholder accounting.
+     * does not cast directly, are rejected as untyped, each named with the
+     * expression or clause it stands in.
      */
     @ParameterizedTest
     @CsvSource(
         delimiter = '|',
         quoteCharacter = '"',
         value = {
-            "SELECT id FROM users ORDER BY $1|[1]",
-            "SELECT id FROM users ORDER BY CASE WHEN :sort = 'name' THEN name END|[:sort]",
-            "SELECT id FROM users ORDER BY (:sort)::int|[:sort]",
-            "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.id = :id)|[:id]"
+            "SELECT id FROM users ORDER BY $1|$1|ORDER BY",
+            "SELECT id FROM users ORDER BY CASE WHEN :sort = 'name' THEN name END"
+                + "|:sort|:sort = 'name'",
+            "SELECT id FROM users ORDER BY (:sort)::int|:sort|(:sort)::int",
+            "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.id = :id)"
+                + "|:id|orders.id = :id"
         }
     )
-    void shouldRejectUncastPlaceholderOutsideTheAnalyzedClauses(String sql, String compiled) {
+    void shouldRejectUncastPlaceholderOutsideTheAnalyzedClauses(
+        String sql,
+        String placeholder,
+        String enclosing
+    ) {
         Query query = new Query("ListUsers", QueryType.MANY, sql);
         ParsedSql parsedSql = parser.parse(sql);
 
@@ -4004,9 +4030,8 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(
-            "SQL placeholders %s are not the analyzed parameters []; "
-                .formatted(compiled)
-                + "a placeholder is in an unsupported location",
+            "Cannot infer the type of %s in %s; state it with a cast, such as %s::text"
+                .formatted(placeholder, enclosing, placeholder),
             exception.getMessage()
         );
     }
@@ -4029,6 +4054,91 @@ class QueryAnalyzerTest {
 
         assertEquals(
             "Placeholder $1 has unsupported cast type INTERVAL",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A placeholder no clause types and no cast states the type of is rejected
+     * naming it as the query spells it, naming where the query writes it, and
+     * stating the cast that types it, in either placeholder form. Where it
+     * stands is the smallest expression written around it, and the keyword of
+     * its clause where the query writes no expression around it.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "SELECT id FROM users WHERE email = lower(:email)|:email|lower(:email)",
+            "SELECT id FROM users WHERE email = lower($1)|$1|lower($1)",
+            "SELECT id FROM users WHERE metadata->>'k' = :v|:v|metadata->>'k' = :v",
+            "SELECT id FROM users ORDER BY :sort|:sort|ORDER BY",
+            "SELECT id FROM users ORDER BY name, $1|$1|ORDER BY",
+            "SELECT id FROM users LIMIT :n + 1|:n|:n + 1",
+            "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM tasks t WHERE t.x = :x)"
+                + "|:x|t.x = :x",
+            "SELECT $1 AS x FROM users|$1|SELECT"
+        }
+    )
+    void shouldRejectAnUntypedPlaceholder(String sql, String placeholder, String enclosing) {
+        Query query = new Query("ListUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, untypedSchema)
+        );
+
+        assertEquals(
+            "Cannot infer the type of %s in %s; state it with a cast, such as %s::text"
+                .formatted(placeholder, enclosing, placeholder),
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A placeholder of a concatenated pattern stands in the whole {@code LIKE}
+     * predicate, which is the smallest expression the query writes around it.
+     */
+    @Test
+    void shouldRejectAnUntypedPlaceholderOfAConcatenatedPattern() {
+        String sql = "SELECT id FROM users WHERE name LIKE '%' || :q || '%'";
+
+        Query query = new Query("ListUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, untypedSchema)
+        );
+
+        assertEquals(
+            "Cannot infer the type of :q in name LIKE '%' || :q || '%';"
+                + " state it with a cast, such as :q::text",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * One query reports one untyped placeholder, which is the first in textual
+     * order, so a repaired query reports the next one.
+     */
+    @Test
+    void shouldRejectTheFirstUntypedPlaceholderOfAQuery() {
+        String sql = "SELECT id FROM users WHERE lower(name) = :a AND lower(email) = :b";
+
+        Query query = new Query("ListUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, untypedSchema)
+        );
+
+        assertEquals(
+            "Cannot infer the type of :a in lower(name) = :a;"
+                + " state it with a cast, such as :a::text",
             exception.getMessage()
         );
     }
@@ -5117,7 +5227,8 @@ class QueryAnalyzerTest {
 
     /**
      * A write value that contains a placeholder without being one leaves that
-     * placeholder unanalyzed, which the placeholder accounting rejects.
+     * placeholder untyped, which is rejected naming the value expression it
+     * stands in.
      */
     @Test
     void shouldRejectAPlaceholderInsideAnInsertValue() {
@@ -5132,8 +5243,8 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(
-            "SQL placeholders [1, 2] are not the analyzed parameters [1];"
-                + " a placeholder is in an unsupported location",
+            "Cannot infer the type of $2 in $2 || 'x';"
+                + " state it with a cast, such as $2::text",
             exception.getMessage()
         );
     }
@@ -5151,8 +5262,8 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(
-            "SQL placeholders [:n, :id] are not the analyzed parameters [:id];"
-                + " a placeholder is in an unsupported location",
+            "Cannot infer the type of :n in :n || name;"
+                + " state it with a cast, such as :n::text",
             exception.getMessage()
         );
     }
@@ -5697,7 +5808,7 @@ class QueryAnalyzerTest {
 
     /**
      * A placeholder inside a {@code DO UPDATE} value is analyzed only through
-     * its own cast, so an uncast one stays unaccounted.
+     * its own cast, so an uncast one is rejected as untyped.
      */
     @Test
     void shouldRejectAnUncastPlaceholderInsideAConflictUpdateValue() {
@@ -5715,8 +5826,8 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(
-            "SQL placeholders [1, 2, 3] are not the analyzed parameters [1, 2];"
-                + " a placeholder is in an unsupported location",
+            "Cannot infer the type of $3 in version + $3;"
+                + " state it with a cast, such as $3::text",
             exception.getMessage()
         );
     }
@@ -5960,22 +6071,23 @@ class QueryAnalyzerTest {
     /**
      * Only the exact list-predicate shape binds a list, so another operator,
      * another operand order, another quantifier, a modifier, and an argument
-     * that is not one placeholder leave their placeholders unaccounted.
+     * that is not one placeholder leave their placeholders untyped, each
+     * rejected naming the expression it stands in.
      */
     @ParameterizedTest
     @CsvSource(
         delimiter = '|',
         quoteCharacter = '"',
         value = {
-            "SELECT id FROM users WHERE id <> ANY($1)|[1]",
-            "SELECT id FROM users WHERE id = SOME($1)|[1]",
-            "SELECT id FROM users WHERE ANY($1) = id|[1]",
-            "SELECT id FROM users WHERE id = ANY(ARRAY[$1, $2])|[1, 2]",
-            "SELECT id FROM users WHERE id = ANY(DISTINCT $1)|[1]",
-            "SELECT id FROM users WHERE id = ANY($1 ORDER BY id)|[1]"
+            "SELECT id FROM users WHERE id <> ANY($1)|ANY($1)",
+            "SELECT id FROM users WHERE id = SOME($1)|SOME($1)",
+            "SELECT id FROM users WHERE ANY($1) = id|ANY($1)",
+            "SELECT id FROM users WHERE id = ANY(ARRAY[$1, $2])|ARRAY[$1, $2]",
+            "SELECT id FROM users WHERE id = ANY(DISTINCT $1)|ANY(DISTINCT $1)",
+            "SELECT id FROM users WHERE id = ANY($1 ORDER BY id)|ANY($1 ORDER BY id)"
         }
     )
-    void shouldRejectAPlaceholderOutsideTheListPredicateShape(String sql, String compiled) {
+    void shouldRejectAPlaceholderOutsideTheListPredicateShape(String sql, String enclosing) {
         Query query = new Query("ListUsers", QueryType.MANY, sql);
         ParsedSql parsedSql = parser.parse(sql);
 
@@ -5985,8 +6097,8 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(
-            "SQL placeholders %s are not the analyzed parameters []; ".formatted(compiled)
-                + "a placeholder is in an unsupported location",
+            "Cannot infer the type of $1 in %s; state it with a cast, such as $1::text"
+                .formatted(enclosing),
             exception.getMessage()
         );
     }
