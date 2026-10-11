@@ -374,7 +374,7 @@ public final class QueryAnalyzer {
         Placeholders placeholders = toPlaceholders(parsedSql, schema);
 
         resolveInsertParameters(insert, source.table(), placeholders);
-        resolveConflictParameters(insert, source.table(), placeholders);
+        resolveConflictParameters(insert, source, placeholders);
 
         return toQueryModel(
             query,
@@ -711,13 +711,19 @@ public final class QueryAnalyzer {
 
     /**
      * Resolves the conflict clause of an insert, whose placeholders are written
-     * after the {@code VALUES} placeholders and therefore bind after them. Only
-     * a target of plain column names of the inserted table is modelled;
-     * PostgreSQL still decides which unique index that target matches.
+     * after the {@code VALUES} placeholders and therefore bind after them. A
+     * {@code DO UPDATE ... WHERE} predicate reads both the stored row and the
+     * proposed one, so its placeholders follow the {@code WHERE} rules over the
+     * inserted table and {@code EXCLUDED} as two sources of the same columns,
+     * which makes an unqualified column of either one ambiguous, as PostgreSQL
+     * also reports it.
+     *
+     * <p>{@code DO NOTHING} decides the conflict by itself, so it needs no
+     * target, while {@code DO UPDATE} must name the rows it updates.
      */
     private void resolveConflictParameters(
         Insert insert,
-        dev.sqlcj.schema.Table table,
+        Source source,
         Placeholders placeholders
     ) {
         InsertConflictTarget target = insert.getConflictTarget();
@@ -727,41 +733,59 @@ public final class QueryAnalyzer {
             return;
         }
 
-        resolveConflictTarget(target, table);
+        boolean doUpdate = action != null
+            && action.getConflictActionType() == ConflictActionType.DO_UPDATE;
 
-        if (action == null || action.getConflictActionType() != ConflictActionType.DO_UPDATE) {
-            return;
+        if (target != null) {
+            resolveConflictTarget(target, source, placeholders);
+        } else if (doUpdate) {
+            throw new UnsupportedOperationException(
+                "ON CONFLICT DO UPDATE requires a conflict target,"
+                    + " such as ON CONFLICT (id) or ON CONFLICT ON CONSTRAINT name."
+            );
         }
 
-        if (action.getWhereExpression() != null) {
-            throw new UnsupportedOperationException(
-                "ON CONFLICT DO UPDATE ... WHERE is not supported."
-            );
+        if (!doUpdate) {
+            return;
         }
 
         List<UpdateSet> updateSets = action.getUpdateSets();
 
-        resolveUpdateSetParameters(updateSets, table, placeholders);
-        resolveExcludedColumns(updateSets, table);
+        resolveUpdateSetParameters(updateSets, source.table(), placeholders);
+        resolveExcludedColumns(updateSets, source.table());
+
+        if (action.getWhereExpression() != null) {
+            resolveParameters(
+                action.getWhereExpression(),
+                List.of(source, new Source(EXCLUDED_QUALIFIER, source.table(), false)),
+                placeholders
+            );
+        }
     }
 
     /**
-     * Resolves the conflict target against the inserted table. A target this
-     * subset does not model — an absent one, a named constraint, or an element
-     * that is an expression or carries a collation or an operator class —
-     * decides the conflict by something the analyzed model does not describe.
+     * Resolves the conflict target against the inserted table. Each element of
+     * a target of plain column names is a column of that table, and the
+     * target's predicate reads that table alone, under the name it exposes. A named
+     * constraint, like the unique index a column-name target matches, is
+     * resolved by PostgreSQL. An element that is an expression or carries a
+     * collation or an operator class decides the conflict by something the
+     * analyzed model does not describe.
      */
     private void resolveConflictTarget(
         InsertConflictTarget target,
-        dev.sqlcj.schema.Table table
+        Source source,
+        Placeholders placeholders
     ) {
-        boolean columnNames = target != null
-            && target.getConstraintName() == null
-            && target.getIndexElements().stream().noneMatch(
-                element -> element.isExpression()
-                    || element.getCollation() != null
-                    || element.getOperatorClass() != null
-            );
+        if (target.getConstraintName() != null) {
+            return;
+        }
+
+        boolean columnNames = target.getIndexElements().stream().noneMatch(
+            element -> element.isExpression()
+                || element.getCollation() != null
+                || element.getOperatorClass() != null
+        );
 
         if (!columnNames) {
             throw new UnsupportedOperationException(
@@ -769,14 +793,12 @@ public final class QueryAnalyzer {
             );
         }
 
-        if (target.getWhereExpression() != null) {
-            throw new UnsupportedOperationException(
-                "ON CONFLICT target predicates are not supported."
-            );
+        for (Index.ColumnParams element : target.getIndexElements()) {
+            findColumn(source.table(), MultiPartName.unquote(element.getColumnName()));
         }
 
-        for (Index.ColumnParams element : target.getIndexElements()) {
-            findColumn(table, MultiPartName.unquote(element.getColumnName()));
+        if (target.getWhereExpression() != null) {
+            resolveParameters(target.getWhereExpression(), List.of(source), placeholders);
         }
     }
 

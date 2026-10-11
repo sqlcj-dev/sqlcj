@@ -429,13 +429,19 @@ named after its column. A value that contains an uncast placeholder, such as
 
 ### Upsert with `ON CONFLICT`
 
-An `INSERT` may end with one conflict clause whose target is a parenthesized
-list of plain column names of the inserted table, followed by one action:
+An `INSERT` may end with one conflict clause that names which conflict it
+handles, followed by one action:
+
+| Target | Accepted shape |
+| --- | --- |
+| none | accepted with `DO NOTHING`, which needs no target; `DO UPDATE` requires one |
+| a column list | a parenthesized list of plain column names of the inserted table, with an optional predicate, as in `ON CONFLICT (code) WHERE active` |
+| `ON CONSTRAINT name` | accepted with either action; the name is resolved by PostgreSQL |
 
 | Action | Accepted shape |
 | --- | --- |
 | `DO NOTHING` | no assignment, so the statement binds only its `VALUES` row |
-| `DO UPDATE SET` | assignments analyzed exactly as `UPDATE` assignments are, where a value may also be `EXCLUDED.column` |
+| `DO UPDATE SET` | assignments analyzed exactly as `UPDATE` assignments are, where a value may also be `EXCLUDED.column`, with an optional `WHERE` predicate |
 
 ```sql
 -- name: UpsertAuthor :one
@@ -462,17 +468,57 @@ wherever a cast appears inside the assigned value.
 `EXCLUDED.column` reads the proposed row, and that column must exist in the
 inserted table. An `EXCLUDED` reference inside a larger expression is not
 resolved, as no other computed write value is, so PostgreSQL checks it. sqlcj
-does not match the conflict target against a unique index; PostgreSQL does.
+matches neither the conflict target against a unique index nor a constraint
+name against the schema; PostgreSQL resolves both.
+
+Either predicate uses the read predicate forms, and a placeholder in one is
+typed exactly as the same comparison types it in a `WHERE` clause:
+
+```sql
+-- name: PublishAuthorIfNewer :optional
+INSERT INTO authors (id, name, version)
+VALUES ($1, $2, $3)
+ON CONFLICT (name) WHERE active DO UPDATE
+SET version = EXCLUDED.version
+WHERE authors.version < EXCLUDED.version
+  AND authors.name <> $4
+RETURNING id, name, version;
+```
+
+The two predicates read different sources:
+
+- a conflict-target predicate reads the inserted table alone, under the name
+  that table exposes, which is its alias when the `INSERT` writes one, as in
+  `INSERT INTO authors AS a`;
+- a `DO UPDATE ... WHERE` predicate reads both the stored row, under the same
+  exposed name, and the proposed row as `EXCLUDED`. Both carry the same
+  columns, so an unqualified column compared with a placeholder there is
+  ambiguous, as PostgreSQL also reports it; write `authors.version` or
+  `EXCLUDED.version`.
+
+A placeholder in a conflict-target predicate is typed and bound like any other,
+but PostgreSQL chooses the arbiter index when it plans the statement rather than
+when it runs it, so a parameterized target predicate stops matching a partial
+unique index once the statement is executed under a generic plan and the insert
+then fails. Write a target predicate with literals that imply the index's own
+predicate, as in `WHERE active` or `WHERE active = TRUE`, and keep the
+placeholders in the `DO UPDATE ... WHERE` predicate.
+
+Every conflict placeholder binds in the textual order the query writes it, so
+`ON CONFLICT (name) WHERE active DO UPDATE SET bio = $4 WHERE authors.version < $3`
+on a two-value insert binds `$1`, `$2`, `$4`, and `$3` in that order, while each
+generated method parameter keeps its own index.
 
 A `DO NOTHING` action writes no row when a conflict occurs, so
 `DO NOTHING ... RETURNING` returns no row on conflict and suits `:optional` or
-`:many` rather than `:one`. A `DO UPDATE ... RETURNING` always returns the row
-it inserted or updated.
+`:many` rather than `:one`. A `DO UPDATE ... WHERE` whose predicate does not
+hold writes no row either, so it returns none as well. A `DO UPDATE` without a
+predicate always returns the row it inserted or updated.
 
 Every other conflict form is rejected on every insert, whether `:exec` or
-returning: a missing target, `ON CONFLICT ON CONSTRAINT`, a target element that
-is an expression or carries a collation or an operator class, a conflict-target
-predicate, and `DO UPDATE ... WHERE`.
+returning: a `DO UPDATE` without a target, which is rejected naming the two
+targets it accepts, and a target element that is an expression or carries a
+collation or an operator class.
 
 ### `RETURNING`
 
@@ -863,12 +909,14 @@ name, and its header line.
   as `SET (name, active) = ('a', TRUE)`; and a written column that the table does
   not declare.
 - A conflict clause outside the accepted upsert shape, on an `:exec` and on a
-  returning insert alike: `ON CONFLICT` without a target, `ON CONFLICT ON
-  CONSTRAINT`, a target element that is an expression or carries a collation or
-  an operator class, a conflict-target predicate such as
-  `ON CONFLICT (id) WHERE active`, and `DO UPDATE ... WHERE`. A `DO UPDATE`
+  returning insert alike: a `DO UPDATE` without a conflict target, which is
+  rejected naming the two targets it accepts, and a target element that is an
+  expression or carries a collation or an operator class. A `DO UPDATE`
   assignment that sets a column list, and an unknown target, assigned, or
-  `EXCLUDED` column, are rejected as the write forms above are.
+  `EXCLUDED` column, are rejected as the write forms above are, and so is an
+  unqualified conflict-predicate column that both the inserted table and
+  `EXCLUDED` carry, or a predicate column qualified with a name its own
+  predicate does not read, such as `EXCLUDED` in a conflict-target predicate.
 - An aliased, computed, qualified-wildcard, or unknown `RETURNING` item;
   `RETURNING` on `:exec`; and `UPDATE ... FROM`, `DELETE ... USING`, or a common
   table expression in a returning write.
@@ -889,8 +937,10 @@ them:
   than a placeholder, such as `id = ANY('{1,2}')`,
 - common table expressions, and subqueries outside the `FROM` item,
 - `UPDATE ... FROM` and `DELETE ... USING` on a non-returning `:exec` write,
-- the unique index an accepted `ON CONFLICT` target matches, and the column
-  references of an `EXCLUDED` value that is not exactly `EXCLUDED.column`.
+- the unique index an accepted `ON CONFLICT` target matches, the constraint an
+  `ON CONSTRAINT` target names, the column references of an `EXCLUDED` value
+  that is not exactly `EXCLUDED.column`, and a conflict-predicate column that
+  no placeholder is compared with, as in a `WHERE` clause.
 
 A clause that is not analyzed still binds the placeholders a cast types inside
 it, in textual order, and nothing else of it is checked. A cast placeholder in a
@@ -1159,6 +1209,22 @@ Writes and `RETURNING`:
   executes a `DO NOTHING` and a `DO UPDATE` action, each with and without
   `RETURNING`, over a new row and then a conflicting one against
   PostgreSQL 16.
+- `QueryAnalyzerTest.shouldAnalyzeUpsertWithoutAConflictTarget`,
+  `QueryAnalyzerTest.shouldAnalyzeUpsertOnANamedConstraint`,
+  `QueryAnalyzerTest.shouldAnalyzeAPlaceholderInAConflictTargetPredicate`,
+  `QueryAnalyzerTest.shouldAnalyzeANamedPlaceholderInAConflictTargetPredicate`,
+  `QueryAnalyzerTest.shouldAnalyzePlaceholdersInAConflictUpdatePredicate`,
+  `QueryAnalyzerTest.shouldAnalyzeAConflictUpdatePredicateThroughTheInsertedTableAlias`,
+  `QueryAnalyzerTest.shouldBindConflictPredicatesInTextualOrder`, and
+  `QueryAnalyzerTest.shouldRejectAConflictPredicateColumnOutsideItsScope` cover
+  the conflict forms that name no column target: a targetless `DO NOTHING`, a
+  named constraint with either action, both predicates and the scope each one
+  reads, their placeholder types and names, their textual binding order, and
+  the ambiguous and out-of-scope predicate columns, and
+  `PostgresIntegrationTest.shouldExecuteGeneratedConflictClausesAgainstPostgres`
+  executes each of those forms against PostgreSQL 16, including a target
+  predicate that selects a partial unique index and a `DO UPDATE ... WHERE`
+  that updates once and then skips the row.
 - `QueryAnalyzerTest.shouldResolveRowTableForReturningAllColumns` covers the
   returning writes that produce a complete table row.
 - `PostgresIntegrationTest.shouldExecuteGeneratedWriteAgainstPostgres`,

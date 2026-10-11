@@ -4321,8 +4321,6 @@ class QueryAnalyzerTest {
     @CsvSource(
         delimiter = '|',
         value = {
-            "INSERT INTO users (id) VALUES ($1) ON CONFLICT DO NOTHING RETURNING id"
-                + "|ON CONFLICT requires a target of column names, such as ON CONFLICT (id).",
             "INSERT INTO users (id) SELECT id FROM users RETURNING id"
                 + "|RETURNING requires an INSERT with a single VALUES row.",
             "INSERT INTO users (id) VALUES ($1), ($2) RETURNING id"
@@ -5229,16 +5227,277 @@ class QueryAnalyzerTest {
     }
 
     /**
-     * A conflict target that is anything other than plain column names — an
-     * absent target, a named constraint, an expression, a collated column, or a
-     * column with an operator class — decides the conflict by something the
-     * analyzed model does not describe.
+     * A {@code DO NOTHING} action decides the conflict by itself, so an insert
+     * may omit the conflict target and still bind exactly the parameters of its
+     * {@code VALUES} row, on an {@code :exec} and on a returning insert alike.
+     */
+    @Test
+    void shouldAnalyzeUpsertWithoutAConflictTarget() {
+        List<QueryParameter> parameters = List.of(
+            new QueryParameter(1, "id", ColumnType.BIGINT),
+            new QueryParameter(2, "name", ColumnType.VARCHAR)
+        );
+
+        QueryModel model = analyzeConflict(QueryType.EXEC, "ON CONFLICT DO NOTHING");
+
+        assertEquals(parameters, model.parameters());
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+
+        assertEquals(
+            "INSERT INTO users (id, name) VALUES (?, ?) ON CONFLICT DO NOTHING",
+            model.executableSql()
+        );
+
+        QueryModel returning = analyzeConflict(
+            QueryType.OPTIONAL,
+            "ON CONFLICT DO NOTHING RETURNING id"
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            returning.columns()
+        );
+
+        assertEquals(parameters, returning.parameters());
+        assertEquals(List.of(1, 2), returning.bindingParameterIndexes());
+    }
+
+    /**
+     * A named constraint names the conflict PostgreSQL resolves, as the unique
+     * index a column-name target matches is also resolved there, so sqlcj
+     * accepts it with either action and analyzes only what the action writes.
+     */
+    @Test
+    void shouldAnalyzeUpsertOnANamedConstraint() {
+        List<QueryParameter> parameters = List.of(
+            new QueryParameter(1, "id", ColumnType.BIGINT),
+            new QueryParameter(2, "name", ColumnType.VARCHAR)
+        );
+
+        for (QueryType type : List.of(QueryType.EXEC, QueryType.OPTIONAL)) {
+            String returning = type == QueryType.EXEC ? "" : " RETURNING id";
+
+            QueryModel doNothing = analyzeConflict(
+                type,
+                "ON CONFLICT ON CONSTRAINT users_pkey DO NOTHING" + returning
+            );
+
+            assertEquals(parameters, doNothing.parameters());
+            assertEquals(List.of(1, 2), doNothing.bindingParameterIndexes());
+
+            QueryModel doUpdate = analyzeConflict(
+                type,
+                "ON CONFLICT ON CONSTRAINT users_pkey DO UPDATE"
+                    + " SET name = EXCLUDED.name, active = $3" + returning
+            );
+
+            assertEquals(
+                List.of(
+                    new QueryParameter(1, "id", ColumnType.BIGINT),
+                    new QueryParameter(2, "name", ColumnType.VARCHAR),
+                    new QueryParameter(3, "active", ColumnType.BOOLEAN)
+                ),
+                doUpdate.parameters()
+            );
+
+            assertEquals(List.of(1, 2, 3), doUpdate.bindingParameterIndexes());
+        }
+    }
+
+    /**
+     * A conflict-target predicate selects the partial unique index PostgreSQL
+     * matches, and reads the inserted table alone, so a placeholder compared
+     * with one of its columns is typed by the {@code WHERE} rules. A predicate
+     * that compares nothing with a placeholder binds nothing of its own.
+     */
+    @Test
+    void shouldAnalyzeAPlaceholderInAConflictTargetPredicate() {
+        QueryModel model = analyzeConflict(
+            QueryType.EXEC,
+            "ON CONFLICT (name) WHERE active = $3 DO NOTHING"
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR),
+                new QueryParameter(3, "active", ColumnType.BOOLEAN)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2, 3), model.bindingParameterIndexes());
+
+        assertEquals(
+            "INSERT INTO users (id, name) VALUES (?, ?)"
+                + " ON CONFLICT (name) WHERE active = ? DO NOTHING",
+            model.executableSql()
+        );
+
+        QueryModel bare = analyzeConflict(
+            QueryType.EXEC,
+            "ON CONFLICT (name) WHERE active DO NOTHING"
+        );
+
+        assertEquals(List.of(1, 2), bare.bindingParameterIndexes());
+    }
+
+    /** A named target-predicate placeholder keeps the name it is written with. */
+    @Test
+    void shouldAnalyzeANamedPlaceholderInAConflictTargetPredicate() {
+        String sql = "INSERT INTO users (id, name) VALUES (:id, :name)"
+            + " ON CONFLICT (name) WHERE active = :flag DO NOTHING";
+
+        QueryModel model = analyzer.analyze(
+            new Query("UpsertUser", QueryType.EXEC, sql),
+            parser.parse(sql),
+            writeSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR),
+                new QueryParameter(3, "flag", ColumnType.BOOLEAN)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2, 3), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A {@code DO UPDATE ... WHERE} predicate reads both the stored row and the
+     * proposed {@code EXCLUDED} row, so a qualified column of either one types
+     * the placeholder it is compared with.
+     */
+    @Test
+    void shouldAnalyzePlaceholdersInAConflictUpdatePredicate() {
+        QueryModel model = analyzeConflict(
+            QueryType.EXEC,
+            "ON CONFLICT (id) DO UPDATE SET name = $3"
+                + " WHERE users.version < $4 AND EXCLUDED.nickname <> $5"
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR),
+                new QueryParameter(3, "name", ColumnType.VARCHAR),
+                new QueryParameter(4, "version", ColumnType.INTEGER),
+                new QueryParameter(5, "nickname", ColumnType.VARCHAR)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2, 3, 4, 5), model.bindingParameterIndexes());
+    }
+
+    /**
+     * The inserted table exposes its alias to a conflict predicate, as a read
+     * source exposes its own.
+     */
+    @Test
+    void shouldAnalyzeAConflictUpdatePredicateThroughTheInsertedTableAlias() {
+        String sql = """
+            INSERT INTO users AS u (id, name)
+            VALUES ($1, $2)
+            ON CONFLICT (id) DO UPDATE
+            SET name = EXCLUDED.name
+            WHERE u.version < $3""";
+
+        QueryModel model = analyzer.analyze(
+            new Query("UpsertUser", QueryType.EXEC, sql),
+            parser.parse(sql),
+            writeSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR),
+                new QueryParameter(3, "version", ColumnType.INTEGER)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2, 3), model.bindingParameterIndexes());
+    }
+
+    /**
+     * Both conflict predicates bind in the textual order the query writes them,
+     * so a target predicate binds before the {@code DO UPDATE} assignments it
+     * is written before.
+     */
+    @Test
+    void shouldBindConflictPredicatesInTextualOrder() {
+        QueryModel model = analyzeConflict(
+            QueryType.EXEC,
+            "ON CONFLICT (name) WHERE active = $5 DO UPDATE"
+                + " SET bio = $3 WHERE users.version < $4"
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR),
+                new QueryParameter(3, "bio", ColumnType.TEXT),
+                new QueryParameter(4, "version", ColumnType.INTEGER),
+                new QueryParameter(5, "active", ColumnType.BOOLEAN)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2, 5, 3, 4), model.bindingParameterIndexes());
+    }
+
+    /**
+     * Each conflict predicate resolves a placeholder's column against its own
+     * scope: the inserted table and {@code EXCLUDED} both carry the columns a
+     * {@code DO UPDATE ... WHERE} predicate reads, so an unqualified one is
+     * ambiguous, while a target predicate reads the inserted table alone.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name WHERE version = $3|"
+                + "Ambiguous column reference 'version' in sources: users, EXCLUDED",
+            "ON CONFLICT (name) WHERE EXCLUDED.active = $3 DO NOTHING|"
+                + "Unknown source qualifier in query: EXCLUDED"
+        }
+    )
+    void shouldRejectAConflictPredicateColumnOutsideItsScope(
+        String conflictClause,
+        String message
+    ) {
+        String insert = "INSERT INTO users (id, name) VALUES ($1, $2) " + conflictClause;
+
+        assertEquals(
+            message,
+            conflictRejection(IllegalArgumentException.class, QueryType.EXEC, insert)
+                .getMessage()
+        );
+
+        assertEquals(
+            message,
+            conflictRejection(
+                IllegalArgumentException.class,
+                QueryType.ONE,
+                insert + " RETURNING id"
+            ).getMessage()
+        );
+    }
+
+    /**
+     * A conflict target element that is an expression or carries a collation or
+     * an operator class decides the conflict by something the analyzed model
+     * does not describe.
      */
     @ParameterizedTest
     @ValueSource(
         strings = {
-            "ON CONFLICT DO NOTHING",
-            "ON CONFLICT ON CONSTRAINT users_pkey DO NOTHING",
             "ON CONFLICT (lower(name)) DO NOTHING",
             "ON CONFLICT (name COLLATE \"C\") DO NOTHING",
             "ON CONFLICT (name text_pattern_ops) DO NOTHING"
@@ -5257,10 +5516,9 @@ class QueryAnalyzerTest {
         delimiter = '|',
         quoteCharacter = '"',
         value = {
-            "ON CONFLICT (id) WHERE active DO NOTHING|"
-                + "ON CONFLICT target predicates are not supported.",
-            "ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name WHERE users.active|"
-                + "ON CONFLICT DO UPDATE ... WHERE is not supported.",
+            "ON CONFLICT DO UPDATE SET name = EXCLUDED.name|"
+                + "ON CONFLICT DO UPDATE requires a conflict target, such as"
+                + " ON CONFLICT (id) or ON CONFLICT ON CONSTRAINT name.",
             "ON CONFLICT (id) DO UPDATE SET (name, active) = ('a', TRUE)|"
                 + "UPDATE assignments must set one column at a time."
         }
@@ -5284,12 +5542,31 @@ class QueryAnalyzerTest {
         );
     }
 
+    /** Analyzes one conflict clause on an insert of the write schema. */
+    private QueryModel analyzeConflict(QueryType type, String conflictClause) {
+        String sql = "INSERT INTO users (id, name) VALUES ($1, $2) " + conflictClause;
+
+        return analyzer.analyze(
+            new Query("UpsertUser", type, sql),
+            parser.parse(sql),
+            writeSchema
+        );
+    }
+
     private UnsupportedOperationException conflictRejection(QueryType type, String sql) {
+        return conflictRejection(UnsupportedOperationException.class, type, sql);
+    }
+
+    private <T extends Throwable> T conflictRejection(
+        Class<T> exceptionType,
+        QueryType type,
+        String sql
+    ) {
         Query query = new Query("UpsertUser", type, sql);
         ParsedSql parsedSql = parser.parse(sql);
 
         return assertThrows(
-            UnsupportedOperationException.class,
+            exceptionType,
             () -> analyzer.analyze(query, parsedSql, writeSchema)
         );
     }
