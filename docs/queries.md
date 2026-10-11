@@ -1540,3 +1540,25 @@ Generated Java:
   `java.util.List` import, and
   `PostgresIntegrationTest.shouldRoundTripArrayValues` executes them against
   PostgreSQL 16.
+
+Reference service:
+
+- `ReferenceServiceIntegrationTest.shouldExecuteTheGeneratedMilestoneQueryShapes`
+  executes the reference service's dynamic sort in both of its modes and a cast
+  page with an offset, its `EXISTS` and `IN (SELECT ...)` membership checks and
+  its scalar subquery, its composite-key join and the filtered left join that
+  names only a live assignee, its untargeted `ON CONFLICT DO NOTHING`, its
+  `ON CONFLICT ON CONSTRAINT ... DO UPDATE ... WHERE` that skips an unchanged
+  role, its conflict-target predicate over a partial unique index, and the
+  aliased `RETURNING` of an optimistic update, against PostgreSQL 16 through the
+  generated repository.
+- `ReferenceServiceIntegrationTest.shouldRejectEachUnsupportedCatalogueQuery`
+  covers the whole located diagnostic line, and the absence of generated
+  output, of every entry of the reference service's unsupported query
+  catalogue: the two set operations, the `RIGHT`, `FULL`, `USING`, `NATURAL`,
+  `CROSS`, comma, and `LATERAL` joins, a common table expression used as a
+  source, a `FROM` subquery, a multi-row `VALUES`, an `INSERT ... SELECT`, an
+  `UPDATE ... FROM`, a `DELETE ... USING`, an uncast `lower(:email)`, and a
+  placeholder beside a subscripted column, and
+  `ReferenceServiceIntegrationTest.shouldCatalogueExactlyTheUnsupportedQueryFiles`
+  covers that the catalogue directory holds exactly those queries.
