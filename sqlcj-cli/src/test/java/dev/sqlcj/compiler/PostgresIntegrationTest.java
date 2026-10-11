@@ -2938,6 +2938,79 @@ class PostgresIntegrationTest {
     }
 
     /**
+     * Covers a filtered left join end to end: its {@code ON} condition carries
+     * a placeholder of its own beside a {@code WHERE} placeholder of another
+     * Java type, and PostgreSQL reads the joined components as {@code null}
+     * both for a customer whose only order the condition filters out and for a
+     * customer with no order at all.
+     */
+    @Test
+    void shouldExecuteGeneratedFilteredLeftJoinAgainstPostgres() throws Exception {
+        execute(CONSTRAINT_SCHEMA);
+
+        Path classesDirectory = generateAndCompile(
+            CONSTRAINT_SCHEMA,
+            """
+                -- name: ListCustomerOrdersByStatus :many
+                SELECT c.id, c.name, o.id AS order_id, o.quantity
+                FROM customers c
+                LEFT JOIN customer_orders o ON o.customer_id = c.id AND o.status = :status
+                WHERE c.id >= :minId
+                ORDER BY c.id;
+                """
+        );
+
+        execute(
+            "INSERT INTO customers (id, name) VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol')"
+        );
+
+        execute(
+            """
+                INSERT INTO customer_orders (id, customer_id, quantity, status)
+                VALUES (10, 1, 3, 'shipped'), (20, 2, 1, 'cancelled')
+                """
+        );
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method method = repository.getClass().getMethod(
+                "listCustomerOrdersByStatus",
+                String.class,
+                Long.class
+            );
+
+            Object result = method.invoke(repository, "shipped", 1L);
+
+            assertInstanceOf(List.class, result);
+
+            List<?> rows = (List<?>) result;
+
+            assertEquals(3, rows.size());
+
+            assertEquals(
+                List.of("id", "name", "orderId", "quantity"),
+                recordComponentNames(rows.get(0))
+            );
+
+            assertEquals(1L, component(rows.get(0), "id"));
+            assertEquals("Alice", component(rows.get(0), "name"));
+            assertEquals(10L, component(rows.get(0), "orderId"));
+            assertEquals(3, component(rows.get(0), "quantity"));
+
+            assertEquals(2L, component(rows.get(1), "id"));
+            assertEquals("Bob", component(rows.get(1), "name"));
+            assertNull(component(rows.get(1), "orderId"));
+            assertNull(component(rows.get(1), "quantity"));
+
+            assertEquals(3L, component(rows.get(2), "id"));
+            assertEquals("Carol", component(rows.get(2), "name"));
+            assertNull(component(rows.get(2), "orderId"));
+            assertNull(component(rows.get(2), "quantity"));
+        }
+    }
+
+    /**
      * Covers a returning insert: the database-generated serial values and the
      * target-table order of {@code RETURNING *} are read through the generated
      * typed result record.

@@ -13,6 +13,7 @@ import dev.sqlcj.type.TypeResolver;
 import net.sf.jsqlparser.expression.Alias;
 import net.sf.jsqlparser.expression.CastExpression;
 import net.sf.jsqlparser.expression.Expression;
+import net.sf.jsqlparser.expression.ExpressionVisitorAdapter;
 import net.sf.jsqlparser.expression.Function;
 import net.sf.jsqlparser.expression.JdbcNamedParameter;
 import net.sf.jsqlparser.expression.JdbcParameter;
@@ -1050,14 +1051,14 @@ public final class QueryAnalyzer {
         }
 
         for (Join join : joins) {
-            Source joined = addSource(
+            addSource(
                 sources,
                 requireSupportedJoin(join),
                 schema,
                 join.isLeft()
             );
 
-            requireJoinCondition(join, sources, joined);
+            resolveJoinConditionColumns(requireJoinCondition(join), sources);
         }
 
         return List.copyOf(sources);
@@ -1172,49 +1173,56 @@ public final class QueryAnalyzer {
     }
 
     /**
-     * Requires one {@code ON} equality between a qualified column of the joined
-     * source and a qualified column of a source introduced earlier.
+     * The single {@code ON} condition of one join, which may be any boolean
+     * expression. The parser reports no condition for a join written without
+     * one and two conditions for the nested {@code JOIN a JOIN b ON ... ON ...}
+     * form, neither of which states one condition for the joined source.
      */
-    private void requireJoinCondition(Join join, List<Source> sources, Source joined) {
+    private Expression requireJoinCondition(Join join) {
         Collection<Expression> onExpressions = join.getOnExpressions();
 
-        if (onExpressions.size() != 1 || !(onExpressions.iterator().next() instanceof EqualsTo equality)) {
+        if (onExpressions.size() != 1) {
             throw new UnsupportedOperationException(
-                "A join requires exactly one ON equality."
+                "A join requires one ON condition."
             );
         }
 
-        Source left = resolveJoinConditionSource(equality.getLeftExpression(), sources);
-        Source right = resolveJoinConditionSource(equality.getRightExpression(), sources);
-
-        if ((left == joined) == (right == joined)) {
-            throw new UnsupportedOperationException(
-                "A join ON equality must compare "
-                    + joined.name()
-                    + " with an earlier source."
-            );
-        }
-    }
-
-    private Source resolveJoinConditionSource(Expression expression, List<Source> sources) {
-        if (!(expression instanceof net.sf.jsqlparser.schema.Column column) || qualifier(column) == null) {
-            throw new UnsupportedOperationException(
-                "A join ON equality requires qualified columns."
-            );
-        }
-
-        return resolveColumn(column, sources).source();
+        return onExpressions.iterator().next();
     }
 
     /**
-     * Resolves the parameters the clauses of a read type, which are the
-     * {@code WHERE} parameters and the pagination parameters.
+     * Resolves every column reference an {@code ON} condition makes against the
+     * sources introduced up to and including its own joined source, as
+     * PostgreSQL scopes a join condition, so a reference to a later source is
+     * an unknown qualifier. A nested {@code SELECT} is not analyzed, which the
+     * visitor's default traversal already leaves unentered.
+     */
+    private void resolveJoinConditionColumns(Expression condition, List<Source> sources) {
+        condition.accept(
+            new ExpressionVisitorAdapter<Void>() {
+
+                @Override
+                public <S> Void visit(net.sf.jsqlparser.schema.Column column, S context) {
+                    resolveColumn(column, sources);
+
+                    return null;
+                }
+            }
+        );
+    }
+
+    /**
+     * Resolves the parameters the clauses of a read type, which are the join
+     * condition parameters, the {@code WHERE} parameters, and the pagination
+     * parameters.
      */
     private void resolveBindingParameters(
         PlainSelect plainSelect,
         List<Source> sources,
         Placeholders placeholders
     ) {
+        resolveJoinConditionParameters(plainSelect, sources, placeholders);
+
         if (plainSelect.getWhere() != null) {
             resolveParameters(
                 plainSelect.getWhere(),
@@ -1224,6 +1232,32 @@ public final class QueryAnalyzer {
         }
 
         resolvePaginationParameters(plainSelect, placeholders);
+    }
+
+    /**
+     * Resolves the parameters of each join's {@code ON} condition by the
+     * {@code WHERE} predicate rules, over the sources introduced up to and
+     * including that join's own source. Binding order comes from the textual
+     * placeholder order the parser reported, not from this traversal.
+     */
+    private void resolveJoinConditionParameters(
+        PlainSelect plainSelect,
+        List<Source> sources,
+        Placeholders placeholders
+    ) {
+        List<Join> joins = plainSelect.getJoins();
+
+        if (joins == null) {
+            return;
+        }
+
+        for (int index = 0; index < joins.size(); index++) {
+            resolveParameters(
+                requireJoinCondition(joins.get(index)),
+                sources.subList(0, index + 2),
+                placeholders
+            );
+        }
     }
 
     /**

@@ -2669,20 +2669,219 @@ class QueryAnalyzerTest {
         );
     }
 
-    /** A left join keeps the inner join's {@code ON} equality requirement. */
+    /**
+     * An {@code ON} condition may be any boolean expression, including a
+     * composite key, a comparison other than equality, a condition over one
+     * source alone, an unqualified column reference, and {@code ON TRUE}.
+     */
     @ParameterizedTest
     @ValueSource(
         strings = {
             "ON p.user_id = u.id AND p.nickname = u.name",
-            "ON p.user_id > u.id"
+            "ON p.user_id > u.id",
+            "ON p.user_id = p.id",
+            "ON user_id = u.id",
+            "ON TRUE"
         }
     )
-    void shouldRejectLeftJoinWithoutSingleQualifiedEquality(String onClause) {
+    void shouldAnalyzeJoinConditionOfAnyBooleanExpression(String onClause) {
+        String sql = """
+            SELECT u.id, p.nickname
+            FROM users u
+            JOIN profiles p %s
+            """.formatted(onClause);
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUserProfiles", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("nickname", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+
+        assertTrue(model.parameters().isEmpty());
+    }
+
+    /**
+     * The join kind alone decides nullability, so a filtered left join still
+     * reads every column of its joined source as nullable, even one the schema
+     * declares {@code NOT NULL}, while the base source keeps its schema
+     * nullability.
+     */
+    @Test
+    void shouldReadFilteredLeftJoinedColumnsAsNullable() {
+        String sql = """
+            SELECT u.id, p.id AS profile_id, p.nickname
+            FROM users u
+            LEFT JOIN profiles p ON p.user_id = u.id AND p.nickname IS NOT NULL
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUserProfiles", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("profile_id", ColumnType.BIGINT, true),
+                new QueryColumn("nickname", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+    }
+
+    /**
+     * A join condition types its placeholders by the {@code WHERE} rules over
+     * its own scope, and every occurrence binds in textual order, so a join
+     * placeholder binds before a {@code WHERE} one.
+     */
+    @Test
+    void shouldResolveJoinConditionParameterInTextualBindingOrder() {
         String sql = """
             SELECT u.id
             FROM users u
-            LEFT JOIN profiles p %s
-            """.formatted(onClause);
+            JOIN profiles p ON p.user_id = u.id AND p.nickname = $2
+            WHERE u.id = $1
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("FindUser", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "nickname", ColumnType.VARCHAR)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(2, 1), model.bindingParameterIndexes());
+    }
+
+    @Test
+    void shouldResolveNamedJoinConditionParameter() {
+        String sql = """
+            SELECT u.id
+            FROM users u
+            JOIN profiles p ON p.user_id = u.id AND p.nickname = :nickname
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("FindUser", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "nickname", ColumnType.VARCHAR)),
+            model.parameters()
+        );
+    }
+
+    /**
+     * A cast placeholder in a join condition states its own type and keeps the
+     * compared column's name, as it does in a {@code WHERE} comparison.
+     */
+    @Test
+    void shouldTypeCastJoinConditionPlaceholderFromItsCast() {
+        String sql = """
+            SELECT u.id
+            FROM users u
+            JOIN profiles p ON p.user_id = u.id AND p.nickname = $1::text
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("FindUser", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "nickname", ColumnType.TEXT)),
+            model.parameters()
+        );
+    }
+
+    /**
+     * An {@code ON} condition sees the sources introduced up to and including
+     * its own joined source, so a reference to a source joined later is an
+     * unknown qualifier.
+     */
+    @Test
+    void shouldRejectJoinConditionReferenceToLaterSource() {
+        String sql = """
+            SELECT u.id
+            FROM users u
+            JOIN profiles p ON p.user_id = o.user_id
+            JOIN orders o ON o.user_id = u.id
+            """;
+
+        Query query = new Query("ListIds", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
+        );
+
+        assertEquals(
+            "Unknown source qualifier in query: o",
+            exception.getMessage()
+        );
+    }
+
+    @Test
+    void shouldRejectUnknownJoinConditionColumn() {
+        String sql = """
+            SELECT u.id
+            FROM users u
+            JOIN profiles p ON p.missing = u.id
+            """;
+
+        Query query = new Query("ListIds", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
+        );
+
+        assertEquals(
+            "Column not found in table profiles: missing",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * Each join carries exactly one {@code ON} condition. The parser reports
+     * none for a join written without one, and two for the nested
+     * {@code JOIN a JOIN b ON ... ON ...} form.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "JOIN profiles p",
+            "LEFT JOIN profiles p",
+            "JOIN profiles p JOIN orders o ON o.user_id = u.id ON p.user_id = u.id"
+        }
+    )
+    void shouldRejectJoinWithoutOneOnCondition(String joinClause) {
+        String sql = """
+            SELECT u.id
+            FROM users u
+            %s
+            """.formatted(joinClause);
 
         Query query = new Query("ListIds", QueryType.MANY, sql);
         ParsedSql parsedSql = parser.parse(sql);
@@ -2693,42 +2892,8 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(
-            "A join requires exactly one ON equality.",
+            "A join requires one ON condition.",
             exception.getMessage()
-        );
-    }
-
-    @Test
-    void shouldRejectJoinWithoutSingleQualifiedEquality() {
-        String sql = """
-            SELECT u.id
-            FROM users u
-            JOIN profiles p ON p.user_id = u.id AND p.nickname = u.name
-            """;
-
-        Query query = new Query("ListIds", QueryType.MANY, sql);
-        ParsedSql parsedSql = parser.parse(sql);
-
-        assertThrows(
-            UnsupportedOperationException.class,
-            () -> analyzer.analyze(query, parsedSql, joinSchema)
-        );
-    }
-
-    @Test
-    void shouldRejectJoinConditionWithoutEarlierSource() {
-        String sql = """
-            SELECT u.id
-            FROM users u
-            JOIN profiles p ON p.user_id = p.id
-            """;
-
-        Query query = new Query("ListIds", QueryType.MANY, sql);
-        ParsedSql parsedSql = parser.parse(sql);
-
-        assertThrows(
-            UnsupportedOperationException.class,
-            () -> analyzer.analyze(query, parsedSql, joinSchema)
         );
     }
 
