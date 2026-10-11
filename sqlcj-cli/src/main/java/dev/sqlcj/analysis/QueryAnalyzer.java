@@ -44,13 +44,18 @@ import net.sf.jsqlparser.statement.insert.InsertConflictAction;
 import net.sf.jsqlparser.statement.insert.InsertConflictTarget;
 import net.sf.jsqlparser.statement.select.AllColumns;
 import net.sf.jsqlparser.statement.select.AllTableColumns;
+import net.sf.jsqlparser.statement.select.FromItem;
 import net.sf.jsqlparser.statement.select.Join;
+import net.sf.jsqlparser.statement.select.LateralSubSelect;
 import net.sf.jsqlparser.statement.select.Limit;
 import net.sf.jsqlparser.statement.select.Offset;
+import net.sf.jsqlparser.statement.select.ParenthesedSelect;
 import net.sf.jsqlparser.statement.select.PlainSelect;
 import net.sf.jsqlparser.statement.select.Select;
 import net.sf.jsqlparser.statement.select.SelectItem;
+import net.sf.jsqlparser.statement.select.SetOperationList;
 import net.sf.jsqlparser.statement.select.Values;
+import net.sf.jsqlparser.statement.select.WithItem;
 import net.sf.jsqlparser.statement.update.Update;
 import net.sf.jsqlparser.statement.update.UpdateSet;
 
@@ -80,6 +85,48 @@ public final class QueryAnalyzer {
 
     private static final String MIXED_PLACEHOLDER_REJECTION = """
         Indexed '$N' and named ':name' placeholders must not be mixed in one query""";
+
+    /** The rejection of a statement kind outside the supported subset. */
+    private static final String UNSUPPORTED_STATEMENT_REJECTION = """
+        Only SELECT, INSERT, UPDATE, and DELETE statements are supported.""";
+
+    /** The rejection of a set operation, which joins two queries into one. */
+    private static final String SET_OPERATION_REJECTION = """
+        UNION, INTERSECT, and EXCEPT are not supported; write one query per SELECT.""";
+
+    /**
+     * The rejection of a projected expression that is neither a column, a
+     * wildcard, the scalar count, nor a cast, which is written as the query
+     * spells it. A cast states the type of such a projection, so the rejection
+     * names that fix.
+     */
+    private static final String COMPUTED_PROJECTION_REJECTION = """
+        Cannot infer the type of %s in SELECT; state it with a cast and an alias, \
+        such as SUM(amount)::numeric AS total""";
+
+    /**
+     * The rejection of a returned item that is neither a column of the write
+     * target nor a bare {@code *}, which is written as the query spells it. A
+     * cast does not make such an item supported, so the rejection names the
+     * items that are.
+     */
+    private static final String COMPUTED_RETURNING_REJECTION = """
+        Unsupported RETURNING item %s; return columns of the target table or *""";
+
+    /** The rejection of a {@code LATERAL} source. */
+    private static final String LATERAL_REJECTION = "LATERAL is not supported.";
+
+    /** The rejection of a subquery source. */
+    private static final String FROM_SUBQUERY_REJECTION = """
+        A subquery in FROM is not supported.""";
+
+    /** The rejection of a source that names a common table expression. */
+    private static final String CTE_SOURCE_REJECTION = """
+        A common table expression used as a source is not supported: %s""";
+
+    /** The rejection of an {@code INSERT} whose rows come from a query. */
+    private static final String INSERT_SELECT_REJECTION = """
+        INSERT ... SELECT is not supported.""";
 
     /**
      * The rejection of a placeholder that no clause of the query types and no
@@ -318,7 +365,7 @@ public final class QueryAnalyzer {
         Statement statement = parsedSql.statement();
 
         if (statement instanceof Select select) {
-            return analyzeSelect(query, parsedSql, select, schema);
+            return analyzeSelectStatement(query, parsedSql, select, schema);
         }
 
         if (statement instanceof Insert insert) {
@@ -333,18 +380,85 @@ public final class QueryAnalyzer {
             return analyzeDelete(query, parsedSql, delete, schema);
         }
 
-        throw new UnsupportedOperationException(
-            statement.getClass().getSimpleName()
-        );
+        throw new UnsupportedOperationException(UNSUPPORTED_STATEMENT_REJECTION);
     }
 
-    private QueryModel analyzeSelect(Query query, ParsedSql parsedSql, Select select, Schema schema) {
+    /**
+     * Classifies a {@code SELECT} statement by the query it writes inside its
+     * parentheses, at any depth, so a parenthesized query is the query it
+     * encloses. A set operation and every other query form, such as a
+     * {@code VALUES} or {@code TABLE} statement, states no single supported
+     * query, so it is rejected before the annotation is checked.
+     */
+    private QueryModel analyzeSelectStatement(
+        Query query,
+        ParsedSql parsedSql,
+        Select select,
+        Schema schema
+    ) {
+        List<Select> selects = new ArrayList<>();
+        Select enclosed = select;
+
+        selects.add(enclosed);
+
+        while (enclosed instanceof ParenthesedSelect parenthesed) {
+            enclosed = parenthesed.getSelect();
+
+            selects.add(enclosed);
+        }
+
+        if (enclosed instanceof PlainSelect plainSelect) {
+            return analyzeSelect(
+                query,
+                parsedSql,
+                plainSelect,
+                commonTableExpressionNames(selects),
+                schema
+            );
+        }
+
+        if (enclosed instanceof SetOperationList) {
+            throw new UnsupportedOperationException(SET_OPERATION_REJECTION);
+        }
+
+        throw new UnsupportedOperationException(UNSUPPORTED_STATEMENT_REJECTION);
+    }
+
+    /**
+     * The names the {@code WITH} clauses of one analyzed query declare, which a
+     * source of that query may name instead of a schema table, as PostgreSQL
+     * resolves it.
+     */
+    private List<String> commonTableExpressionNames(List<Select> selects) {
+        List<String> names = new ArrayList<>();
+
+        for (Select select : selects) {
+            List<WithItem<?>> withItems = select.getWithItemsList();
+
+            if (withItems == null) {
+                continue;
+            }
+
+            for (WithItem<?> withItem : withItems) {
+                names.add(withItem.getUnquotedAliasName());
+            }
+        }
+
+        return List.copyOf(names);
+    }
+
+    private QueryModel analyzeSelect(
+        Query query,
+        ParsedSql parsedSql,
+        PlainSelect plainSelect,
+        List<String> commonTableExpressions,
+        Schema schema
+    ) {
         requireResultQueryType(query);
 
-        PlainSelect plainSelect = select.getPlainSelect();
-        Table table = getTable(plainSelect);
+        Table table = getTable(plainSelect, commonTableExpressions);
 
-        List<Source> sources = resolveSources(plainSelect, table, schema);
+        List<Source> sources = resolveSources(plainSelect, table, commonTableExpressions, schema);
 
         List<QueryColumn> columns = resolveColumns(plainSelect, parsedSql, sources, schema);
 
@@ -366,6 +480,7 @@ public final class QueryAnalyzer {
         ReturningClause returningClause = insert.getReturningClause();
 
         requireWriteQueryType(query, returningClause);
+        requireSupportedInsertSource(insert);
 
         Table table = insert.getTable();
         Source source = toSource(table, schema);
@@ -399,6 +514,7 @@ public final class QueryAnalyzer {
         ReturningClause returningClause = update.getReturningClause();
 
         requireWriteQueryType(query, returningClause);
+        requireSupportedUpdateSources(update);
 
         Table table = update.getTable();
         Source source = toSource(table, schema);
@@ -407,7 +523,7 @@ public final class QueryAnalyzer {
         String rowTable = null;
 
         if (returningClause != null) {
-            requireSupportedReturningUpdate(update);
+            requireNoCommonTableExpressions(update.getWithItemsList());
 
             columns = resolveReturningColumns(returningClause, source);
             rowTable = resolveReturningRowTable(returningClause, source);
@@ -435,6 +551,7 @@ public final class QueryAnalyzer {
         ReturningClause returningClause = delete.getReturningClause();
 
         requireWriteQueryType(query, returningClause);
+        requireSupportedDeleteSources(delete);
 
         Table table = delete.getTable();
         Source source = toSource(table, schema);
@@ -443,7 +560,7 @@ public final class QueryAnalyzer {
         String rowTable = null;
 
         if (returningClause != null) {
-            requireSupportedReturningDelete(delete);
+            requireNoCommonTableExpressions(delete.getWithItemsList());
 
             columns = resolveReturningColumns(returningClause, source);
             rowTable = resolveReturningRowTable(returningClause, source);
@@ -593,9 +710,20 @@ public final class QueryAnalyzer {
         }
 
         throw new UnsupportedOperationException(
-            "Unsupported RETURNING expression: "
-                + expression.getClass().getSimpleName()
+            COMPUTED_RETURNING_REJECTION.formatted(written(expression))
         );
+    }
+
+    /**
+     * One expression as the query writes it, on one line: the parser's own
+     * spelling of the expression, with every run of whitespace written as one
+     * space, so a diagnostic naming an expression written across lines stays
+     * one line.
+     */
+    private String written(Expression expression) {
+        return expression.toString()
+            .replaceAll("\\s+", " ")
+            .trim();
     }
 
     /**
@@ -612,7 +740,35 @@ public final class QueryAnalyzer {
         requireNoCommonTableExpressions(insert.getWithItemsList());
     }
 
-    private void requireSupportedReturningUpdate(Update update) {
+    /**
+     * Rejects an {@code INSERT} whose rows come from a query rather than from
+     * a {@code VALUES} row, whose written rows this subset does not model, on
+     * an {@code :exec} and on a returning insert alike. One level of
+     * parentheses around a {@code VALUES} row states that same row, and is the
+     * row the values of the insert are read from, so it states no query.
+     */
+    private void requireSupportedInsertSource(Insert insert) {
+        Select source = insert.getSelect();
+
+        if (source == null) {
+            return;
+        }
+
+        if (source instanceof ParenthesedSelect parenthesed) {
+            source = parenthesed.getSelect();
+        }
+
+        if (!(source instanceof Values)) {
+            throw new UnsupportedOperationException(INSERT_SELECT_REJECTION);
+        }
+    }
+
+    /**
+     * Rejects the multi-table {@code UPDATE} forms, whose updated rows this
+     * subset does not model, on an {@code :exec} and on a returning update
+     * alike.
+     */
+    private void requireSupportedUpdateSources(Update update) {
         if (
             update.getFromItem() != null
                 || update.getJoins() != null
@@ -622,11 +778,14 @@ public final class QueryAnalyzer {
                 "UPDATE ... FROM and joined updates are not supported."
             );
         }
-
-        requireNoCommonTableExpressions(update.getWithItemsList());
     }
 
-    private void requireSupportedReturningDelete(Delete delete) {
+    /**
+     * Rejects the multi-table {@code DELETE} forms, whose deleted rows this
+     * subset does not model, on an {@code :exec} and on a returning delete
+     * alike.
+     */
+    private void requireSupportedDeleteSources(Delete delete) {
         boolean using = delete.getUsingList() != null && !delete.getUsingList().isEmpty();
 
         if (using || delete.getJoins() != null) {
@@ -634,8 +793,6 @@ public final class QueryAnalyzer {
                 "DELETE ... USING and joined deletes are not supported."
             );
         }
-
-        requireNoCommonTableExpressions(delete.getWithItemsList());
     }
 
     private void requireNoCommonTableExpressions(List<?> withItems) {
@@ -1107,19 +1264,83 @@ public final class QueryAnalyzer {
         }
     }
 
-    private Table getTable(PlainSelect plainSelect) {
-        if (!(plainSelect.getFromItem() instanceof Table table)) {
-            throw new UnsupportedOperationException("Only table sources are supported.");
+    private Table getTable(PlainSelect plainSelect, List<String> commonTableExpressions) {
+        return requireTableSource(
+            plainSelect.getFromItem(),
+            "Only table sources are supported.",
+            commonTableExpressions
+        );
+    }
+
+    /**
+     * Requires one query source to be a table of the schema. A
+     * {@code LATERAL} source and a subquery source each state a source this
+     * subset does not model, and a source that names a common table
+     * expression of the query reads that expression rather than the schema
+     * table of the same name, as PostgreSQL resolves it.
+     */
+    private Table requireTableSource(
+        FromItem fromItem,
+        String unsupportedSourceRejection,
+        List<String> commonTableExpressions
+    ) {
+        requireModeledSourceKind(fromItem);
+
+        if (!(fromItem instanceof Table table)) {
+            throw new UnsupportedOperationException(unsupportedSourceRejection);
         }
 
+        requireNoCommonTableExpressionSource(table, commonTableExpressions);
+
         return table;
+    }
+
+    /**
+     * Rejects the source kinds that state a source this subset does not model
+     * at all, so neither a {@code LATERAL} source nor a subquery source is
+     * reported as a join kind that could be rewritten.
+     */
+    private void requireModeledSourceKind(FromItem fromItem) {
+        if (fromItem instanceof LateralSubSelect) {
+            throw new UnsupportedOperationException(LATERAL_REJECTION);
+        }
+
+        if (fromItem instanceof ParenthesedSelect) {
+            throw new UnsupportedOperationException(FROM_SUBQUERY_REJECTION);
+        }
+    }
+
+    /**
+     * Rejects a source that names a common table expression of its own query,
+     * before the schema is consulted, because such a source reads the
+     * expression and not the schema table of that name. Only an unqualified
+     * name can name one.
+     */
+    private void requireNoCommonTableExpressionSource(Table table, List<String> commonTableExpressions) {
+        if (table.getSchemaName() != null) {
+            return;
+        }
+
+        String name = table.getUnquotedName();
+
+        boolean commonTableExpression = commonTableExpressions.stream()
+            .anyMatch(declared -> declared.equalsIgnoreCase(name));
+
+        if (commonTableExpression) {
+            throw new UnsupportedOperationException(CTE_SOURCE_REJECTION.formatted(name));
+        }
     }
 
     /**
      * Resolves the ordered query sources from the base table followed by every
      * joined table, rejecting an exposed name that repeats.
      */
-    private List<Source> resolveSources(PlainSelect plainSelect, Table table, Schema schema) {
+    private List<Source> resolveSources(
+        PlainSelect plainSelect,
+        Table table,
+        List<String> commonTableExpressions,
+        Schema schema
+    ) {
         List<Source> sources = new ArrayList<>();
 
         addSource(sources, table, schema, false);
@@ -1133,7 +1354,7 @@ public final class QueryAnalyzer {
         for (Join join : joins) {
             addSource(
                 sources,
-                requireSupportedJoin(join),
+                requireSupportedJoin(join, commonTableExpressions),
                 schema,
                 join.isLeft()
             );
@@ -1198,21 +1419,67 @@ public final class QueryAnalyzer {
      * table source. {@link Join#isInnerJoin()} and {@link Join#isLeft()} also
      * report shapes that this subset excludes, so every excluded modifier is
      * rejected explicitly.
+     *
+     * <p>The joined source is classified first, because a source this subset
+     * does not model cannot be written as a supported join at all, and the join
+     * kinds that can be written another way are then reported with that
+     * rewrite. Every remaining modifier keeps the general rejection.
      */
-    private Table requireSupportedJoin(Join join) {
+    private Table requireSupportedJoin(Join join, List<String> commonTableExpressions) {
+        requireModeledSourceKind(join.getRightItem());
+        requireSupportedJoinKind(join);
+
         if (!isSupportedInnerJoin(join) && !isSupportedLeftJoin(join)) {
             throw new UnsupportedOperationException(
                 "Only unmodified INNER JOIN and LEFT JOIN clauses are supported."
             );
         }
 
-        if (!(join.getRightItem() instanceof Table table)) {
+        return requireTableSource(
+            join.getRightItem(),
+            "Only table join sources are supported.",
+            commonTableExpressions
+        );
+    }
+
+    /**
+     * Rejects each join kind that joins its sources by a rule this subset does
+     * not model, naming the join to write instead where one exists.
+     */
+    private void requireSupportedJoinKind(Join join) {
+        if (join.isFull()) {
+            throw new UnsupportedOperationException("FULL JOIN is not supported.");
+        }
+
+        if (join.isRight()) {
             throw new UnsupportedOperationException(
-                "Only table join sources are supported."
+                "RIGHT JOIN is not supported; write a LEFT JOIN with the two sources swapped."
             );
         }
 
-        return table;
+        if (join.isCross()) {
+            throw new UnsupportedOperationException(
+                "CROSS JOIN is not supported; write JOIN ... ON TRUE."
+            );
+        }
+
+        if (join.isNatural()) {
+            throw new UnsupportedOperationException(
+                "NATURAL JOIN is not supported; write the join condition with ON."
+            );
+        }
+
+        if (!join.getUsingColumns().isEmpty()) {
+            throw new UnsupportedOperationException(
+                "JOIN ... USING is not supported; write the join condition with ON."
+            );
+        }
+
+        if (join.isSimple()) {
+            throw new UnsupportedOperationException(
+                "A comma-separated FROM list is not supported; write JOIN ... ON with the join condition."
+            );
+        }
     }
 
     private boolean isSupportedInnerJoin(Join join) {
@@ -2172,8 +2439,7 @@ public final class QueryAnalyzer {
             }
 
             throw new UnsupportedOperationException(
-                "Unsupported SELECT expression: "
-                    + expression.getClass().getSimpleName()
+                COMPUTED_PROJECTION_REJECTION.formatted(written(expression))
             );
         }
 

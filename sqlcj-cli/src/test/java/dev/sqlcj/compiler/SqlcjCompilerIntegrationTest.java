@@ -1,14 +1,28 @@
 package dev.sqlcj.compiler;
 
+import dev.sqlcj.analysis.QueryAnalyzer;
+import dev.sqlcj.analysis.QueryGroupModel;
+import dev.sqlcj.analysis.QueryModel;
 import dev.sqlcj.config.Config;
 import dev.sqlcj.config.JavaConfig;
 import dev.sqlcj.config.SqlConfig;
+import dev.sqlcj.generator.CodeGenerator;
+import dev.sqlcj.generator.GeneratedFile;
+import dev.sqlcj.generator.JavaCodeGenerator;
+import dev.sqlcj.parser.Query;
 import dev.sqlcj.runtime.JdbcQueryExecutor;
 import dev.sqlcj.runtime.QueryCardinalityException;
 import dev.sqlcj.runtime.QueryExecutor;
+import dev.sqlcj.schema.Schema;
+import dev.sqlcj.schema.parser.DefaultSchemaParser;
+import dev.sqlcj.schema.parser.SchemaParser;
+import dev.sqlcj.sql.SqlParser;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import javax.tools.JavaCompiler;
 import javax.tools.ToolProvider;
@@ -29,6 +43,8 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.UUID;
+import java.util.function.BiFunction;
+import java.util.function.Function;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -2314,6 +2330,358 @@ class SqlcjCompilerIntegrationTest {
     }
 
     /**
+     * Every statement kind, set operation, projection, {@code RETURNING} item,
+     * join kind, and source outside the supported subset is reported as one
+     * located line in SQL terms, before any file is written.
+     */
+    @ParameterizedTest
+    @MethodSource("rejectedQueries")
+    void shouldRejectUnsupportedQueryBeforeWriting(String type, String sql, String reason) {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileJoinQueries(
+                "-- name: Q %s\n%s;\n".formatted(type, sql),
+                generatedDirectory
+            )
+        );
+
+        assertEquals(
+            "Invalid query 'Q' in %s at line 1: ".formatted(tempDir.resolve("queries.sql")) + reason,
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    private static Stream<Arguments> rejectedQueries() {
+        String setOperation = "UNION, INTERSECT, and EXCEPT are not supported;"
+            + " write one query per SELECT.";
+
+        String statement = "Only SELECT, INSERT, UPDATE, and DELETE statements are supported.";
+
+        return Stream.of(
+            Arguments.of(":many", "SELECT id FROM users UNION SELECT id FROM users", setOperation),
+            Arguments.of(":many", "SELECT id FROM users UNION ALL SELECT id FROM users", setOperation),
+            Arguments.of(":many", "SELECT id FROM users INTERSECT SELECT id FROM users", setOperation),
+            Arguments.of(":many", "(SELECT id FROM users UNION SELECT id FROM users)", setOperation),
+            Arguments.of(":exec", "VALUES (1)", statement),
+            Arguments.of(":many", "TABLE users", statement),
+            Arguments.of(
+                ":exec",
+                "MERGE INTO users u USING profiles p ON p.user_id = u.id"
+                    + " WHEN MATCHED THEN UPDATE SET name = p.nickname",
+                statement
+            ),
+            Arguments.of(":exec", "TRUNCATE TABLE users", statement),
+            Arguments.of(":many", "EXPLAIN SELECT id FROM users", statement),
+            Arguments.of(":exec", "EXECUTE archive_users(1)", statement),
+            Arguments.of(":exec", "CREATE TABLE archived_users (id BIGINT)", statement),
+            Arguments.of(":exec", "SET statement_timeout = 0", statement),
+            Arguments.of(
+                ":many",
+                "SELECT COUNT(*) OVER () AS n FROM users",
+                "Cannot infer the type of COUNT(*) OVER () in SELECT;"
+                    + " state it with a cast and an alias, such as SUM(amount)::numeric AS total"
+            ),
+            Arguments.of(
+                ":many",
+                "SELECT name || 'x' AS n FROM users",
+                "Cannot infer the type of name || 'x' in SELECT;"
+                    + " state it with a cast and an alias, such as SUM(amount)::numeric AS total"
+            ),
+            Arguments.of(
+                ":one",
+                "DELETE FROM users WHERE id = $1 RETURNING lower(name)",
+                "Unsupported RETURNING item lower(name);"
+                    + " return columns of the target table or *"
+            ),
+            Arguments.of(
+                ":many",
+                "SELECT u.id FROM users u RIGHT JOIN profiles p ON p.user_id = u.id",
+                "RIGHT JOIN is not supported; write a LEFT JOIN with the two sources swapped."
+            ),
+            Arguments.of(
+                ":many",
+                "SELECT u.id FROM users u FULL JOIN profiles p ON p.user_id = u.id",
+                "FULL JOIN is not supported."
+            ),
+            Arguments.of(
+                ":many",
+                "SELECT u.id FROM users u JOIN profiles p USING (id)",
+                "JOIN ... USING is not supported; write the join condition with ON."
+            ),
+            Arguments.of(
+                ":many",
+                "SELECT u.id FROM users u NATURAL JOIN profiles p",
+                "NATURAL JOIN is not supported; write the join condition with ON."
+            ),
+            Arguments.of(
+                ":many",
+                "SELECT u.id FROM users u CROSS JOIN profiles p",
+                "CROSS JOIN is not supported; write JOIN ... ON TRUE."
+            ),
+            Arguments.of(
+                ":many",
+                "SELECT u.id FROM users u, profiles p",
+                "A comma-separated FROM list is not supported;"
+                    + " write JOIN ... ON with the join condition."
+            ),
+            Arguments.of(
+                ":many",
+                "SELECT u.id FROM users u"
+                    + " JOIN LATERAL (SELECT p.nickname FROM profiles p WHERE p.user_id = u.id) l"
+                    + " ON TRUE",
+                "LATERAL is not supported."
+            ),
+            Arguments.of(
+                ":many",
+                "SELECT s.id FROM (SELECT id FROM users) s",
+                "A subquery in FROM is not supported."
+            ),
+            Arguments.of(
+                ":many",
+                "WITH recent AS (SELECT id FROM users) SELECT id FROM recent",
+                "A common table expression used as a source is not supported: recent"
+            ),
+            Arguments.of(
+                ":many",
+                "WITH users AS (SELECT id FROM users) SELECT id FROM users",
+                "A common table expression used as a source is not supported: users"
+            ),
+            Arguments.of(
+                ":exec",
+                "INSERT INTO users (id, name) VALUES ($1, $2), ($3, $4)",
+                "INSERT requires a single VALUES row."
+            ),
+            Arguments.of(
+                ":exec",
+                "INSERT INTO users (id, name) SELECT id, nickname FROM profiles",
+                "INSERT ... SELECT is not supported."
+            ),
+            Arguments.of(
+                ":many",
+                "INSERT INTO users (id, name) SELECT id, nickname FROM profiles RETURNING id",
+                "INSERT ... SELECT is not supported."
+            ),
+            Arguments.of(
+                ":exec",
+                "UPDATE users SET name = $2 FROM profiles WHERE users.id = $1",
+                "UPDATE ... FROM and joined updates are not supported."
+            ),
+            Arguments.of(
+                ":exec",
+                "UPDATE users, profiles SET name = $2 WHERE users.id = $1",
+                "UPDATE ... FROM and joined updates are not supported."
+            ),
+            Arguments.of(
+                ":exec",
+                "DELETE FROM users USING profiles WHERE users.id = $1",
+                "DELETE ... USING and joined deletes are not supported."
+            ),
+            Arguments.of(
+                ":exec",
+                "DELETE users FROM users JOIN profiles ON profiles.user_id = users.id"
+                    + " WHERE users.id = $1",
+                "DELETE ... USING and joined deletes are not supported."
+            )
+        );
+    }
+
+    /**
+     * An unexpected failure of the schema step is reported as one located
+     * internal-error line that carries neither the message nor the class of the
+     * failure.
+     */
+    @Test
+    void shouldReportAnUnexpectedSchemaFailureAsAnInternalError() {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileSeamQueries(
+                (schema, sql) -> {
+                    throw new IllegalStateException("secret");
+                },
+                defaultQueryAnalysis(),
+                JavaCodeGenerator::new,
+                generatedDirectory
+            )
+        );
+
+        assertInternalError(
+            "Internal error while parsing schema source %s".formatted(tempDir.resolve("schema.sql")),
+            "IllegalStateException",
+            exception,
+            generatedDirectory
+        );
+    }
+
+    /**
+     * An unexpected failure of the analysis step is reported as one located
+     * internal-error line, including a failure of the types a diagnostic uses
+     * that carries no message and a subclass of those types.
+     */
+    @ParameterizedTest
+    @MethodSource("unexpectedAnalysisFailures")
+    void shouldReportAnUnexpectedAnalysisFailureAsAnInternalError(RuntimeException failure) {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileSeamQueries(
+                new DefaultSchemaParser(),
+                (query, schema) -> {
+                    throw failure;
+                },
+                JavaCodeGenerator::new,
+                generatedDirectory
+            )
+        );
+
+        assertInternalError(
+            "Internal error while analyzing query 'GetUser' in %s at line 1"
+                .formatted(tempDir.resolve("queries.sql")),
+            failure.getClass().getSimpleName(),
+            exception,
+            generatedDirectory
+        );
+    }
+
+    private static Stream<RuntimeException> unexpectedAnalysisFailures() {
+        return Stream.of(
+            new NullPointerException("secret"),
+            new UnsupportedOperationException("   "),
+            new NumberFormatException("secret")
+        );
+    }
+
+    /**
+     * An unexpected failure of the generation step is reported as one located
+     * internal-error line naming the query group.
+     */
+    @Test
+    void shouldReportAnUnexpectedGenerationFailureAsAnInternalError() {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileSeamQueries(
+                new DefaultSchemaParser(),
+                defaultQueryAnalysis(),
+                packageName -> new FailingCodeGenerator(
+                    new JavaCodeGenerator(packageName),
+                    new ClassCastException("secret"),
+                    null
+                ),
+                generatedDirectory
+            )
+        );
+
+        assertInternalError(
+            "Internal error while generating query group 'Users' in %s"
+                .formatted(tempDir.resolve("queries.sql")),
+            "ClassCastException",
+            exception,
+            generatedDirectory
+        );
+    }
+
+    /**
+     * An unexpected failure of the shared row records and enum types, which
+     * belong to no query group, is reported as one internal-error line naming
+     * the package.
+     */
+    @Test
+    void shouldReportAnUnexpectedSharedGenerationFailureAsAnInternalError() {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileSeamQueries(
+                new DefaultSchemaParser(),
+                defaultQueryAnalysis(),
+                packageName -> new FailingCodeGenerator(
+                    new JavaCodeGenerator(packageName),
+                    null,
+                    new ClassCastException("secret")
+                ),
+                generatedDirectory
+            )
+        );
+
+        assertInternalError(
+            "Internal error while generating the shared row records and enums"
+                + " of package 'generated'",
+            "ClassCastException",
+            exception,
+            generatedDirectory
+        );
+    }
+
+    /**
+     * Requires the one internal-error line of one compilation step, which
+     * carries neither the message nor the class of the failure it reports and
+     * leaves no generated output.
+     */
+    private void assertInternalError(
+        String step,
+        String failureClass,
+        CompilationException exception,
+        Path generatedDirectory
+    ) {
+        assertEquals(step + "; please report this sqlcj defect", exception.getMessage());
+
+        assertFalse(exception.getMessage().contains("secret"));
+        assertFalse(exception.getMessage().contains(failureClass));
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    /** The compiler's own parse and analysis of one query. */
+    private static BiFunction<Query, Schema, QueryModel> defaultQueryAnalysis() {
+        SqlParser sqlParser = new SqlParser();
+        QueryAnalyzer queryAnalyzer = new QueryAnalyzer();
+
+        return (query, schema) -> queryAnalyzer.analyze(
+            query,
+            sqlParser.parse(query.sql()),
+            schema
+        );
+    }
+
+    /** A code generator whose generation steps fail instead of generating. */
+    private record FailingCodeGenerator(
+        CodeGenerator delegate,
+        RuntimeException generateFailure,
+        RuntimeException generateRowsFailure
+    ) implements CodeGenerator {
+
+        @Override
+        public GeneratedFile generate(QueryGroupModel group) {
+            if (generateFailure != null) {
+                throw generateFailure;
+            }
+
+            return delegate.generate(group);
+        }
+
+        @Override
+        public List<GeneratedFile> generateRows() {
+            if (generateRowsFailure != null) {
+                throw generateRowsFailure;
+            }
+
+            return delegate.generateRows();
+        }
+
+        @Override
+        public List<GeneratedFile> generateEnums() {
+            return delegate.generateEnums();
+        }
+    }
+
+    /**
      * An untyped placeholder is reported as one located line that names the
      * placeholder, the expression the query writes it in, and the cast that
      * types it, even when that expression spans lines in the source.
@@ -2742,6 +3110,73 @@ class SqlcjCompilerIntegrationTest {
         assertCompiles(generatedDirectory, classesDirectory);
 
         assertTrue(Files.exists(classesDirectory.resolve("generated/UsersRepository.class")));
+    }
+
+    /** Compiles one query source against the joined users schema. */
+    private void compileJoinQueries(String queries, Path generatedDirectory) throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(schemaFile, JOIN_SCHEMA);
+        Files.writeString(queriesFile, queries);
+
+        new SqlcjCompiler().compile(usersConfig(schemaFile, queriesFile, generatedDirectory));
+    }
+
+    /**
+     * Compiles one supported query through a compiler whose schema parser,
+     * query analysis, and code generators are the given ones, so that an
+     * unexpected failure of one step can be injected.
+     */
+    private void compileSeamQueries(
+        SchemaParser schemaParser,
+        BiFunction<Query, Schema, QueryModel> queryAnalysis,
+        Function<String, CodeGenerator> codeGenerators,
+        Path generatedDirectory
+    ) throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE users
+                (
+                    id   BIGINT NOT NULL,
+                    name VARCHAR(255)
+                );
+                """
+        );
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: GetUser :one
+                SELECT *
+                FROM users
+                WHERE id = $1;
+                """
+        );
+
+        new SqlcjCompiler(schemaParser, queryAnalysis, codeGenerators)
+            .compile(usersConfig(schemaFile, queriesFile, generatedDirectory));
+    }
+
+    /** The one {@code Users} entry of one schema and query source. */
+    private Config usersConfig(Path schemaFile, Path queriesFile, Path generatedDirectory) {
+        return new Config(
+            List.of(
+                new SqlConfig(
+                    "Users",
+                    schemaFile.toString(),
+                    queriesFile.toString()
+                )
+            ),
+            new JavaConfig(
+                generatedDirectory.toString(),
+                "generated"
+            )
+        );
     }
 
     private void compileUsersQueries(String queries, Path generatedDirectory) throws IOException {

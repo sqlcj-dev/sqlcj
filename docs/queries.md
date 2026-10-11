@@ -77,7 +77,14 @@ configuration entry.
 
 ### Sources
 
-- The `FROM` item must be a table of that schema, optionally with an alias.
+- The `FROM` item must be a table of that schema, optionally with an alias. A
+  `LATERAL` source is rejected as `LATERAL is not supported.` and a subquery
+  source as `A subquery in FROM is not supported.`
+- A `FROM` or `JOIN` source that names a `WITH` clause of its own query, which
+  in PostgreSQL reads that query and not the table of the same name, is rejected
+  as `A common table expression used as a source is not supported: <name>`
+  before the schema is consulted, so a `WITH` clause named like a table never
+  reads that table.
 - sqlcj models one namespace, so a source resolves by its unqualified name:
   `users`, `public.users`, and `"public"."users"` are one table, matched without
   SQL identifier delimiters and case-insensitively. A source qualified with any
@@ -87,10 +94,21 @@ configuration entry.
   not followed; see
   [Schema Snapshot Input](postgresql.md#schema-snapshot-input).
 - A table may be joined with `JOIN`, `INNER JOIN`, `LEFT JOIN`, or
-  `LEFT OUTER JOIN`, and inner and left joins may be chained in any order. A
-  comma-separated source list and every other join modifier — `RIGHT`, `FULL`, a
-  bare `OUTER`, `CROSS`, `NATURAL`, `SEMI`, `APPLY`, `STRAIGHT`, `GLOBAL`, a
-  join hint, and `USING (...)` — are rejected.
+  `LEFT OUTER JOIN`, and inner and left joins may be chained in any order.
+- Every other join is rejected, and a join that can be written as a supported
+  one says what to write:
+  - `FULL JOIN is not supported.`
+  - `RIGHT JOIN is not supported; write a LEFT JOIN with the two sources swapped.`
+  - `CROSS JOIN is not supported; write JOIN ... ON TRUE.`
+  - `NATURAL JOIN is not supported; write the join condition with ON.`
+  - `JOIN ... USING is not supported; write the join condition with ON.`
+  - `A comma-separated FROM list is not supported; write JOIN ... ON with the join condition.`
+
+  A `LATERAL` or subquery join source is reported as the same unsupported
+  source as a `FROM` item of that kind, before the join kind, and every
+  remaining modifier — a bare `OUTER`, `SEMI`, `APPLY`, `STRAIGHT`, `GLOBAL`,
+  and a join hint — is rejected as
+  `Only unmodified INNER JOIN and LEFT JOIN clauses are supported.`
 - Each join requires exactly one `ON` condition, which may be any boolean
   expression, including `ON TRUE`. Its column references, qualified or not,
   resolve against the sources introduced up to and including the joined source,
@@ -119,7 +137,10 @@ configuration entry.
   unknown column is rejected.
 - A result expression that is not a direct column, a wildcard, the scalar count
   below, or the cast projection below — such as another function call, an
-  arithmetic expression, or a literal — is rejected.
+  arithmetic expression, or a literal — is rejected as
+  `Cannot infer the type of <expression> in SELECT; state it with a cast and an
+  alias, such as SUM(amount)::numeric AS total`, naming the expression as the
+  query writes it, on one line.
 - An explicit alias names the result column, so `SELECT id AS author_id`
   generates the record component `authorId` while the component's type still
   comes from the column and its nullability from the column and its source.
@@ -538,12 +559,18 @@ value is read back with its declared type. A clause that is exactly `*` returns
 the target table's shared `<TableName>Row` record, while a `RETURNING` column
 list keeps the query's own `<QueryName>Result` record.
 
-An aliased `*`, a computed `RETURNING` item with or without an alias, a
-qualified `table.*`, an unknown column, and `RETURNING` on `:exec` are rejected.
-Multi-row `VALUES`, `INSERT ... SELECT`, `UPDATE ... FROM`, `DELETE ... USING`,
-and common table expressions are rejected in a returning write, while an
-accepted `ON CONFLICT` clause is analyzed the same way with and without
-`RETURNING`.
+An aliased `*`, a qualified `table.*`, an unknown column, and `RETURNING` on
+`:exec` are rejected, and a computed `RETURNING` item, with or without an alias,
+is rejected as
+`Unsupported RETURNING item <expression>; return columns of the target table or *`,
+naming the expression as the query writes it, on one line. A cast does not make
+such an item supported, because a `RETURNING` clause returns columns of the
+target table.
+
+Multi-row `VALUES`, `INSERT ... SELECT`, `UPDATE ... FROM`, and
+`DELETE ... USING` are rejected in every write, and common table expressions in
+a returning write, while an accepted `ON CONFLICT` clause is analyzed the same
+way with and without `RETURNING`.
 
 ## Parameters
 
@@ -869,20 +896,34 @@ the documented shapes are contract, tested, and safe to rely on.
 
 ### Rejected
 
-Rejection stops the run with a diagnostic naming the query source, the query
-name, and its header line.
+Rejection stops the run with one diagnostic line naming the query source, the
+query name, and its header line.
 
+- A statement that is not a `SELECT`, an `INSERT`, an `UPDATE`, or a `DELETE`,
+  including `VALUES`, `TABLE`, `MERGE`, `TRUNCATE`, `EXPLAIN`, `EXECUTE`, a DDL
+  statement such as `CREATE TABLE`, and a `SET` statement, each rejected as
+  `Only SELECT, INSERT, UPDATE, and DELETE statements are supported.` before the
+  annotation is checked. A parenthesized `SELECT` is the query it encloses, at
+  any depth, so it is analyzed as that query.
+- A set operation, `UNION`, `UNION ALL`, `INTERSECT`, or `EXCEPT`, written
+  directly or inside parentheses, rejected as
+  `UNION, INTERSECT, and EXCEPT are not supported; write one query per SELECT.`
 - A result expression that is not a direct column, a wildcard, an aliased
   `COUNT(*)`, or an aliased cast, including another function call, another
   aggregate, and a literal. A `COUNT(*)` without an alias, a cast projection
   without an alias, and a cast projection whose type sqlcj does not map each
   fail with their own diagnostic, while `COUNT(column)`,
   `COUNT(DISTINCT column)`, `COUNT(t.*)`, `pg_catalog.count(*)`,
-  `lower(name) AS n`, and the `FILTER` and `OVER` forms keep the
-  unsupported-expression rejection.
-- A `FROM` item that is not a table, a comma-separated source list, a join that
-  is not a plain inner or left join, a join that does not carry exactly one
-  `ON` condition, and a set operation such as `UNION`.
+  `lower(name) AS n`, `name || 'x' AS n`, and the `FILTER` and `OVER` forms are
+  rejected as `Cannot infer the type of COUNT(*) OVER () in SELECT; state it
+  with a cast and an alias, such as SUM(amount)::numeric AS total`.
+- A `FROM` or `JOIN` source that is not a table of the schema: a `LATERAL`
+  source, a subquery source, and a source that names a `WITH` clause of its own
+  query, each with the diagnostic [Sources](#sources) states.
+- A join kind outside a plain inner or left join, each with the diagnostic
+  [Sources](#sources) states, which says what to write instead for `RIGHT`,
+  `CROSS`, `NATURAL`, `USING`, and a comma-separated `FROM` list, and a join
+  that does not carry exactly one `ON` condition.
 - An uncast placeholder in a location sqlcj does not analyze, including
   `ORDER BY $1`, a projection such as `SELECT $1 AS x`, a grouping list, a
   `HAVING` predicate, a subquery, a
@@ -925,10 +966,9 @@ name, and its header line.
   placeholder, each of them also as the operand of a cast, such as
   `:"x"::text`, `&x::text`, or `:a.b::text`, one name whose occurrences have
   conflicting types, and non-contiguous or non-positive placeholder indexes.
-- An `INSERT` without an explicit column list, with more than one `VALUES` row,
-  or built from a `SELECT`; an `UPDATE` assignment that sets a column list, such
-  as `SET (name, active) = ('a', TRUE)`; and a written column that the table does
-  not declare.
+- An `INSERT` without an explicit column list; an `UPDATE` assignment that sets
+  a column list, such as `SET (name, active) = ('a', TRUE)`; and a written
+  column that the table does not declare.
 - A conflict clause outside the accepted upsert shape, on an `:exec` and on a
   returning insert alike: a `DO UPDATE` without a conflict target, which is
   rejected naming the two targets it accepts, and a target element that is an
@@ -938,10 +978,26 @@ name, and its header line.
   unqualified conflict-predicate column that both the inserted table and
   `EXCLUDED` carry, or a predicate column qualified with a name its own
   predicate does not read, such as `EXCLUDED` in a conflict-target predicate.
-- An aliased `*`, a computed, qualified-wildcard, or unknown `RETURNING` item;
-  `RETURNING` on `:exec`; and `UPDATE ... FROM`, `DELETE ... USING`, or a common
-  table expression in a returning write.
+- An aliased `*`, a computed, qualified-wildcard, or unknown `RETURNING` item,
+  and `RETURNING` on `:exec`; a computed item is rejected as
+  [`RETURNING`](#returning) states.
+- The shapes that read or write more than the one analyzed table, on an
+  `:exec` and on a returning write alike: an `INSERT` with more than one
+  `VALUES` row, rejected as `INSERT requires a single VALUES row.`; an
+  `INSERT ... SELECT`, rejected as `INSERT ... SELECT is not supported.`; an
+  `UPDATE ... FROM` or joined `UPDATE`, rejected as
+  `UPDATE ... FROM and joined updates are not supported.`; and a
+  `DELETE ... USING` or joined `DELETE`, rejected as
+  `DELETE ... USING and joined deletes are not supported.` A common table
+  expression in a returning write is rejected too.
 - Any annotation other than `:one`, `:optional`, `:many`, and `:exec`.
+
+An unexpected failure of schema parsing, query analysis, or generation is not a
+diagnostic of the compiled input: it is reported as one line that names the
+step's own input and ends `; please report this sqlcj defect`, such as
+`Internal error while analyzing query 'GetUser' in queries.sql at line 1;
+please report this sqlcj defect`. The line carries neither the message nor the
+class of the failure, because neither describes the compiled input.
 
 ### Not analyzed
 
@@ -956,8 +1012,8 @@ them:
   `LIKE` with a literal pattern, a range whose bounds are both literal such as
   `id BETWEEN 1 AND 10`, `IN` with a subquery, or `= ANY` over something other
   than a placeholder, such as `id = ANY('{1,2}')`,
-- common table expressions, and subqueries outside the `FROM` item,
-- `UPDATE ... FROM` and `DELETE ... USING` on a non-returning `:exec` write,
+- a common table expression whose name no source reads, and subqueries outside
+  the `FROM` item,
 - the unique index an accepted `ON CONFLICT` target matches, the constraint an
   `ON CONSTRAINT` target names, the column references of an `EXCLUDED` value
   that is not exactly `EXCLUDED.column`, and a conflict-predicate column that
@@ -1273,6 +1329,41 @@ Writes and `RETURNING`:
   executes `DEFAULT`, a literal, `NULL`, `now()`, and `code + 1` in an `:exec`
   insert, a returning named insert, and an `:exec` update against
   PostgreSQL 16.
+
+Unsupported queries and internal errors:
+
+- `SqlcjCompilerIntegrationTest.shouldRejectUnsupportedQueryBeforeWriting`
+  covers the whole located diagnostic line, and the absence of generated
+  output, of each rejected input: the set operations written directly and in
+  parentheses, the `VALUES`, `TABLE`, `MERGE`, `TRUNCATE`, `EXPLAIN`,
+  `EXECUTE`, `CREATE TABLE`, and `SET` statements, a window and a
+  concatenation projection, a computed `RETURNING` item, the `RIGHT`, `FULL`,
+  `USING`, `NATURAL`, `CROSS`, comma, and `LATERAL` joins, a `FROM` subquery, a
+  common table expression used as a source and one named like a schema table,
+  a multi-row `VALUES`, an `INSERT ... SELECT` on `:exec` and with
+  `RETURNING`, and an `:exec` `UPDATE ... FROM`, comma-joined `UPDATE`,
+  `DELETE ... USING`, and joined `DELETE`, while
+  `QueryAnalyzerTest.shouldRejectUnsupportedCountProjectionForm`,
+  `QueryAnalyzerTest.shouldRejectUnsupportedJoinModifier`,
+  `QueryAnalyzerTest.shouldRejectUnsupportedReturningItem`,
+  `QueryAnalyzerTest.shouldRejectExcludedReturningWriteForm`, and
+  `QueryAnalyzerTest.shouldRejectParenthesizedInsertQuerySource` cover the
+  projection, join, and write rejections per form, including the modifiers that
+  keep the general join rejection, and
+  `QueryAnalyzerTest.shouldAnalyzeParenthesizedSelectAsTheQueryItEncloses` and
+  `QueryAnalyzerTest.shouldAnalyzeInsertWhoseValuesRowIsParenthesized` cover
+  the doubly parenthesized read that analyzes like the query it encloses and
+  the parenthesized `VALUES` row that analyzes like the row it writes.
+- `SqlcjCompilerIntegrationTest.shouldReportAnUnexpectedSchemaFailureAsAnInternalError`,
+  `SqlcjCompilerIntegrationTest.shouldReportAnUnexpectedAnalysisFailureAsAnInternalError`,
+  `SqlcjCompilerIntegrationTest.shouldReportAnUnexpectedGenerationFailureAsAnInternalError`,
+  and
+  `SqlcjCompilerIntegrationTest.shouldReportAnUnexpectedSharedGenerationFailureAsAnInternalError`
+  inject an unexpected failure into the schema, analysis, repository
+  generation, and shared row-record steps and cover the exact internal-error
+  line of each, that it carries neither the failure's message nor its class,
+  including a blank-message unsupported-operation failure and a
+  `NumberFormatException`, and that no file is written.
 
 Parameters:
 
