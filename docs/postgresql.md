@@ -368,6 +368,11 @@ generates `List<String> tags` and `List<StageSetting> past`.
   index.
 - A `LIKE`/`ILIKE` pattern placeholder still requires a scalar `VARCHAR` or
   `TEXT` column, so an array column is rejected there.
+- A reference written with a subscript or a slice, such as `tags[1]`,
+  `tags[1:2]`, or `s.tags[1]`, reads one element or one range rather than the
+  column, so it is not a direct column anywhere: it types no result column and
+  no placeholder, and a cast states the type of either. See
+  [Queries](queries.md#projections).
 - The `= ANY` list predicate is the one analyzed array operator: a placeholder
   written as `<column> = ANY($1)` binds a list of the compared column's type,
   which must be a non-array column of an element type above or of a declared

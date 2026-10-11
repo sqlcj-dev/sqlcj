@@ -128,6 +128,11 @@ configuration entry.
 
 - A direct column of a source is selected by its own name or qualified with the
   exposed source name.
+- A reference written with an array subscript or slice, such as `labels[1]`,
+  `labels[1:2]`, or `s.labels[1]`, is not a direct column: it reads one element
+  or one range of the array column rather than the column, so it is rejected
+  like any other computed projection unless a cast states its type, as in
+  `labels[1]::text AS first` or `labels[1:2]::varchar[] AS pair`.
 - `*` expands across the sources in their declared order, each source in its
   schema column order.
 - `qualifier.*` expands one source in its schema column order.
@@ -227,6 +232,16 @@ A `WHERE` clause may combine:
   `code BETWEEN $1 AND $2`,
 - `= ANY` between a direct column and one `$N` list placeholder, such as
   `id = ANY($1)`.
+
+A direct column is a column reference written without an array subscript or
+slice. A subscripted or sliced reference, such as `labels[1]`, `labels[1:2]`, or
+`u.labels[1]`, is an expression of the array column, so no placeholder beside
+one is typed from that column: `labels[1] = $1` is rejected as an unanalyzed
+placeholder location, in a comparison of either order, an `IN` list, a `LIKE`
+pattern, a `BETWEEN` bound, an `= ANY` list, a join `ON` condition, and a
+write's `WHERE` alike. A cast states the type of such a placeholder, as in
+`WHERE labels[1] = $1::text`, and the subscript itself reaches the database as
+written.
 
 A `LIKE` or `ILIKE` pattern placeholder requires a `VARCHAR` or `TEXT` column
 and takes that column's type, so it is a `String` method parameter. sqlcj passes
@@ -408,6 +423,15 @@ FROM authors
 WHERE id = $1;
 ```
 
+A written column may carry an array subscript or slice, as in
+`SET labels[1] = $1::text` or `INSERT INTO stages (id, labels[1])`. Such a
+target is not a direct column: it writes one element or one range, so its value
+is not typed from the array column and a placeholder value needs a cast, while
+the array column itself must exist in the written table and the subscript
+reaches the database as written. An uncast placeholder written there is rejected
+as an unanalyzed placeholder location, in an `UPDATE` or `DO UPDATE` assignment
+and in an `INSERT` value alike.
+
 ### Values that bind no placeholder
 
 An `INSERT` value or an `UPDATE` assignment that contains no placeholder — such
@@ -565,7 +589,10 @@ is rejected as
 `Unsupported RETURNING item <expression>; return columns of the target table or *`,
 naming the expression as the query writes it, on one line. A cast does not make
 such an item supported, because a `RETURNING` clause returns columns of the
-target table.
+target table. A reference written with an array subscript or slice, such as
+`RETURNING labels[1]` or `RETURNING labels[1:2] AS pair`, is not a direct
+column of the target table either, so it is rejected as a computed item, with or
+without an alias.
 
 Multi-row `VALUES`, `INSERT ... SELECT`, `UPDATE ... FROM`, and
 `DELETE ... USING` are rejected in every write, and common table expressions in
@@ -616,6 +643,11 @@ string literal, a quoted identifier, or a comment is not a parameter.
   Every other indexed cast placeholder is named `param<N>`
   after its own index, as in `param1` for `$1`, and colliding names take the
   usual numeric suffix.
+- A column written with an array subscript or slice names no parameter, because
+  the parameter beside it is one element rather than the column's value, so an
+  indexed cast placeholder there is `param<N>` and a named one keeps its own
+  name: `labels[1] = $1::text` binds `param1`, where `labels = $1::text` would
+  bind `labels`.
 - Every placeholder occurrence binds in textual order across the clauses and
   nesting depths above, whatever order sqlcj analyzes those clauses in, so a
   projected placeholder binds before a `WHERE` one and
@@ -943,6 +975,18 @@ query name, and its header line.
   `SELECT` for `SELECT $1 AS x`. A cast states the type of such a placeholder in
   every one of those locations, and it does not accept a placeholder that is not
   the direct operand of its cast, such as `(:x)::int`.
+- A column reference written with an array subscript or slice wherever a direct
+  column is required, because it reads one element or one range rather than the
+  column: `SELECT labels[1] AS first` and `SELECT labels[1:2] AS pair` are
+  rejected as computed projections, `RETURNING labels[1]` as a computed returned
+  item, and an uncast placeholder beside one — `labels[1] = $1`,
+  `$1 = labels[1]`, `labels[1] IN ($1, $2)`, `labels[1] LIKE $1`,
+  `scores[1] BETWEEN $1 AND $2`, `labels[1] = ANY($1)`, a join
+  `ON u.labels[1] = $1`, a write's `WHERE labels[1] = $1`, a
+  `DO UPDATE ... WHERE stages.labels[1] = $1`, `SET labels[1] = $1`, and
+  `INSERT INTO stages (id, labels[1]) VALUES ($1, $2)` — as an unanalyzed
+  placeholder location. A cast states the type in each of those locations, and
+  the array column of a subscripted write target must still exist.
 - A cast type sqlcj does not map, such as `$1::interval` or a
   multi-dimensional `$1::int[][]`, which is rejected naming the placeholder and
   the declared type, or the result column and the declared type when the cast
@@ -1446,6 +1490,22 @@ Parameters:
   `PostgresIntegrationTest.shouldExecuteGeneratedCastTypedOptionalFilterAgainstPostgres`
   executes a named cast-typed optional filter against PostgreSQL 16 with a null
   and a non-null argument.
+- `QueryAnalyzerTest.shouldRejectASubscriptedProjection`,
+  `QueryAnalyzerTest.shouldAnalyzeACastSubscriptedProjection`,
+  `QueryAnalyzerTest.shouldRejectASubscriptedReturningItem`,
+  `QueryAnalyzerTest.shouldRejectAnUncastPlaceholderBesideASubscriptedColumn`,
+  `QueryAnalyzerTest.shouldNameACastPlaceholderBesideASubscriptedColumnAfterItself`,
+  `QueryAnalyzerTest.shouldNameACastPlaceholderOfASubscriptedWriteTargetAfterItself`,
+  `QueryAnalyzerTest.shouldRejectAnUnknownSubscriptedWriteTarget`, and
+  `QueryAnalyzerTest.shouldAnalyzeALiteralAssignedToASubscriptedColumn` cover a
+  subscripted and a sliced reference in qualified and unqualified spellings:
+  the projection and `RETURNING` rejections, the cast projection that states its
+  type, the untyped-placeholder diagnostic in each typing location, the name a
+  cast placeholder keeps beside one, the write target whose array column must
+  exist, and the non-binding value assigned to one, and
+  `PostgresIntegrationTest.shouldReadAndFilterASubscriptedArrayElement` executes
+  a cast subscript projection and a cast subscript filter against PostgreSQL 16
+  as one `String` component and one `String` method parameter.
 
 Generated Java:
 

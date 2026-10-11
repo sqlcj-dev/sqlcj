@@ -669,8 +669,8 @@ public final class QueryAnalyzer {
     /**
      * Resolves one returned item, which is either a bare {@code *} or a direct
      * column of the write target, whose alias names its result component. A
-     * computed item has no schema type to generate, so it is rejected instead
-     * of analyzed.
+     * computed item, a subscripted reference included, has no schema type to
+     * generate, so it is rejected instead of analyzed.
      */
     private List<QueryColumn> resolveReturningItem(Expression expression, Alias alias, Source source) {
         if (expression instanceof AllTableColumns) {
@@ -695,8 +695,11 @@ public final class QueryAnalyzer {
             return resolveAllColumns(source);
         }
 
-        if (expression instanceof net.sf.jsqlparser.schema.Column column) {
-            dev.sqlcj.schema.Column schemaColumn = resolveColumn(column, List.of(source)).column();
+        net.sf.jsqlparser.schema.Column returnedColumn = directColumn(expression);
+
+        if (returnedColumn != null) {
+            dev.sqlcj.schema.Column schemaColumn = resolveColumn(returnedColumn, List.of(source))
+                .column();
 
             return List.of(
                 new QueryColumn(
@@ -808,6 +811,10 @@ public final class QueryAnalyzer {
      * list with the single values row, which is also their textual order. A
      * value that binds no placeholder reaches the database as written, so only
      * its target column must exist.
+     *
+     * <p>A target written with a subscript inserts into one element of its
+     * array column, so its value is not typed from that column, which must
+     * still exist.
      */
     private void resolveInsertParameters(
         Insert insert,
@@ -829,13 +836,12 @@ public final class QueryAnalyzer {
         }
 
         for (int index = 0; index < columns.size(); index++) {
-            String columnName = columns.get(index).getUnquotedColumnName();
+            net.sf.jsqlparser.schema.Column target = columns.get(index);
+            dev.sqlcj.schema.Column column = findColumn(table, target.getUnquotedColumnName());
 
-            resolveColumnValue(
-                values.get(index),
-                findColumn(table, columnName),
-                placeholders
-            );
+            if (directColumn(target) != null) {
+                resolveColumnValue(values.get(index), column, placeholders);
+            }
         }
     }
 
@@ -857,6 +863,10 @@ public final class QueryAnalyzer {
      * parameter in the {@code WHERE} expression. An assigned value that binds
      * no placeholder reaches the database as written, so only its target
      * column must exist.
+     *
+     * <p>A target written with a subscript assigns one element of its array
+     * column, so its value is not typed from that column, which must still
+     * exist.
      */
     private void resolveUpdateSetParameters(
         List<UpdateSet> updateSets,
@@ -870,13 +880,12 @@ public final class QueryAnalyzer {
                 );
             }
 
-            String columnName = updateSet.getColumn(0).getUnquotedColumnName();
+            net.sf.jsqlparser.schema.Column target = updateSet.getColumn(0);
+            dev.sqlcj.schema.Column column = findColumn(table, target.getUnquotedColumnName());
 
-            resolveColumnValue(
-                updateSet.getValue(0),
-                findColumn(table, columnName),
-                placeholders
-            );
+            if (directColumn(target) != null) {
+                resolveColumnValue(updateSet.getValue(0), column, placeholders);
+            }
         }
     }
 
@@ -1724,7 +1733,9 @@ public final class QueryAnalyzer {
     }
 
     private void resolveInExpression(InExpression in, List<Source> sources, Placeholders placeholders) {
-        if (!(in.getLeftExpression() instanceof net.sf.jsqlparser.schema.Column column)) {
+        net.sf.jsqlparser.schema.Column column = directColumn(in.getLeftExpression());
+
+        if (column == null) {
             return;
         }
 
@@ -1854,11 +1865,13 @@ public final class QueryAnalyzer {
         if (pattern != null) {
             requireSupportedLikePattern(like);
 
-            if (!(left instanceof net.sf.jsqlparser.schema.Column column)) {
+            net.sf.jsqlparser.schema.Column testedColumn = directColumn(left);
+
+            if (testedColumn == null) {
                 return;
             }
 
-            dev.sqlcj.schema.Column schemaColumn = resolveColumn(column, sources).column();
+            dev.sqlcj.schema.Column schemaColumn = resolveColumn(testedColumn, sources).column();
 
             requireSupportedType(schemaColumn);
 
@@ -1872,15 +1885,16 @@ public final class QueryAnalyzer {
         }
 
         CastPlaceholder castPattern = placeholders.ofCast(right);
+        net.sf.jsqlparser.schema.Column testedColumn = directColumn(left);
 
         if (
             castPattern != null
                 && unsupportedLikePatternReason(like) == null
-                && left instanceof net.sf.jsqlparser.schema.Column column
+                && testedColumn != null
         ) {
             addCastParameter(
                 castPattern,
-                resolveColumn(column, sources).column().name(),
+                resolveColumn(testedColumn, sources).column().name(),
                 placeholders
             );
         }
@@ -1983,11 +1997,10 @@ public final class QueryAnalyzer {
             return;
         }
 
-        if (
-            left instanceof net.sf.jsqlparser.schema.Column column
-                && (bindsValue(start, placeholders) || bindsValue(end, placeholders))
-        ) {
-            dev.sqlcj.schema.Column schemaColumn = resolveColumn(column, sources).column();
+        net.sf.jsqlparser.schema.Column testedColumn = directColumn(left);
+
+        if (testedColumn != null && (bindsValue(start, placeholders) || bindsValue(end, placeholders))) {
+            dev.sqlcj.schema.Column schemaColumn = resolveColumn(testedColumn, sources).column();
 
             resolveColumnValue(start, schemaColumn, placeholders);
             resolveColumnValue(end, schemaColumn, placeholders);
@@ -2013,52 +2026,55 @@ public final class QueryAnalyzer {
         Placeholder leftPlaceholder = placeholders.of(left);
         Placeholder rightPlaceholder = placeholders.of(right);
 
-        if (left instanceof net.sf.jsqlparser.schema.Column column && rightPlaceholder != null) {
+        net.sf.jsqlparser.schema.Column leftColumn = directColumn(left);
+        net.sf.jsqlparser.schema.Column rightColumn = directColumn(right);
+
+        if (leftColumn != null && rightPlaceholder != null) {
             addParameter(
                 rightPlaceholder,
-                resolveColumn(column, sources).column(),
+                resolveColumn(leftColumn, sources).column(),
                 placeholders
             );
             return;
         }
 
-        if (leftPlaceholder != null && right instanceof net.sf.jsqlparser.schema.Column column) {
+        if (leftPlaceholder != null && rightColumn != null) {
             addParameter(
                 leftPlaceholder,
-                resolveColumn(column, sources).column(),
+                resolveColumn(rightColumn, sources).column(),
                 placeholders
             );
             return;
         }
 
-        if (comparison instanceof EqualsTo && left instanceof net.sf.jsqlparser.schema.Column column) {
+        if (comparison instanceof EqualsTo && leftColumn != null) {
             Expression listArgument = anyListArgument(right, placeholders);
 
             if (listArgument != null) {
-                resolveAnyListParameter(listArgument, column, sources, placeholders);
+                resolveAnyListParameter(listArgument, leftColumn, sources, placeholders);
                 return;
             }
         }
 
         if (isColumnTypedComparison(comparison)) {
-            if (left instanceof net.sf.jsqlparser.schema.Column column) {
+            if (leftColumn != null) {
                 CastPlaceholder cast = placeholders.ofCast(right);
 
                 if (cast != null) {
                     addCastParameter(
                         cast,
-                        resolveColumn(column, sources).column().name(),
+                        resolveColumn(leftColumn, sources).column().name(),
                         placeholders
                     );
                     return;
                 }
-            } else if (right instanceof net.sf.jsqlparser.schema.Column column) {
+            } else if (rightColumn != null) {
                 CastPlaceholder cast = placeholders.ofCast(left);
 
                 if (cast != null) {
                     addCastParameter(
                         cast,
-                        resolveColumn(column, sources).column().name(),
+                        resolveColumn(rightColumn, sources).column().name(),
                         placeholders
                     );
                 }
@@ -2372,6 +2388,9 @@ public final class QueryAnalyzer {
      * <p>A bare placeholder projection is a placeholder a cast makes a
      * supported result column, so it is rejected as an untyped placeholder
      * rather than as an unsupported result expression.
+     *
+     * <p>A subscripted reference projects an element rather than the column, so
+     * it is rejected as any other computed item is, and a cast states its type.
      */
     private List<QueryColumn> resolveColumns(
         PlainSelect plainSelect,
@@ -2405,8 +2424,10 @@ public final class QueryAnalyzer {
                 continue;
             }
 
-            if (expression instanceof net.sf.jsqlparser.schema.Column column) {
-                ResolvedColumn resolved = resolveColumn(column, sources);
+            net.sf.jsqlparser.schema.Column selectedColumn = directColumn(expression);
+
+            if (selectedColumn != null) {
+                ResolvedColumn resolved = resolveColumn(selectedColumn, sources);
                 dev.sqlcj.schema.Column schemaColumn = resolved.column();
 
                 columns.add(
@@ -2549,6 +2570,22 @@ public final class QueryAnalyzer {
         return alias == null
             ? schemaColumn.name()
             : alias.getUnquotedName();
+    }
+
+    /**
+     * Reports the column one expression reads directly, and {@code null} when
+     * the expression reads none. A reference written with a subscript or a
+     * slice, such as {@code labels[1]} or {@code labels[1:2]}, reads one
+     * element or one range of the column's array value rather than the column,
+     * so it states neither the type nor the name of the column it reads, and
+     * every rule that takes a type or a name from a column leaves it to the
+     * rules of any other expression.
+     */
+    private net.sf.jsqlparser.schema.Column directColumn(Expression expression) {
+        return expression instanceof net.sf.jsqlparser.schema.Column column
+            && column.getArrayConstructor() == null
+                ? column
+                : null;
     }
 
     /**

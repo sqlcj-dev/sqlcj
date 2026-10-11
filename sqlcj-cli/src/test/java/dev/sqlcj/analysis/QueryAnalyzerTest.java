@@ -5061,6 +5061,284 @@ class QueryAnalyzerTest {
         );
     }
 
+    /**
+     * A reference written with a subscript or a slice projects one element or
+     * one range of an array column rather than the column, so it is rejected
+     * like any other computed projection, qualified or not.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "SELECT tags[1] AS first FROM stages|tags[1]",
+            "SELECT tags[1:2] AS s FROM stages|tags[1 : 2]",
+            "SELECT s.tags[1] FROM stages s|s.tags[1]"
+        }
+    )
+    void shouldRejectASubscriptedProjection(String sql, String written) {
+        Query query = new Query("ListStages", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, arraySchema)
+        );
+
+        assertEquals(
+            "Cannot infer the type of %s in SELECT;"
+                .formatted(written)
+                + " state it with a cast and an alias, such as SUM(amount)::numeric AS total",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A cast states the type of a subscripted projection, as it states the type
+     * of any other computed one: an element cast is a scalar column, and a slice
+     * cast of an array type is an array column.
+     */
+    @Test
+    void shouldAnalyzeACastSubscriptedProjection() {
+        String element = "SELECT tags[1]::text AS first FROM stages";
+
+        QueryModel elementModel = analyzer.analyze(
+            new Query("ListStages", QueryType.MANY, element),
+            parser.parse(element),
+            arraySchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("first", ColumnType.TEXT, true)),
+            elementModel.columns()
+        );
+
+        String slice = "SELECT tags[1:2]::varchar[] AS s FROM stages";
+
+        QueryModel sliceModel = analyzer.analyze(
+            new Query("ListStages", QueryType.MANY, slice),
+            parser.parse(slice),
+            arraySchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("s", ColumnType.VARCHAR, true, null, true)),
+            sliceModel.columns()
+        );
+    }
+
+    /**
+     * A subscripted or sliced reference returns an element rather than a column
+     * of the write target, so it is rejected like any other computed returned
+     * item, aliased or not.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "UPDATE stages SET handle = :h RETURNING tags[1]|tags[1]",
+            "UPDATE stages SET handle = :h RETURNING tags[1:2] AS s|tags[1 : 2]"
+        }
+    )
+    void shouldRejectASubscriptedReturningItem(String sql, String written) {
+        Query query = new Query("UpdateStage", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, arraySchema)
+        );
+
+        assertEquals(
+            "Unsupported RETURNING item %s; return columns of the target table or *"
+                .formatted(written),
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A placeholder written beside a subscripted or sliced reference is not
+     * typed from the array column, in any clause that types a placeholder from
+     * a column, so it is rejected as untyped wherever a cast does not state its
+     * type.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "SELECT id FROM stages WHERE tags[1] = :tag|MANY|:tag|tags[1] = :tag",
+            "SELECT id FROM stages WHERE tags[1:2] = :tag|MANY|:tag|tags[1:2] = :tag",
+            "SELECT id FROM stages WHERE :tag = tags[1]|MANY|:tag|:tag = tags[1]",
+            "SELECT id FROM stages WHERE :tag = tags[1:2]|MANY|:tag|:tag = tags[1:2]",
+            "SELECT id FROM stages WHERE tags[1] IN (:a, :b)|MANY|:a|tags[1] IN (:a, :b)",
+            "SELECT id FROM stages WHERE tags[1:2] IN (:a)|MANY|:a|tags[1:2] IN (:a)",
+            "SELECT id FROM stages WHERE tags[1] LIKE :p|MANY|:p|tags[1] LIKE :p",
+            "SELECT id FROM stages WHERE scores[1] BETWEEN :a AND :b"
+                + "|MANY|:a|scores[1] BETWEEN :a AND :b",
+            "SELECT id FROM stages WHERE scores[1:2] BETWEEN :a AND :b"
+                + "|MANY|:a|scores[1:2] BETWEEN :a AND :b",
+            "SELECT id FROM stages WHERE tags[1] = ANY(:xs)|MANY|:xs|ANY(:xs)",
+            "SELECT s.id FROM stages s JOIN stages t ON s.tags[1] = :x AND t.id = s.id"
+                + "|MANY|:x|s.tags[1] = :x",
+            "UPDATE stages SET handle = 'x' WHERE tags[1] = :w|EXEC|:w|tags[1] = :w",
+            "DELETE FROM stages WHERE tags[1:2] = :w|EXEC|:w|tags[1:2] = :w",
+            "INSERT INTO stages (id, handle) VALUES (:id, 'x')"
+                + " ON CONFLICT (id) DO UPDATE SET handle = 'y' WHERE stages.tags[1] = :w"
+                + "|EXEC|:w|stages.tags[1] = :w",
+            "UPDATE stages SET tags[1] = :l WHERE id = :id|EXEC|:l|SET",
+            "UPDATE stages SET tags[1:2] = :l WHERE id = :id|EXEC|:l|SET",
+            "INSERT INTO stages (id, tags[1]) VALUES (:id, :l)|EXEC|:l|VALUES"
+        }
+    )
+    void shouldRejectAnUncastPlaceholderBesideASubscriptedColumn(
+        String sql,
+        QueryType type,
+        String placeholder,
+        String enclosing
+    ) {
+        Query query = new Query("FindStages", type, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, arraySchema)
+        );
+
+        assertEquals(
+            "Cannot infer the type of %s in %s; state it with a cast, such as %s::text"
+                .formatted(placeholder, enclosing, placeholder),
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A cast placeholder beside a subscripted reference is typed by its cast
+     * and named after its own placeholder, so an indexed one is named after its
+     * index and a named one keeps its name.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "SELECT id FROM stages WHERE tags[1] = $1::text|param1|TEXT|false",
+            "SELECT id FROM stages WHERE tags[1] = :tag::text|tag|TEXT|false",
+            "SELECT id FROM stages WHERE $1::text = tags[1]|param1|TEXT|false",
+            "SELECT id FROM stages WHERE tags[1:2] = $1::varchar[]|param1|VARCHAR|true"
+        }
+    )
+    void shouldNameACastPlaceholderBesideASubscriptedColumnAfterItself(
+        String sql,
+        String name,
+        ColumnType type,
+        boolean array
+    ) {
+        QueryModel model = analyzer.analyze(
+            new Query("FindStages", QueryType.MANY, sql),
+            parser.parse(sql),
+            arraySchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, name, type, null, array)),
+            model.parameters()
+        );
+    }
+
+    /**
+     * A cast placeholder written into a subscripted write target is typed by
+     * its cast and named after its own placeholder, beside the parameters the
+     * unsubscripted columns of the same statement type.
+     */
+    @Test
+    void shouldNameACastPlaceholderOfASubscriptedWriteTargetAfterItself() {
+        String update = "UPDATE stages SET tags[1] = $1::text WHERE id = $2";
+
+        QueryModel updated = analyzer.analyze(
+            new Query("UpdateStage", QueryType.EXEC, update),
+            parser.parse(update),
+            arraySchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "param1", ColumnType.TEXT),
+                new QueryParameter(2, "id", ColumnType.BIGINT)
+            ),
+            updated.parameters()
+        );
+
+        String insert = "INSERT INTO stages (id, tags[1]) VALUES ($1, $2::text)";
+
+        QueryModel inserted = analyzer.analyze(
+            new Query("CreateStage", QueryType.EXEC, insert),
+            parser.parse(insert),
+            arraySchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "param2", ColumnType.TEXT)
+            ),
+            inserted.parameters()
+        );
+    }
+
+    /**
+     * A subscripted write target writes into its array column, so that column
+     * must exist, as an unsubscripted target must.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "UPDATE stages SET missing[1] = $1::text WHERE id = $2",
+            "INSERT INTO stages (id, missing[1]) VALUES ($1, $2::text)"
+        }
+    )
+    void shouldRejectAnUnknownSubscriptedWriteTarget(String sql) {
+        Query query = new Query("UpdateStage", QueryType.EXEC, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, parsedSql, arraySchema)
+        );
+
+        assertEquals(
+            "Column not found in table stages: missing",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A value assigned to a subscripted target that binds no placeholder
+     * reaches the database as written, so the statement is analyzed and its
+     * executable SQL keeps the subscript.
+     */
+    @Test
+    void shouldAnalyzeALiteralAssignedToASubscriptedColumn() {
+        String sql = "UPDATE stages SET tags[1] = 'first' WHERE id = $1";
+
+        QueryModel model = analyzer.analyze(
+            new Query("UpdateStage", QueryType.EXEC, sql),
+            parser.parse(sql),
+            arraySchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            model.parameters()
+        );
+
+        assertEquals(
+            "UPDATE stages SET tags[1] = 'first' WHERE id = ?",
+            model.executableSql()
+        );
+    }
+
     /** A repeated index of one enum type shares one generated parameter. */
     @Test
     void shouldAcceptARepeatedIndexOfOneEnumType() {
