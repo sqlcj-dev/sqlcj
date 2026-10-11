@@ -2667,6 +2667,57 @@ class PostgresIntegrationTest {
     }
 
     /**
+     * Proves that a cast subscript of an array column reads and filters by one
+     * element through generated code: the projection is a {@code String}
+     * component rather than the column's {@code List}, and the cast placeholder
+     * compared with the subscript takes the element's Java type.
+     */
+    @Test
+    void shouldReadAndFilterASubscriptedArrayElement() throws Exception {
+        execute(ARRAY_SCHEMA);
+        execute(
+            "INSERT INTO array_values (id, labels) VALUES (1, ARRAY['first', 'second'])"
+        );
+
+        Path classesDirectory = generateAndCompile(
+            ARRAY_SCHEMA,
+            """
+                -- name: FindFirstLabel :optional
+                SELECT labels[1]::text AS first
+                FROM array_values
+                WHERE labels[1] = :label::text;
+                """
+        );
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method findFirstLabel = repository.getClass().getMethod(
+                "findFirstLabel",
+                String.class
+            );
+
+            Optional<?> found = assertInstanceOf(
+                Optional.class,
+                findFirstLabel.invoke(repository, "first")
+            );
+
+            Object row = found.orElseThrow();
+
+            assertEquals(List.of("first"), recordComponentNames(row));
+            assertEquals(List.of(String.class), recordComponentTypes(row));
+            assertEquals("first", component(row, "first"));
+
+            assertTrue(
+                assertInstanceOf(
+                    Optional.class,
+                    findFirstLabel.invoke(repository, "second")
+                ).isEmpty()
+            );
+        }
+    }
+
+    /**
      * Proves that JSON text round trips through generated code: one row is
      * written with JSON values and one with nulls, both are read back as
      * {@code String} components, and a {@code JSONB} equality predicate matches
