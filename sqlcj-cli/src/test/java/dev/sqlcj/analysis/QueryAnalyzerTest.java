@@ -506,6 +506,36 @@ class QueryAnalyzerTest {
         );
     }
 
+    /**
+     * A parenthesized {@code SELECT} is the query it encloses, at any depth, so
+     * it analyzes to the model of that query.
+     */
+    @Test
+    void shouldAnalyzeParenthesizedSelectAsTheQueryItEncloses() {
+        String sql = "((SELECT id FROM users WHERE id = $1))";
+
+        QueryModel model = analyzer.analyze(
+            new Query("GetUser", QueryType.ONE, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals("users", model.table());
+
+        assertEquals(
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+        assertEquals("((SELECT id FROM users WHERE id = ?))", model.executableSql());
+    }
+
     @Test
     void shouldResolveAllColumns() {
         Query query = new Query(
@@ -1750,19 +1780,33 @@ class QueryAnalyzerTest {
             "SELECT name, COUNT(*) FROM users GROUP BY name"
                 + "|COUNT(*) requires a result alias, such as COUNT(*) AS total.",
             "SELECT COUNT(id) AS n FROM users"
-                + "|Unsupported SELECT expression: Function",
+                + "|Cannot infer the type of COUNT(id) in SELECT;"
+                + " state it with a cast and an alias,"
+                + " such as SUM(amount)::numeric AS total",
             "SELECT COUNT(DISTINCT id) AS n FROM users"
-                + "|Unsupported SELECT expression: Function",
+                + "|Cannot infer the type of COUNT(DISTINCT id) in SELECT;"
+                + " state it with a cast and an alias,"
+                + " such as SUM(amount)::numeric AS total",
             "SELECT COUNT(u.*) AS n FROM users u"
-                + "|Unsupported SELECT expression: Function",
+                + "|Cannot infer the type of COUNT(u.*) in SELECT;"
+                + " state it with a cast and an alias,"
+                + " such as SUM(amount)::numeric AS total",
             "SELECT pg_catalog.count(*) AS n FROM users"
-                + "|Unsupported SELECT expression: Function",
+                + "|Cannot infer the type of pg_catalog.count(*) in SELECT;"
+                + " state it with a cast and an alias,"
+                + " such as SUM(amount)::numeric AS total",
             "SELECT lower(name) AS n FROM users"
-                + "|Unsupported SELECT expression: Function",
+                + "|Cannot infer the type of lower(name) in SELECT;"
+                + " state it with a cast and an alias,"
+                + " such as SUM(amount)::numeric AS total",
             "SELECT COUNT(*) FILTER (WHERE id > 1) AS n FROM users"
-                + "|Unsupported SELECT expression: AnalyticExpression",
+                + "|Cannot infer the type of COUNT(*) FILTER (WHERE id > 1) in SELECT;"
+                + " state it with a cast and an alias,"
+                + " such as SUM(amount)::numeric AS total",
             "SELECT COUNT(*) OVER () AS n FROM users"
-                + "|Unsupported SELECT expression: AnalyticExpression"
+                + "|Cannot infer the type of COUNT(*) OVER () in SELECT;"
+                + " state it with a cast and an alias,"
+                + " such as SUM(amount)::numeric AS total"
         }
     )
     void shouldRejectUnsupportedCountProjectionForm(String sql, String message) {
@@ -2654,21 +2698,41 @@ class QueryAnalyzerTest {
      * Only a bare or {@code INNER} join and a {@code LEFT} join in its two
      * spellings are supported, so every other qualifier stays rejected,
      * including the qualifiers that also report {@code isOuter()} or
-     * {@code isLeft()}.
+     * {@code isLeft()}. A join kind that can be written as a supported join
+     * names that rewrite, and every other modifier keeps the general
+     * rejection.
      */
     @ParameterizedTest
-    @ValueSource(
-        strings = {
-            "RIGHT JOIN profiles p ON p.user_id = u.id",
-            "RIGHT OUTER JOIN profiles p ON p.user_id = u.id",
-            "FULL OUTER JOIN profiles p ON p.user_id = u.id",
-            "OUTER JOIN profiles p ON p.user_id = u.id",
-            "NATURAL LEFT JOIN profiles p",
-            "LEFT SEMI JOIN profiles p ON p.user_id = u.id",
+    @CsvSource(
+        delimiter = '|',
+        value = {
+            "RIGHT JOIN profiles p ON p.user_id = u.id"
+                + "|RIGHT JOIN is not supported;"
+                + " write a LEFT JOIN with the two sources swapped.",
+            "RIGHT OUTER JOIN profiles p ON p.user_id = u.id"
+                + "|RIGHT JOIN is not supported;"
+                + " write a LEFT JOIN with the two sources swapped.",
+            "FULL OUTER JOIN profiles p ON p.user_id = u.id"
+                + "|FULL JOIN is not supported.",
+            "FULL JOIN profiles p ON p.user_id = u.id"
+                + "|FULL JOIN is not supported.",
+            "CROSS JOIN profiles p"
+                + "|CROSS JOIN is not supported; write JOIN ... ON TRUE.",
+            "NATURAL JOIN profiles p"
+                + "|NATURAL JOIN is not supported; write the join condition with ON.",
+            "NATURAL LEFT JOIN profiles p"
+                + "|NATURAL JOIN is not supported; write the join condition with ON.",
+            "JOIN profiles p USING (user_id)"
+                + "|JOIN ... USING is not supported; write the join condition with ON.",
             "LEFT JOIN profiles p USING (user_id)"
+                + "|JOIN ... USING is not supported; write the join condition with ON.",
+            "OUTER JOIN profiles p ON p.user_id = u.id"
+                + "|Only unmodified INNER JOIN and LEFT JOIN clauses are supported.",
+            "LEFT SEMI JOIN profiles p ON p.user_id = u.id"
+                + "|Only unmodified INNER JOIN and LEFT JOIN clauses are supported."
         }
     )
-    void shouldRejectUnsupportedJoinModifier(String joinClause) {
+    void shouldRejectUnsupportedJoinModifier(String joinClause, String message) {
         String sql = """
             SELECT u.id
             FROM users u
@@ -2683,10 +2747,7 @@ class QueryAnalyzerTest {
             () -> analyzer.analyze(query, parsedSql, joinSchema)
         );
 
-        assertEquals(
-            "Only unmodified INNER JOIN and LEFT JOIN clauses are supported.",
-            exception.getMessage()
-        );
+        assertEquals(message, exception.getMessage());
     }
 
     /**
@@ -4510,15 +4571,21 @@ class QueryAnalyzerTest {
             "INSERT INTO users (id) VALUES ($1) RETURNING * x"
                 + "|RETURNING * must not be aliased.",
             "INSERT INTO users (id) VALUES ($1) RETURNING id + 1"
-                + "|Unsupported RETURNING expression: Addition",
+                + "|Unsupported RETURNING item id + 1;"
+                + " return columns of the target table or *",
             "INSERT INTO users (id) VALUES ($1) RETURNING id + 1 AS x"
-                + "|Unsupported RETURNING expression: Addition",
+                + "|Unsupported RETURNING item id + 1;"
+                + " return columns of the target table or *",
             "INSERT INTO users (id) VALUES ($1) RETURNING users.*"
                 + "|Only an unqualified RETURNING * is supported.",
             "INSERT INTO users (id) VALUES ($1) RETURNING users.* AS x"
                 + "|Only an unqualified RETURNING * is supported.",
             "DELETE FROM users WHERE id = $1 RETURNING count(id)"
-                + "|Unsupported RETURNING expression: Function"
+                + "|Unsupported RETURNING item count(id);"
+                + " return columns of the target table or *",
+            "DELETE FROM users WHERE id = $1 RETURNING lower(name)"
+                + "|Unsupported RETURNING item lower(name);"
+                + " return columns of the target table or *"
         }
     )
     void shouldRejectUnsupportedReturningItem(String sql, String message) {
@@ -4556,6 +4623,8 @@ class QueryAnalyzerTest {
         delimiter = '|',
         value = {
             "INSERT INTO users (id) SELECT id FROM users RETURNING id"
+                + "|INSERT ... SELECT is not supported.",
+            "INSERT INTO users (id) (VALUES ($1)) RETURNING id"
                 + "|RETURNING requires an INSERT with a single VALUES row.",
             "INSERT INTO users (id) VALUES ($1), ($2) RETURNING id"
                 + "|INSERT requires a single VALUES row.",
@@ -5067,6 +5136,62 @@ class QueryAnalyzerTest {
             "INSERT INTO users (version, name, id) VALUES (?, now(), ?)",
             model.executableSql()
         );
+    }
+
+    /**
+     * A {@code VALUES} row written inside parentheses states the same single
+     * row, so the insert analyzes to the parameters, binding order, and
+     * executable SQL of the row it writes.
+     */
+    @Test
+    void shouldAnalyzeInsertWhoseValuesRowIsParenthesized() {
+        String sql = "INSERT INTO users (id, name) (VALUES ($1, $2))";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CreateUser", QueryType.EXEC, sql),
+            parser.parse(sql),
+            writeSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+
+        assertEquals(
+            "INSERT INTO users (id, name) (VALUES (?, ?))",
+            model.executableSql()
+        );
+    }
+
+    /**
+     * Parentheses around a query source state a query all the same, so such an
+     * insert stays rejected on an {@code :exec} and on a returning insert
+     * alike.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        value = {
+            "EXEC|INSERT INTO users (id, name) (SELECT id, name FROM users)",
+            "ONE|INSERT INTO users (id, name) (SELECT id, name FROM users) RETURNING id"
+        }
+    )
+    void shouldRejectParenthesizedInsertQuerySource(QueryType type, String sql) {
+        Query query = new Query("CopyUsers", type, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, writeSchema)
+        );
+
+        assertEquals("INSERT ... SELECT is not supported.", exception.getMessage());
     }
 
     /**
