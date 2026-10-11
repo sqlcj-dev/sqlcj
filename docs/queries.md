@@ -91,12 +91,17 @@ configuration entry.
   comma-separated source list and every other join modifier — `RIGHT`, `FULL`, a
   bare `OUTER`, `CROSS`, `NATURAL`, `SEMI`, `APPLY`, `STRAIGHT`, `GLOBAL`, a
   join hint, and `USING (...)` — are rejected.
-- Each join requires exactly one `ON` equality between a qualified column of the
-  joined source and a qualified column of a source introduced earlier. A left
-  join uses the same rule as an inner join.
+- Each join requires exactly one `ON` condition, which may be any boolean
+  expression, including `ON TRUE`. Its column references, qualified or not,
+  resolve against the sources introduced up to and including the joined source,
+  so a reference to a source joined later is rejected, and its placeholders
+  follow the same rules as a `WHERE` predicate. A left join uses the same rule
+  as an inner join.
 - Every column read from a left-joined source is nullable, even when the schema
-  declares it `NOT NULL`, because an unmatched row reads it as `NULL`. The base
-  source and every inner-joined source keep their schema nullability.
+  declares it `NOT NULL`, because an unmatched row reads it as `NULL`. The join
+  kind alone decides this, so a left join whose `ON` condition filters its
+  joined rows reads them as nullable too. The base source and every
+  inner-joined source keep their schema nullability.
 - An alias replaces the table name as the exposed source name, so a qualified
   reference to an aliased table must use the alias and not the table name.
 - Two sources may not expose the same name.
@@ -514,11 +519,11 @@ string literal, a quoted identifier, or a comment is not a parameter.
   assigned to, or inserted into.
 - A placeholder written as the direct operand of `::type` or
   `CAST(... AS type)` is typed by that cast instead, wherever it appears in an
-  accepted statement: a projection, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`,
-  `LIMIT`, `OFFSET`, `FETCH`, an `INSERT` value, an `UPDATE` or
-  `DO UPDATE` assignment, a `WITH` body, and a subquery at any depth, such as
-  `EXISTS`, `IN (SELECT ...)`, or a scalar subquery. The cast type
-  may be any type a column may declare and sqlcj maps, including a declared
+  accepted statement: a projection, a join `ON` condition, `WHERE`, `GROUP BY`,
+  `HAVING`, `ORDER BY`, `LIMIT`, `OFFSET`, `FETCH`, an `INSERT` value, an
+  `UPDATE` or `DO UPDATE` assignment, a `WITH` body, and a subquery at any
+  depth, such as `EXISTS`, `IN (SELECT ...)`, or a scalar subquery. The cast
+  type may be any type a column may declare and sqlcj maps, including a declared
   enum name, written unquoted and matched case-insensitively, and a
   one-dimensional array, which binds a `List`. A cast type sqlcj does not map,
   such as `INTERVAL` or a multi-dimensional `INT[][]`, is rejected naming the
@@ -814,8 +819,8 @@ name, and its header line.
   `lower(name) AS n`, and the `FILTER` and `OVER` forms keep the
   unsupported-expression rejection.
 - A `FROM` item that is not a table, a comma-separated source list, a join that
-  is not a plain inner or left join, a join predicate that is not one qualified
-  equality, and a set operation such as `UNION`.
+  is not a plain inner or left join, a join that does not carry exactly one
+  `ON` condition, and a set operation such as `UNION`.
 - An uncast placeholder in a location sqlcj does not analyze, including
   `ORDER BY $1`, a projection such as `SELECT $1 AS x`, a grouping list, a
   `HAVING` predicate, a subquery, a
@@ -828,9 +833,8 @@ name, and its header line.
   `LIMIT 5, $1`, a placeholder inside a write value such as
   `COALESCE($2, bio)`, and a `FETCH FIRST $1 ROWS ONLY` clause, so dynamic `IN`
   expansion is unavailable. A cast states the type of such a placeholder in
-  every one of those locations except a join condition, where any placeholder
-  stays rejected, and it does not accept a placeholder that is not the direct
-  operand of its cast, such as `(:x)::int`.
+  every one of those locations, and it does not accept a placeholder that is not
+  the direct operand of its cast, such as `(:x)::int`.
 - A cast type sqlcj does not map, such as `$1::interval` or a
   multi-dimensional `$1::int[][]`, which is rejected naming the placeholder and
   the declared type, or the result column and the declared type when the cast
@@ -1084,14 +1088,30 @@ Reads:
   `QueryAnalyzerTest.shouldAnalyzeLeftJoinAfterInnerJoin`,
   `QueryAnalyzerTest.shouldAnalyzeInnerJoinAfterLeftJoin`,
   `QueryAnalyzerTest.shouldResolveLeftJoinedParametersInTextualBindingOrder`,
-  `QueryAnalyzerTest.shouldRejectUnsupportedJoinModifier`, and
-  `QueryAnalyzerTest.shouldRejectLeftJoinWithoutSingleQualifiedEquality` cover
-  both left-join spellings, the nullable columns of a left-joined source, the
-  chained join orders, the unchanged parameters, and the join kinds and `ON`
-  shapes that stay rejected, and
+  and `QueryAnalyzerTest.shouldRejectUnsupportedJoinModifier` cover both
+  left-join spellings, the nullable columns of a left-joined source, the
+  chained join orders, the unchanged parameters, and the join kinds that stay
+  rejected, and
   `PostgresIntegrationTest.shouldExecuteGeneratedLeftJoinAgainstPostgres`
   executes a left join against PostgreSQL 16 whose unmatched row reads the
   joined columns as `null`.
+- `QueryAnalyzerTest.shouldAnalyzeJoinConditionOfAnyBooleanExpression`,
+  `QueryAnalyzerTest.shouldReadFilteredLeftJoinedColumnsAsNullable`,
+  `QueryAnalyzerTest.shouldResolveJoinConditionParameterInTextualBindingOrder`,
+  `QueryAnalyzerTest.shouldResolveNamedJoinConditionParameter`,
+  `QueryAnalyzerTest.shouldTypeCastJoinConditionPlaceholderFromItsCast`,
+  `QueryAnalyzerTest.shouldRejectJoinConditionReferenceToLaterSource`,
+  `QueryAnalyzerTest.shouldRejectUnknownJoinConditionColumn`, and
+  `QueryAnalyzerTest.shouldRejectJoinWithoutOneOnCondition` cover a composite
+  key, a comparison other than equality, a condition over one source alone, an
+  unqualified reference, `ON TRUE`, the nullability of a filtered left join,
+  the uncast, named, and cast placeholder forms and their binding order, the
+  join scope, and the joins that carry no single `ON` condition;
+  `SqlcjCompilerIntegrationTest.shouldGenerateCompilableJavaForJoinConditions`
+  compiles a repository over them, and
+  `PostgresIntegrationTest.shouldExecuteGeneratedFilteredLeftJoinAgainstPostgres`
+  executes a filtered left join against PostgreSQL 16 whose filtered-out and
+  unmatched rows read the joined components as `null`.
 - `QueryAnalyzerTest.shouldResolveRowTableForFullRowSelect`,
   `QueryAnalyzerTest.shouldNotResolveRowTableForQuerySpecificResult`,
   `QueryAnalyzerTest.shouldNotResolveRowTableForJoinedWildcard`, and

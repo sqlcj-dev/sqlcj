@@ -1207,6 +1207,68 @@ class SqlcjCompilerIntegrationTest {
         }
     }
 
+    /**
+     * A repository generated from join conditions of any boolean expression
+     * compiles: a composite-key inner join, a filtered left join, and a join
+     * condition that binds a placeholder before the {@code WHERE} one.
+     */
+    @Test
+    void shouldGenerateCompilableJavaForJoinConditions() throws IOException {
+        generateAndCompile(
+            JOIN_SCHEMA,
+            """
+                -- name: ListMatchingProfiles :many
+                SELECT u.id, p.nickname
+                FROM users u
+                JOIN profiles p ON p.user_id = u.id AND p.nickname = u.name
+                WHERE u.id = $1;
+
+                -- name: ListNicknamedProfiles :many
+                SELECT u.id, p.id AS profile_id, p.nickname
+                FROM users u
+                LEFT JOIN profiles p ON p.user_id = u.id AND p.nickname IS NOT NULL;
+
+                -- name: FindUserProfile :many
+                SELECT u.id
+                FROM users u
+                JOIN profiles p ON p.user_id = u.id AND p.nickname = $2
+                WHERE u.id = $1;
+                """
+        );
+
+        String source = Files.readString(
+            tempDir.resolve("generated/generated/UsersRepository.java")
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<ListMatchingProfilesResult> listMatchingProfiles(Long id)"
+            ),
+            source
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<ListNicknamedProfilesResult> listNicknamedProfiles()"
+            ),
+            source
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<FindUserProfileResult> findUserProfile(Long id, String nickname)"
+            ),
+            source
+        );
+
+        assertTrue(source.contains("java.util.Arrays.asList(nickname, id)"), source);
+
+        assertEquals(
+            List.of("Long id", "Long profileId", "String nickname"),
+            recordComponents(source, "ListNicknamedProfilesResult")
+        );
+    }
+
     @Test
     void shouldCompileConfiguredEntriesWithConfiguredPackage() throws IOException {
         Path usersSchema = tempDir.resolve("users-schema.sql");
