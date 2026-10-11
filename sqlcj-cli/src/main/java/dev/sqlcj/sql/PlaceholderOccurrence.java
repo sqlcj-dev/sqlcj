@@ -16,9 +16,14 @@ import net.sf.jsqlparser.expression.Expression;
  *                    the innermost cast of a chain such as
  *                    {@code :x::text::int}, and {@code null} when the
  *                    placeholder is not cast directly
+ * @param enclosing   where the placeholder stands, written as the query writes
+ *                    it: the smallest enclosing expression the parse tree
+ *                    reports, on one line, or the keyword of the clause the
+ *                    placeholder stands alone in, in upper case
  */
 public record PlaceholderOccurrence(
     Expression placeholder,
-    CastExpression cast
+    CastExpression cast,
+    String enclosing
 ) {
 }

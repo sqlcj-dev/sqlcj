@@ -602,7 +602,19 @@ string literal, a quoted identifier, or a comment is not a parameter.
   such as `:"x"`, and an `&name` placeholder.
 - A placeholder that neither a clause nor a cast types — for example
   `ORDER BY $1`, `lower(name) = :name`, or `(:x)::int`, whose placeholder is not
-  the direct operand of its cast — is rejected rather than left unbound.
+  the direct operand of its cast — is rejected rather than left unbound, as
+  `Cannot infer the type of :name in lower(name) = :name; state it with a cast,
+  such as :name::text`. The diagnostic writes the placeholder as the query
+  spells it, `$1` or `:name`, and names where the query writes it: the smallest
+  expression written around the placeholder, on one line, with whatever
+  separates two tokens written as one space. A concatenated pattern is
+  therefore named in its whole `LIKE` predicate and an `IN` list in its `IN`
+  predicate, while a placeholder written inside no expression stands alone in
+  its clause and is named by the keyword that opens that clause, in upper case:
+  `SELECT`, `DISTINCT ON`, `ON`, `WHERE`, `GROUP BY`, `HAVING`, `ORDER BY`,
+  `LIMIT`, `OFFSET`, `FETCH`, `VALUES`, `SET`, or `RETURNING`. One query reports
+  its first untyped placeholder in textual order, after the rules of its clauses
+  have run, so a clause's own rejection comes first.
 
 ### Logical order versus textual order
 
@@ -882,7 +894,12 @@ name, and its header line.
   `LIMIT $1 + 1` or `OFFSET $1 + 1`, a `LIMIT a, b` row count such as
   `LIMIT 5, $1`, a placeholder inside a write value such as
   `COALESCE($2, bio)`, and a `FETCH FIRST $1 ROWS ONLY` clause, so dynamic `IN`
-  expansion is unavailable. A cast states the type of such a placeholder in
+  expansion is unavailable. Each is rejected as `Cannot infer the type of $1 in
+  $1 + 1; state it with a cast, such as $1::text`, which names the placeholder
+  as the query spells it and, after `in`, the smallest expression the query
+  writes around it, on one line, or the upper-case keyword of the clause the
+  placeholder stands alone in, such as `ORDER BY` for `ORDER BY $1` and
+  `SELECT` for `SELECT $1 AS x`. A cast states the type of such a placeholder in
   every one of those locations, and it does not accept a placeholder that is not
   the direct operand of its cast, such as `(:x)::int`.
 - A cast type sqlcj does not map, such as `$1::interval` or a
@@ -1220,7 +1237,7 @@ Writes and `RETURNING`:
   and `QueryAnalyzerTest.shouldRejectAnUnknownConflictColumn` cover the accepted
   conflict target, both actions, the `EXCLUDED`, placeholder, cast, and
   computed assignments, the binding order after the `VALUES` placeholders, the
-  returning row type, and the conflict forms, unaccounted placeholder, and
+  returning row type, and the conflict forms, untyped placeholder, and
   unknown target, assigned, and `EXCLUDED` columns that are rejected on an
   `:exec` and on a returning insert alike, and
   `PostgresIntegrationTest.shouldExecuteGeneratedUpsertsAgainstPostgres`
@@ -1268,6 +1285,15 @@ Parameters:
   `QueryAnalyzerTest.shouldRejectAnonymousParameter`, and
   `QueryAnalyzerTest.shouldKeepPlaceholderTextThatIsNotAParameter` cover
   ordering, repetition, and rejection.
+- `QueryAnalyzerTest.shouldRejectAnUntypedPlaceholder`,
+  `QueryAnalyzerTest.shouldRejectAnUntypedPlaceholderOfAConcatenatedPattern`,
+  `QueryAnalyzerTest.shouldRejectTheFirstUntypedPlaceholderOfAQuery`,
+  `SqlParserTest.shouldReportTheEnclosingExpressionOfAPlaceholder`,
+  `SqlParserTest.shouldReportTheClauseOfAPlaceholderThatStandsAlone`, and
+  `SqlcjCompilerIntegrationTest.shouldRejectUntypedPlaceholderBeforeWriting`
+  cover the untyped-placeholder diagnostic, in both placeholder forms, with the
+  enclosing expression and the clause keyword it names, the first occurrence it
+  reports, and the whole located line of a compiled source.
 - `SqlParserTest.shouldCompileNamedParametersByFirstOccurrence`,
   `SqlParserTest.shouldCompileNamesThatDifferInCaseAsDistinctParameters`,
   `SqlParserTest.shouldReportBothPlaceholderFormsOfOneSource`,
