@@ -1166,6 +1166,79 @@ class PostgresIntegrationTest {
     }
 
     /**
+     * Covers predicate subqueries without a cast end to end: a membership
+     * check over an {@code IN} query and a correlated {@code NOT EXISTS}
+     * filter take their parameters from the subquery's own column, and both run
+     * against PostgreSQL through the generated repository.
+     */
+    @Test
+    void shouldExecuteGeneratedUncastPredicateSubqueriesAgainstPostgres() throws Exception {
+        execute(MEMBERSHIP_SCHEMA);
+
+        Path classesDirectory = generateAndCompile(MEMBERSHIP_SCHEMA, """
+            -- name: ListTeamsOfRole :many
+            SELECT id, name
+            FROM teams
+            WHERE id IN (
+                SELECT team_id
+                FROM memberships
+                WHERE role = :role
+            )
+            ORDER BY id;
+
+            -- name: ListTeamsWithoutRole :many
+            SELECT id, name
+            FROM teams
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM memberships
+                WHERE memberships.team_id = teams.id
+                  AND memberships.role = :role
+            )
+            ORDER BY id;
+            """);
+
+        execute("""
+            INSERT INTO teams (id, name)
+            VALUES (1, 'Platform'), (2, 'Billing'), (3, 'Support')
+            """);
+
+        execute("""
+            INSERT INTO memberships (team_id, role)
+            VALUES (1, 'owner'), (2, 'member'), (3, 'owner')
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method listTeamsOfRole = repository.getClass().getMethod(
+                "listTeamsOfRole",
+                String.class
+            );
+
+            Method listTeamsWithoutRole = repository.getClass().getMethod(
+                "listTeamsWithoutRole",
+                String.class
+            );
+
+            assertEquals(
+                List.of("Platform", "Support"),
+                names(listTeamsOfRole.invoke(repository, "owner"))
+            );
+
+            assertEquals(
+                List.of("Billing"),
+                names(listTeamsWithoutRole.invoke(repository, "owner"))
+            );
+
+            assertEquals(
+                List.of("Platform", "Support"),
+                names(listTeamsWithoutRole.invoke(repository, "member"))
+            );
+        }
+    }
+
+    /**
      * Covers named placeholders end to end: a read whose placeholders are named
      * and whose first name repeats is generated, compiled, and executed against
      * PostgreSQL, so its method parameters follow first-occurrence order while

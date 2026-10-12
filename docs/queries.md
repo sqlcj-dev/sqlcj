@@ -259,7 +259,7 @@ A `WHERE` clause may combine:
 
 - the comparisons `=`, `<>`, `>`, `>=`, `<`, `<=` between a direct column and a
   `$N` placeholder, in either order,
-- `AND`, `OR`, and parentheses,
+- `AND`, `OR`, `NOT`, and parentheses,
 - `IN` with a fixed list of `$N` placeholders, such as `id IN ($1, $2)`,
 - `LIKE` and `ILIKE` between a direct column and a `$N` pattern placeholder,
   such as `name LIKE $1`,
@@ -267,7 +267,10 @@ A `WHERE` clause may combine:
 - `BETWEEN` and `NOT BETWEEN` on a direct column, such as
   `code BETWEEN $1 AND $2`,
 - `= ANY` between a direct column and one `$N` list placeholder, such as
-  `id = ANY($1)`.
+  `id = ANY($1)`,
+- a subquery: `EXISTS (SELECT ...)` and `NOT EXISTS (SELECT ...)`,
+  `IN (SELECT ...)` and `NOT IN (SELECT ...)`, whatever the tested value is,
+  and a comparison one of whose operands is `(SELECT ...)`.
 
 A direct column is a column reference written without an array subscript or
 slice. A subscripted or sliced reference, such as `labels[1]`, `labels[1:2]`, or
@@ -320,6 +323,52 @@ shape is analyzed: the operator is `=`, the column is its left operand, and
 argument. `id <> ANY($1)`, `id = SOME($1)`, `ANY($1) = id`, and
 `id = ANY(ARRAY[$1, $2])` are therefore rejected as unanalyzed placeholder
 locations, and sqlcj expands no `IN` list of its own.
+
+A predicate subquery is analyzed by the rules of a read wherever the predicate
+rules reach it — through `AND`, `OR`, `NOT`, and parentheses, in a read's
+`WHERE`, a join `ON` condition, a write's `WHERE`, a conflict predicate, and the
+`WHERE` of another analyzed nested query — so its placeholders are typed from
+columns without a cast:
+
+```sql
+-- name: ListTeamsOfRole :many
+SELECT id, name
+FROM teams
+WHERE id IN (SELECT team_id
+             FROM memberships
+             WHERE role = :role)
+ORDER BY id;
+```
+
+`ListTeamsOfRole` generates `listTeamsOfRole(String role)`, whose one parameter
+is typed and named from `memberships.role`.
+
+The subquery sees its own sources first and then the sources of each query
+around it, so a correlated predicate such as
+`EXISTS (SELECT 1 FROM memberships m WHERE m.team_id = teams.id AND teams.name = :name)`
+types `:name` from the enclosing `teams`. An unqualified column resolves in the
+innermost level that has it, and a qualified one through the innermost source of
+that exposed name, so a subquery source shadows an enclosing source of the same
+name. A column two sources of one level expose is ambiguous in that level, while
+the same name in an enclosing level never makes a reference ambiguous, and a
+column no level exposes is rejected naming every visible source from the
+innermost level outward, as in `Column not found in sources p, o, u: missing`.
+
+A predicate subquery states no result column of the query, so its `SELECT` list
+accepts `SELECT 1`, a wildcard, and a column whose type sqlcj does not map,
+while a direct column there still names a column of the sources in scope. Its
+own `WITH` list, its sources, its join conditions, and its `WHERE`, `LIMIT`, and
+`OFFSET` clauses follow the rules every analyzed nested `SELECT` follows, which
+[Sources](#sources) states, so a set operation inside it is rejected with the
+set-operation diagnostic, and a `WITH` body or a subquery source declared inside
+it sees no source of the query around it.
+
+A subquery in any other location keeps its unanalyzed handling, in which only a
+cast types a placeholder: `= ANY (SELECT ...)`, `IN ((SELECT ...))`, a bare
+boolean subquery, and a subquery in a projection, `GROUP BY`, `HAVING`,
+`ORDER BY`, a written value, `RETURNING`, or a function argument. A placeholder
+compared with a subquery, as in `:x = (SELECT ...)`, is not typed from it
+either.
 
 A comparison that binds no placeholder, such as `active = TRUE`, contributes no
 generated parameter and reaches the database as written.
@@ -638,8 +687,9 @@ A write may declare `WITH` clauses of its own, with or without `RETURNING`.
 Each body is analyzed by the rules [Sources](#sources) states, so its
 placeholders are typed from its own columns, while the returned columns stay
 the write target's. No clause of a supported write resolves a source beside its
-target, so such a clause is read only by a predicate subquery, which reaches
-the database as written.
+target, so such a clause is read only by a predicate subquery of the write's
+`WHERE` or of a conflict predicate, which sees the write's `WITH` clauses and
+the target beside its own sources, as [Predicates](#predicates) states.
 
 ## Parameters
 
@@ -663,10 +713,12 @@ string literal, a quoted identifier, or a comment is not a parameter.
   `pageSize` rather than `limit`.
 - The Java type of a placeholder is the type of the column it is compared with,
   assigned to, or inserted into.
-- The clause rules apply in an analyzed nested `SELECT` — a `WITH` body and a
-  subquery source — exactly as they do at top level, so a placeholder of
-  such a body's `ON`, `WHERE`, `LIMIT`, or `OFFSET` clause is typed and named
-  from its own clause without a cast.
+- The clause rules apply in an analyzed nested `SELECT` — a `WITH` body, a
+  subquery source, and a predicate subquery — exactly as they do at top level,
+  so a placeholder of such a body's `ON`, `WHERE`, `LIMIT`, or `OFFSET` clause
+  is typed and named from its own clause without a cast. A predicate subquery
+  also types a placeholder from a column of the query around it, as
+  [Predicates](#predicates) states.
 - A placeholder written as the direct operand of `::type` or
   `CAST(... AS type)` is typed by that cast instead, wherever it appears in an
   accepted statement: a projection, a join `ON` condition, `WHERE`, `GROUP BY`,
@@ -687,11 +739,11 @@ string literal, a quoted identifier, or a comment is not a parameter.
   `name = $1` does. An indexed cast placeholder that is the whole `LIMIT` row
   count or `OFFSET` value is named `limit` or `offset`, as an uncast one is.
   These names come from the clause the placeholder stands in, in an analyzed
-  nested `SELECT` as at top level, so `orders.total = $1::numeric` in a `WITH`
-  body names `total`. Every other indexed cast placeholder, including one in a
-  clause or a nested query sqlcj does not analyze, is named `param<N>`
-  after its own index, as in `param1` for `$1`, and colliding names take the
-  usual numeric suffix.
+  nested `SELECT` as at top level, so `orders.total = $1::numeric` names
+  `total` in a `WITH` body and in a predicate subquery alike. Every other
+  indexed cast placeholder, including one in a clause or a nested query sqlcj
+  does not analyze, is named `param<N>` after its own index, as in `param1` for
+  `$1`, and colliding names take the usual numeric suffix.
 - A column written with an array subscript or slice names no parameter, because
   the parameter beside it is one element rather than the column's value, so an
   indexed cast placeholder there is `param<N>` and a named one keeps its own
@@ -989,10 +1041,10 @@ query name, and its header line.
 - A set operation, `UNION`, `UNION ALL`, `INTERSECT`, or `EXCEPT`, written
   directly or inside parentheses, rejected as
   `UNION, INTERSECT, and EXCEPT are not supported; write one query per SELECT.`
-  A `WITH` body and a subquery source are classified inside their own
-  parentheses the same way, so a set operation there is rejected with that
-  diagnostic and another statement form, such as a `VALUES` body, with the
-  statement diagnostic.
+  A `WITH` body, a subquery source, and a predicate subquery are classified
+  inside their own parentheses the same way, so a set operation there is
+  rejected with that diagnostic and another statement form, such as a
+  `VALUES` body, with the statement diagnostic.
 - A result expression that is not a direct column, a wildcard, an aliased
   `COUNT(*)`, or an aliased cast, including another function call, another
   aggregate, and a literal. A `COUNT(*)` without an alias, a cast projection
@@ -1014,9 +1066,13 @@ query name, and its header line.
   [Sources](#sources) states, which says what to write instead for `RIGHT`,
   `CROSS`, `NATURAL`, `USING`, and a comma-separated `FROM` list, and a join
   that does not carry exactly one `ON` condition.
+- A column reference of a predicate subquery that no level in scope exposes, or
+  that two sources of its own level expose, each with the diagnostic
+  [Predicates](#predicates) states.
 - An uncast placeholder in a location sqlcj does not analyze, including
   `ORDER BY $1`, a projection such as `SELECT $1 AS x`, a grouping list, a
-  `HAVING` predicate, a subquery, a
+  `HAVING` predicate, a subquery outside the analyzed predicate forms, such as
+  the query of an `= ANY`, a
   named placeholder under a function such as `lower(name) = :name`, a computed
   `LIKE` pattern such as
   `'%' || $1 || '%'`, a placeholder as the
@@ -1108,15 +1164,15 @@ the generated Java describes only the part sqlcj did analyze. Do not rely on
 them:
 
 - `DISTINCT`, `GROUP BY`, and `HAVING`,
-- predicate forms other than the listed comparisons, `AND`/`OR`, fixed `IN`
-  lists, pattern placeholders, null tests, ranges, and list predicates, such as
-  `LIKE` with a literal pattern, a range whose bounds are both literal such as
-  `id BETWEEN 1 AND 10`, `IN` with a subquery, or `= ANY` over something other
-  than a placeholder, such as `id = ANY('{1,2}')`,
-- subqueries outside a `FROM` or `JOIN` item, such as `EXISTS`,
-  `IN (SELECT ...)`, a scalar comparison subquery, and one in a projection,
-  `GROUP BY`, `HAVING`, `ORDER BY`, a written value, or `RETURNING`, whose
-  tables and columns PostgreSQL rather than sqlcj checks,
+- predicate forms other than the listed comparisons, `AND`/`OR`/`NOT`, fixed
+  `IN` lists, pattern placeholders, null tests, ranges, list predicates, and
+  the analyzed subquery forms, such as `LIKE` with a literal pattern or a range
+  whose bounds are both literal such as `id BETWEEN 1 AND 10`,
+- subqueries outside a `FROM` or `JOIN` item and the analyzed predicate forms,
+  such as `= ANY (SELECT ...)`, `IN ((SELECT ...))`, a bare boolean subquery,
+  and one in a projection, `GROUP BY`, `HAVING`, `ORDER BY`, a written value,
+  `RETURNING`, or a function argument, whose tables and columns PostgreSQL
+  rather than sqlcj checks,
 - the unique index an accepted `ON CONFLICT` target matches, the constraint an
   `ON CONSTRAINT` target names, the column references of an `EXCLUDED` value
   that is not exactly `EXCLUDED.column`, and a conflict-predicate column that
@@ -1124,8 +1180,8 @@ them:
 
 A clause that is not analyzed still binds the placeholders a cast types inside
 it, in textual order, and nothing else of it is checked. A cast placeholder in a
-`GROUP BY`, `HAVING`, `ORDER BY`, or subquery therefore generates one typed
-method parameter while PostgreSQL rather than sqlcj checks the surrounding
+`GROUP BY`, `HAVING`, `ORDER BY`, or unanalyzed subquery therefore generates one
+typed method parameter while PostgreSQL rather than sqlcj checks the surrounding
 expression, including its tables and columns.
 
 sqlcj itself provides no macros, dynamic `IN` expansion, or query-building API.
@@ -1372,6 +1428,44 @@ Reads:
   `PostgresIntegrationTest.shouldExecuteGeneratedDerivedSourcesAgainstPostgres`
   executes both against PostgreSQL 16, reading the unmatched report row's
   derived column as `null`.
+- `QueryAnalyzerTest.shouldTypePredicateSubqueryPlaceholderFromItsOwnColumn`,
+  `QueryAnalyzerTest.shouldTypePredicateSubqueryPlaceholderOfAJoinCondition`,
+  `QueryAnalyzerTest.shouldTypePredicateSubqueryPlaceholderOfAnUpdate`,
+  `QueryAnalyzerTest.shouldTypePredicateSubqueryPlaceholderOfADelete`,
+  `QueryAnalyzerTest.shouldTypePredicateSubqueryPlaceholderOfAConflictPredicate`,
+  `QueryAnalyzerTest.shouldTypeCorrelatedPlaceholderFromAnEnclosingSource`,
+  `QueryAnalyzerTest.shouldTypeNestedPredicateSubqueryPlaceholdersFromEveryLevel`,
+  `QueryAnalyzerTest.shouldResolveAnUnqualifiedColumnInTheInnermostLevelThatHasIt`,
+  `QueryAnalyzerTest.shouldResolveAReusedAliasInTheInnermostLevel`,
+  `QueryAnalyzerTest.shouldAcceptOneColumnNameExposedByTwoLevels`,
+  `QueryAnalyzerTest.shouldRejectAnUnknownColumnNamingEveryVisibleSource`,
+  `QueryAnalyzerTest.shouldRejectAnAmbiguousColumnWithinOnePredicateSubqueryLevel`,
+  `QueryAnalyzerTest.shouldShareOneParameterBetweenTwoLevelsOfOneName`,
+  `QueryAnalyzerTest.shouldBindPredicateSubqueryParametersInTextualOrder`,
+  `QueryAnalyzerTest.shouldTypePlaceholderOfANegatedPredicate`,
+  `QueryAnalyzerTest.shouldAcceptPredicateSubquerySelectItems`,
+  `QueryAnalyzerTest.shouldAcceptAnUnmappedColumnOfAPredicateSubquerySelectList`,
+  `QueryAnalyzerTest.shouldRejectAnUnknownColumnOfAPredicateSubquerySelectList`,
+  `QueryAnalyzerTest.shouldRejectASetOperationInsideAPredicateSubquery`, and
+  `QueryAnalyzerTest.shouldResolveAWriteCommonTableExpressionInsideItsPredicateSubquery`
+  cover the predicate subqueries: each analyzed form in a read's `WHERE`, a
+  join `ON` condition, an `UPDATE`, a `DELETE`, and a `DO UPDATE` predicate,
+  with the executable SQL unchanged; a correlated placeholder typed from a
+  qualified and an unqualified outer column and from every level of a nested
+  subquery; an unqualified column and a reused alias resolved in the innermost
+  level; one column name exposed by two levels accepted; an unknown column
+  naming every visible source innermost outward and an ambiguous column of one
+  level rejected; one name shared by two levels as one parameter; the textual
+  binding order across levels; the placeholder of a negated predicate; the
+  select-list items a subquery accepts, an unmapped column included, and the
+  unknown one it rejects; the set operation rejected inside one; and a write's
+  `WITH` clause read by its own predicate subquery;
+  `SqlcjCompilerIntegrationTest.shouldGenerateCompilableJavaForPredicateSubqueries`
+  compiles a repository over uncast `EXISTS`, `NOT EXISTS`, and `IN` membership
+  checks, and
+  `PostgresIntegrationTest.shouldExecuteGeneratedUncastPredicateSubqueriesAgainstPostgres`
+  executes an uncast membership check and a correlated `NOT EXISTS` filter
+  against PostgreSQL 16.
 - `QueryAnalyzerTest.shouldResolveRowTableForFullRowSelect`,
   `QueryAnalyzerTest.shouldNotResolveRowTableForQuerySpecificResult`,
   `QueryAnalyzerTest.shouldNotResolveRowTableForJoinedWildcard`, and
