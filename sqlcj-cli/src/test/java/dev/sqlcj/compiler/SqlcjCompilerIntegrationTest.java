@@ -3924,6 +3924,68 @@ class SqlcjCompilerIntegrationTest {
     }
 
     /**
+     * A predicate subquery types its own and its correlated placeholders
+     * without a cast, so an {@code EXISTS}, a {@code NOT EXISTS}, and an
+     * {@code IN} membership check generate compilable Java whose method
+     * parameters come from the subquery's columns.
+     */
+    @Test
+    void shouldGenerateCompilableJavaForPredicateSubqueries() throws IOException {
+        generateAndCompile(
+            JOIN_SCHEMA,
+            """
+                -- name: ListUsersWithOrder :many
+                SELECT u.id, u.name
+                FROM users u
+                WHERE EXISTS (SELECT 1
+                              FROM orders o
+                              WHERE o.user_id = u.id
+                                AND o.total = $1);
+
+                -- name: ListUsersWithoutProfile :many
+                SELECT u.id, u.name
+                FROM users u
+                WHERE NOT EXISTS (SELECT 1
+                                  FROM profiles p
+                                  WHERE p.user_id = u.id
+                                    AND p.nickname = $1);
+
+                -- name: ListOrderingUsers :many
+                SELECT id, name
+                FROM users
+                WHERE id IN (SELECT user_id
+                             FROM orders
+                             WHERE total = :total);
+                """
+        );
+
+        String source = Files.readString(
+            tempDir.resolve("generated/generated/UsersRepository.java")
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<ListUsersWithOrderResult> listUsersWithOrder(BigDecimal total)"
+            ),
+            source
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<ListUsersWithoutProfileResult> listUsersWithoutProfile(String nickname)"
+            ),
+            source
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<ListOrderingUsersResult> listOrderingUsers(BigDecimal total)"
+            ),
+            source
+        );
+    }
+
+    /**
      * A list predicate generates one {@code List} method parameter of the
      * compared column's element type, bound as one server array, in compilable
      * Java.

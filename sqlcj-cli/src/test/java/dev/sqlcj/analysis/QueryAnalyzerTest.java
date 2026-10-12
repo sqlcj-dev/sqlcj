@@ -3934,10 +3934,10 @@ class QueryAnalyzerTest {
     }
 
     /**
-     * A cast types a placeholder inside a subquery at any depth, in a read and
-     * in a write, even though the subquery itself is not analyzed. Such a
-     * placeholder is named after its own placeholder, because no analyzed
-     * column names it.
+     * A cast types a placeholder inside a predicate subquery at any depth, in a
+     * read and in a write, instead of the column its clause compares it with.
+     * Such a placeholder keeps its own name, as a named cast placeholder does
+     * in every clause.
      */
     @ParameterizedTest
     @CsvSource(
@@ -4062,7 +4062,9 @@ class QueryAnalyzerTest {
      * Only a placeholder a cast states the type of is typed outside the clauses
      * that name a parameter, so an uncast placeholder, and a placeholder a cast
      * does not cast directly, are rejected as untyped, each named with the
-     * expression or clause it stands in.
+     * expression or clause it stands in. A subquery this subset does not
+     * analyze, such as the query of an {@code = ANY}, types no placeholder of
+     * its own clauses either.
      */
     @ParameterizedTest
     @CsvSource(
@@ -4073,7 +4075,8 @@ class QueryAnalyzerTest {
             "SELECT id FROM users ORDER BY CASE WHEN :sort = 'name' THEN name END"
                 + "|:sort|:sort = 'name'",
             "SELECT id FROM users ORDER BY (:sort)::int|:sort|(:sort)::int",
-            "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM orders WHERE orders.id = :id)"
+            "SELECT id FROM users"
+                + " WHERE id = ANY (SELECT user_id FROM orders WHERE orders.id = :id)"
                 + "|:id|orders.id = :id"
         }
     )
@@ -4137,8 +4140,8 @@ class QueryAnalyzerTest {
             "SELECT id FROM users ORDER BY :sort|:sort|ORDER BY",
             "SELECT id FROM users ORDER BY name, $1|$1|ORDER BY",
             "SELECT id FROM users LIMIT :n + 1|:n|:n + 1",
-            "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM tasks t WHERE t.x = :x)"
-                + "|:x|t.x = :x",
+            "SELECT id FROM users WHERE EXISTS (SELECT 1 FROM users u WHERE lower(u.email) = :x)"
+                + "|:x|lower(u.email) = :x",
             "SELECT $1 AS x FROM users|$1|SELECT"
         }
     )
@@ -7026,9 +7029,9 @@ class QueryAnalyzerTest {
     }
 
     /**
-     * A common table expression no source reads is analyzed too, so its body's
-     * placeholders are typed, and a subquery that reads it in a predicate
-     * keeps today's handling.
+     * A common table expression no source of the query itself reads is
+     * analyzed too, so its body's placeholders are typed, and a predicate
+     * subquery reads it as the derived source it declares.
      */
     @Test
     void shouldAnalyzeACommonTableExpressionReadOnlyInsideAPredicateSubquery() {
@@ -7175,5 +7178,555 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(message, exception.getMessage());
+    }
+
+    /**
+     * A predicate subquery is analyzed by the clause rules of a read, so an
+     * uncast placeholder of its {@code WHERE} is typed and named from the
+     * column of its own source, in each subquery form the predicate rules
+     * reach: {@code EXISTS} and its negation, {@code IN} and {@code NOT IN}
+     * over a query, whatever the tested value is, and a comparison subquery as
+     * either operand of any comparison operator. The subquery itself reaches
+     * the database as written.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "EXISTS (SELECT 1 FROM orders WHERE total = :total)",
+            "NOT EXISTS (SELECT 1 FROM orders WHERE total = :total)",
+            "id IN (SELECT user_id FROM orders WHERE total = :total)",
+            "id NOT IN (SELECT user_id FROM orders WHERE total = :total)",
+            "lower(name) IN (SELECT user_id FROM orders WHERE total = :total)",
+            "id = (SELECT user_id FROM orders WHERE total = :total)",
+            "(SELECT user_id FROM orders WHERE total = :total) = id",
+            "id > (SELECT user_id FROM orders WHERE total = :total)",
+            "NOT (id IN (SELECT user_id FROM orders WHERE total = :total))"
+        }
+    )
+    void shouldTypePredicateSubqueryPlaceholderFromItsOwnColumn(String predicate) {
+        String sql = "SELECT id FROM users WHERE " + predicate;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "total", ColumnType.DECIMAL)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+        assertEquals(sql.replace(":total", "?"), model.executableSql());
+    }
+
+    /**
+     * A predicate subquery of a join condition is analyzed as one of a
+     * {@code WHERE} is, over the sources written up to that join.
+     */
+    @Test
+    void shouldTypePredicateSubqueryPlaceholderOfAJoinCondition() {
+        String sql = """
+            SELECT u.id
+            FROM users u
+                     JOIN orders o ON o.user_id = u.id
+                AND EXISTS (SELECT 1
+                            FROM profiles p
+                            WHERE p.user_id = u.id
+                              AND p.nickname = :nickname)
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUserOrders", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "nickname", ColumnType.VARCHAR)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * The {@code WHERE} of an {@code UPDATE} and of a {@code DELETE} analyzes
+     * its predicate subqueries as a read's does, and the subquery reads the
+     * write target as well as its own source.
+     */
+    @Test
+    void shouldTypePredicateSubqueryPlaceholderOfAnUpdate() {
+        String sql = """
+            UPDATE users
+            SET name = $1
+            WHERE EXISTS (SELECT 1
+                          FROM orders
+                          WHERE orders.user_id = users.id
+                            AND orders.total = $2)
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ClearUserNames", QueryType.EXEC, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "name", ColumnType.VARCHAR),
+                new QueryParameter(2, "total", ColumnType.DECIMAL)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+    }
+
+    @Test
+    void shouldTypePredicateSubqueryPlaceholderOfADelete() {
+        String sql = "DELETE FROM users WHERE id IN (SELECT user_id FROM orders WHERE total = $1)";
+
+        QueryModel model = analyzer.analyze(
+            new Query("DeleteOrderingUsers", QueryType.EXEC, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "total", ColumnType.DECIMAL)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+        assertEquals(sql.replace("$1", "?"), model.executableSql());
+    }
+
+    /**
+     * A {@code DO UPDATE} predicate analyzes its subqueries over the inserted
+     * table and {@code EXCLUDED}, so a subquery placeholder there is typed from
+     * the subquery's own column and binds after the conflict assignments.
+     */
+    @Test
+    void shouldTypePredicateSubqueryPlaceholderOfAConflictPredicate() {
+        String sql = """
+            INSERT INTO users (id, name)
+            VALUES ($1, $2)
+            ON CONFLICT (id) DO UPDATE SET name = $3
+            WHERE EXISTS (SELECT 1
+                          FROM orders
+                          WHERE orders.user_id = users.id
+                            AND orders.total = $4)
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("CreateUser", QueryType.EXEC, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR),
+                new QueryParameter(3, "name", ColumnType.VARCHAR),
+                new QueryParameter(4, "total", ColumnType.DECIMAL)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2, 3, 4), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A subquery sees the sources of the query around it, so a placeholder
+     * compared with a column of an enclosing level is typed from that column,
+     * whether the query qualifies the column or not.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "SELECT u.id FROM users u"
+                + " WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id AND u.name = :name)",
+            "SELECT id FROM users"
+                + " WHERE EXISTS (SELECT 1 FROM orders"
+                + " WHERE orders.user_id = users.id AND name = :name)"
+        }
+    )
+    void shouldTypeCorrelatedPlaceholderFromAnEnclosingSource(String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("ListOrderingUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "name", ColumnType.VARCHAR)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * An unqualified column resolves in the innermost level that has it, so a
+     * column name an enclosing source also exposes is read from the subquery's
+     * own source.
+     */
+    @Test
+    void shouldResolveAnUnqualifiedColumnInTheInnermostLevelThatHasIt() {
+        String sql = """
+            WITH shadow AS (SELECT total AS id
+                            FROM orders)
+            SELECT u.id
+            FROM users u
+            WHERE EXISTS (SELECT 1 FROM shadow WHERE id = :id)
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "id", ColumnType.DECIMAL)),
+            model.parameters()
+        );
+    }
+
+    /**
+     * A qualified column resolves through the innermost source of that exposed
+     * name, so a subquery source that reuses the alias of an enclosing source
+     * is the one its own references read.
+     */
+    @Test
+    void shouldResolveAReusedAliasInTheInnermostLevel() {
+        String sql = "SELECT u.id FROM users u"
+            + " WHERE EXISTS (SELECT 1 FROM orders u WHERE u.total = :total)";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "total", ColumnType.DECIMAL)),
+            model.parameters()
+        );
+    }
+
+    /**
+     * One column name exposed by a source of two levels is ambiguous in
+     * neither, because the reference resolves in the innermost level alone, as
+     * PostgreSQL resolves it.
+     */
+    @Test
+    void shouldAcceptOneColumnNameExposedByTwoLevels() {
+        String sql = "SELECT o.id FROM orders o"
+            + " WHERE EXISTS (SELECT 1 FROM profiles WHERE user_id = :userId)";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListOrders", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "userId", ColumnType.BIGINT)),
+            model.parameters()
+        );
+    }
+
+    /**
+     * A column no level in scope exposes names every visible source, from the
+     * innermost level outward.
+     */
+    @Test
+    void shouldRejectAnUnknownColumnNamingEveryVisibleSource() {
+        String sql = """
+            SELECT u.id
+            FROM users u
+            WHERE EXISTS (SELECT 1
+                          FROM orders o
+                          WHERE EXISTS (SELECT 1
+                                        FROM profiles p
+                                        WHERE missing = :missing))
+            """;
+
+        Query query = new Query("ListUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
+        );
+
+        assertEquals(
+            "Column not found in sources p, o, u: missing",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A column two sources of one level expose is ambiguous in that level,
+     * whatever the levels around it expose.
+     */
+    @Test
+    void shouldRejectAnAmbiguousColumnWithinOnePredicateSubqueryLevel() {
+        String sql = "SELECT id FROM users"
+            + " WHERE EXISTS (SELECT 1 FROM orders o JOIN profiles p ON p.user_id = o.user_id"
+            + " WHERE user_id = :userId)";
+
+        Query query = new Query("ListUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
+        );
+
+        assertEquals(
+            "Ambiguous column reference 'user_id' in sources: o, p",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A subquery inside a subquery is one more level, so its placeholders are
+     * typed from its own source and from each enclosing one, in textual order.
+     */
+    @Test
+    void shouldTypeNestedPredicateSubqueryPlaceholdersFromEveryLevel() {
+        String sql = """
+            SELECT u.id
+            FROM users u
+            WHERE EXISTS (SELECT 1
+                          FROM orders o
+                          WHERE EXISTS (SELECT 1
+                                        FROM profiles p
+                                        WHERE p.nickname = :nickname
+                                          AND u.name = :name
+                                          AND o.total = :total))
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "nickname", ColumnType.VARCHAR),
+                new QueryParameter(2, "name", ColumnType.VARCHAR),
+                new QueryParameter(3, "total", ColumnType.DECIMAL)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2, 3), model.bindingParameterIndexes());
+    }
+
+    /**
+     * One named placeholder typed in two levels is one parameter, bound at each
+     * of its textual positions.
+     */
+    @Test
+    void shouldShareOneParameterBetweenTwoLevelsOfOneName() {
+        String sql = "SELECT id FROM users"
+            + " WHERE id = :id AND EXISTS (SELECT 1 FROM orders WHERE user_id = :id)";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * Placeholders bind in the textual order of the query, so a placeholder of
+     * a subquery binds before one written after it in the enclosing predicate,
+     * whatever their indexes are.
+     */
+    @Test
+    void shouldBindPredicateSubqueryParametersInTextualOrder() {
+        String sql = "SELECT id FROM users"
+            + " WHERE EXISTS (SELECT 1 FROM orders WHERE total = $2) AND name = $1";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "name", ColumnType.VARCHAR),
+                new QueryParameter(2, "total", ColumnType.DECIMAL)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(2, 1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A negated predicate states the operands of the predicate it negates, so
+     * the predicate rules reach through {@code NOT} and type its placeholder.
+     */
+    @Test
+    void shouldTypePlaceholderOfANegatedPredicate() {
+        String sql = "SELECT id FROM users WHERE NOT (id = :id)";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A predicate subquery states no result column of the query, so its
+     * {@code SELECT} list accepts a literal, a wildcard, and a column beside
+     * them, each reaching the database as written.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = { "1", "*", "orders.*", "1, orders.id, *" })
+    void shouldAcceptPredicateSubquerySelectItems(String selectItems) {
+        String sql = "SELECT id FROM users WHERE EXISTS (SELECT %s FROM orders WHERE total = :total)"
+            .formatted(selectItems);
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "total", ColumnType.DECIMAL)),
+            model.parameters()
+        );
+    }
+
+    /**
+     * A column the schema recorded without a mapped type is accepted in a
+     * predicate subquery's {@code SELECT} list, because the subquery generates
+     * no result column of that type.
+     */
+    @Test
+    void shouldAcceptAnUnmappedColumnOfAPredicateSubquerySelectList() {
+        String sql = "SELECT id FROM users"
+            + " WHERE EXISTS (SELECT u.tags FROM users u WHERE u.name = :name)";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            unsupportedTypeSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "name", ColumnType.VARCHAR)),
+            model.parameters()
+        );
+    }
+
+    /**
+     * A direct column of a predicate subquery's {@code SELECT} list still
+     * names a column of the sources in scope.
+     */
+    @Test
+    void shouldRejectAnUnknownColumnOfAPredicateSubquerySelectList() {
+        String sql = "SELECT id FROM users WHERE EXISTS (SELECT missing FROM orders)";
+
+        Query query = new Query("ListUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
+        );
+
+        assertEquals(
+            "Column not found in sources orders, users: missing",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A predicate subquery is classified inside its own parentheses as a
+     * top-level read is, so a set operation there keeps the set-operation
+     * diagnostic.
+     */
+    @Test
+    void shouldRejectASetOperationInsideAPredicateSubquery() {
+        String sql = "SELECT id FROM users"
+            + " WHERE EXISTS (SELECT 1 FROM orders UNION SELECT 1 FROM profiles)";
+
+        Query query = new Query("ListUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
+        );
+
+        assertEquals(
+            "UNION, INTERSECT, and EXCEPT are not supported; write one query per SELECT.",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * The common table expressions a write declares are in scope of its
+     * predicate subqueries, so a subquery source may read one and its
+     * placeholders are typed from that derived source's columns.
+     */
+    @Test
+    void shouldResolveAWriteCommonTableExpressionInsideItsPredicateSubquery() {
+        String sql = """
+            WITH recent AS (SELECT user_id
+                            FROM orders
+                            WHERE total = $1)
+            DELETE FROM users
+            WHERE id IN (SELECT user_id FROM recent WHERE user_id = $2)
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("DeleteRecentUsers", QueryType.EXEC, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "total", ColumnType.DECIMAL),
+                new QueryParameter(2, "user_id", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
     }
 }

@@ -17,11 +17,13 @@ import net.sf.jsqlparser.expression.ExpressionVisitorAdapter;
 import net.sf.jsqlparser.expression.Function;
 import net.sf.jsqlparser.expression.JdbcNamedParameter;
 import net.sf.jsqlparser.expression.JdbcParameter;
+import net.sf.jsqlparser.expression.NotExpression;
 import net.sf.jsqlparser.expression.operators.conditional.AndExpression;
 import net.sf.jsqlparser.expression.operators.conditional.OrExpression;
 import net.sf.jsqlparser.expression.operators.relational.Between;
 import net.sf.jsqlparser.expression.operators.relational.ComparisonOperator;
 import net.sf.jsqlparser.expression.operators.relational.EqualsTo;
+import net.sf.jsqlparser.expression.operators.relational.ExistsExpression;
 import net.sf.jsqlparser.expression.operators.relational.ExpressionList;
 import net.sf.jsqlparser.expression.operators.relational.GreaterThan;
 import net.sf.jsqlparser.expression.operators.relational.GreaterThanEquals;
@@ -219,6 +221,54 @@ public final class QueryAnalyzer {
             return derived
                 ? null
                 : table.name();
+        }
+    }
+
+    /**
+     * The column scope of one query level: the sources that level resolves a
+     * column reference against, the common table expressions in scope there,
+     * and the level enclosing it, which is {@code null} for a query no
+     * analyzed query encloses.
+     *
+     * <p>A predicate subquery is the level inside the level its predicate
+     * stands in, so a column resolves in its own sources first and then in
+     * each enclosing level outward, as PostgreSQL resolves a correlated
+     * reference. A join condition's level is the sources written up to and
+     * including its own joined source.
+     */
+    private record Scope(List<Source> sources, List<Source> commonTableExpressions, Scope enclosing) {
+
+        /** A lone query level, which no analyzed query encloses. */
+        private static Scope of(List<Source> sources, List<Source> commonTableExpressions) {
+            return new Scope(sources, commonTableExpressions, null);
+        }
+
+        /** A lone query level that declares no common table expression. */
+        private static Scope of(List<Source> sources) {
+            return of(sources, List.of());
+        }
+
+        /**
+         * The level of the same query whose sources are the given ones, which
+         * is how a join condition narrows its own level without changing the
+         * levels around it.
+         */
+        private Scope narrowedTo(List<Source> levelSources) {
+            return new Scope(levelSources, commonTableExpressions, enclosing);
+        }
+
+        /**
+         * The sources every level makes visible, from the innermost level
+         * outward, which are the sources a column reference may resolve in.
+         */
+        private List<Source> visibleSources() {
+            List<Source> visible = new ArrayList<>();
+
+            for (Scope level = this; level != null; level = level.enclosing()) {
+                visible.addAll(level.sources());
+            }
+
+            return visible;
         }
     }
 
@@ -561,17 +611,72 @@ public final class QueryAnalyzer {
         Analysis analysis,
         List<Source> commonTableExpressions
     ) {
-        List<Source> sources = resolveSources(plainSelect, analysis, commonTableExpressions);
+        List<Source> sources = resolveSources(plainSelect, analysis, commonTableExpressions, null);
 
-        List<dev.sqlcj.schema.Column> columns = resolveColumns(plainSelect, analysis, sources);
+        Scope scope = Scope.of(sources, commonTableExpressions);
 
-        resolveBindingParameters(plainSelect, sources, analysis.placeholders());
+        List<dev.sqlcj.schema.Column> columns = resolveColumns(plainSelect, analysis, scope);
+
+        resolveBindingParameters(plainSelect, scope, analysis);
 
         return new AnalyzedSelect(
             declaredSourceName(plainSelect.getFromItem(), sources.get(0)),
             sources,
             columns
         );
+    }
+
+    /**
+     * Analyzes one subquery of a predicate, which is the level inside the level
+     * its predicate stands in: it is classified inside its own parentheses as a
+     * top-level read is, its own {@code WITH} list is analyzed beside the common
+     * table expressions in scope around it, and its sources, its join
+     * conditions, and its clause placeholders resolve through its own level and
+     * then each enclosing one.
+     *
+     * <p>Its {@code SELECT} list states no result column of the analyzed query,
+     * because the predicate reads whether a row exists or compares one value,
+     * so a direct column there only resolves, whether or not the schema maps its
+     * type, and every other item reaches the database as written.
+     */
+    private void analyzePredicateSubquery(
+        ParenthesedSelect subquery,
+        Scope enclosing,
+        Analysis analysis
+    ) {
+        List<Select> selects = parenthesisLevels(subquery);
+
+        PlainSelect plainSelect = requirePlainSelect(selects);
+
+        List<Source> commonTableExpressions = analyzeCommonTableExpressions(
+            selects,
+            analysis,
+            enclosing.commonTableExpressions()
+        );
+
+        Scope scope = new Scope(
+            resolveSources(plainSelect, analysis, commonTableExpressions, enclosing),
+            commonTableExpressions,
+            enclosing
+        );
+
+        resolvePredicateSubqueryColumns(plainSelect, scope);
+        resolveBindingParameters(plainSelect, scope, analysis);
+    }
+
+    /**
+     * Resolves the direct columns of a predicate subquery's {@code SELECT}
+     * list, which reach the database as written like every other item there but
+     * name a column of the sources in scope.
+     */
+    private void resolvePredicateSubqueryColumns(PlainSelect plainSelect, Scope scope) {
+        for (SelectItem<?> selectItem : plainSelect.getSelectItems()) {
+            net.sf.jsqlparser.schema.Column selectedColumn = directColumn(selectItem.getExpression());
+
+            if (selectedColumn != null) {
+                resolveColumn(selectedColumn, scope);
+            }
+        }
     }
 
     /**
@@ -620,12 +725,15 @@ public final class QueryAnalyzer {
 
     /**
      * Analyzes the {@code WITH} items of one statement, which are the only ones
-     * a write declares, because no clause of a supported write reads a source
-     * beside its target.
+     * a write declares, and reports the derived sources they declare, which are
+     * in scope of the predicates of that write.
      */
-    private void analyzeCommonTableExpressions(List<WithItem<?>> withItems, Analysis analysis) {
+    private List<Source> analyzeCommonTableExpressions(
+        List<WithItem<?>> withItems,
+        Analysis analysis
+    ) {
         if (withItems == null) {
-            return;
+            return List.of();
         }
 
         List<Source> scope = new ArrayList<>();
@@ -633,6 +741,8 @@ public final class QueryAnalyzer {
         for (WithItem<?> withItem : withItems) {
             scope.add(analyzeCommonTableExpression(withItem, analysis, List.copyOf(scope)));
         }
+
+        return List.copyOf(scope);
     }
 
     /**
@@ -699,10 +809,11 @@ public final class QueryAnalyzer {
         Source source = toSource(table, schema);
 
         Placeholders placeholders = toPlaceholders(parsedSql, schema);
+        Analysis analysis = new Analysis(parsedSql, schema, placeholders);
 
-        analyzeCommonTableExpressions(
+        List<Source> commonTableExpressions = analyzeCommonTableExpressions(
             insert.getWithItemsList(),
-            new Analysis(parsedSql, schema, placeholders)
+            analysis
         );
 
         List<QueryColumn> columns = List.of();
@@ -716,7 +827,7 @@ public final class QueryAnalyzer {
         }
 
         resolveInsertParameters(insert, source.table(), placeholders);
-        resolveConflictParameters(insert, source, placeholders);
+        resolveConflictParameters(insert, source, commonTableExpressions, analysis);
 
         return toQueryModel(
             query,
@@ -738,10 +849,11 @@ public final class QueryAnalyzer {
         Source source = toSource(table, schema);
 
         Placeholders placeholders = toPlaceholders(parsedSql, schema);
+        Analysis analysis = new Analysis(parsedSql, schema, placeholders);
 
-        analyzeCommonTableExpressions(
+        List<Source> commonTableExpressions = analyzeCommonTableExpressions(
             update.getWithItemsList(),
-            new Analysis(parsedSql, schema, placeholders)
+            analysis
         );
 
         List<QueryColumn> columns = List.of();
@@ -755,7 +867,11 @@ public final class QueryAnalyzer {
         resolveUpdateSetParameters(update.getUpdateSets(), source.table(), placeholders);
 
         if (update.getWhere() != null) {
-            resolveParameters(update.getWhere(), List.of(source), placeholders);
+            resolveParameters(
+                update.getWhere(),
+                Scope.of(List.of(source), commonTableExpressions),
+                analysis
+            );
         }
 
         return toQueryModel(
@@ -778,10 +894,11 @@ public final class QueryAnalyzer {
         Source source = toSource(table, schema);
 
         Placeholders placeholders = toPlaceholders(parsedSql, schema);
+        Analysis analysis = new Analysis(parsedSql, schema, placeholders);
 
-        analyzeCommonTableExpressions(
+        List<Source> commonTableExpressions = analyzeCommonTableExpressions(
             delete.getWithItemsList(),
-            new Analysis(parsedSql, schema, placeholders)
+            analysis
         );
 
         List<QueryColumn> columns = List.of();
@@ -793,7 +910,11 @@ public final class QueryAnalyzer {
         }
 
         if (delete.getWhere() != null) {
-            resolveParameters(delete.getWhere(), List.of(source), placeholders);
+            resolveParameters(
+                delete.getWhere(),
+                Scope.of(List.of(source), commonTableExpressions),
+                analysis
+            );
         }
 
         return toQueryModel(
@@ -922,8 +1043,10 @@ public final class QueryAnalyzer {
         net.sf.jsqlparser.schema.Column returnedColumn = directColumn(expression);
 
         if (returnedColumn != null) {
-            dev.sqlcj.schema.Column schemaColumn = resolveColumn(returnedColumn, List.of(source))
-                .column();
+            dev.sqlcj.schema.Column schemaColumn = resolveColumn(
+                returnedColumn,
+                Scope.of(List.of(source))
+            ).column();
 
             return List.of(
                 new QueryColumn(
@@ -1118,7 +1241,8 @@ public final class QueryAnalyzer {
     private void resolveConflictParameters(
         Insert insert,
         Source source,
-        Placeholders placeholders
+        List<Source> commonTableExpressions,
+        Analysis analysis
     ) {
         InsertConflictTarget target = insert.getConflictTarget();
         InsertConflictAction action = insert.getConflictAction();
@@ -1131,7 +1255,7 @@ public final class QueryAnalyzer {
             && action.getConflictActionType() == ConflictActionType.DO_UPDATE;
 
         if (target != null) {
-            resolveConflictTarget(target, source, placeholders);
+            resolveConflictTarget(target, source, commonTableExpressions, analysis);
         } else if (doUpdate) {
             throw new UnsupportedOperationException(
                 "ON CONFLICT DO UPDATE requires a conflict target,"
@@ -1145,14 +1269,17 @@ public final class QueryAnalyzer {
 
         List<UpdateSet> updateSets = action.getUpdateSets();
 
-        resolveUpdateSetParameters(updateSets, source.table(), placeholders);
+        resolveUpdateSetParameters(updateSets, source.table(), analysis.placeholders());
         resolveExcludedColumns(updateSets, source.table());
 
         if (action.getWhereExpression() != null) {
             resolveParameters(
                 action.getWhereExpression(),
-                List.of(source, new Source(EXCLUDED_QUALIFIER, source.table(), false, false)),
-                placeholders
+                Scope.of(
+                    List.of(source, new Source(EXCLUDED_QUALIFIER, source.table(), false, false)),
+                    commonTableExpressions
+                ),
+                analysis
             );
         }
     }
@@ -1169,7 +1296,8 @@ public final class QueryAnalyzer {
     private void resolveConflictTarget(
         InsertConflictTarget target,
         Source source,
-        Placeholders placeholders
+        List<Source> commonTableExpressions,
+        Analysis analysis
     ) {
         if (target.getConstraintName() != null) {
             return;
@@ -1192,7 +1320,11 @@ public final class QueryAnalyzer {
         }
 
         if (target.getWhereExpression() != null) {
-            resolveParameters(target.getWhereExpression(), List.of(source), placeholders);
+            resolveParameters(
+                target.getWhereExpression(),
+                Scope.of(List.of(source), commonTableExpressions),
+                analysis
+            );
         }
     }
 
@@ -1643,12 +1775,16 @@ public final class QueryAnalyzer {
 
     /**
      * Resolves the ordered query sources from the first source followed by
-     * every joined source, rejecting an exposed name that repeats.
+     * every joined source, rejecting an exposed name that repeats in this
+     * level. Each join condition resolves its columns through the sources up to
+     * and including its own joined source and then through the levels enclosing
+     * this one, which are none for a query no analyzed query encloses.
      */
     private List<Source> resolveSources(
         PlainSelect plainSelect,
         Analysis analysis,
-        List<Source> commonTableExpressions
+        List<Source> commonTableExpressions,
+        Scope enclosing
     ) {
         List<Source> sources = new ArrayList<>();
 
@@ -1672,7 +1808,10 @@ public final class QueryAnalyzer {
         for (Join join : joins) {
             addSource(sources, requireSupportedJoin(join, analysis, commonTableExpressions));
 
-            resolveJoinConditionColumns(requireJoinCondition(join), sources);
+            resolveJoinConditionColumns(
+                requireJoinCondition(join),
+                new Scope(List.copyOf(sources), commonTableExpressions, enclosing)
+            );
         }
 
         return List.copyOf(sources);
@@ -1856,17 +1995,19 @@ public final class QueryAnalyzer {
     /**
      * Resolves every column reference an {@code ON} condition makes against the
      * sources introduced up to and including its own joined source, as
-     * PostgreSQL scopes a join condition, so a reference to a later source is
-     * an unknown qualifier. A nested {@code SELECT} is not analyzed, which the
-     * visitor's default traversal already leaves unentered.
+     * PostgreSQL scopes a join condition, so a reference to a later source of
+     * the same level is an unknown qualifier, and then against each enclosing
+     * level. A nested {@code SELECT} is not analyzed here, which the visitor's
+     * default traversal already leaves unentered, so a subquery of the
+     * condition is analyzed by the predicate rules alone.
      */
-    private void resolveJoinConditionColumns(Expression condition, List<Source> sources) {
+    private void resolveJoinConditionColumns(Expression condition, Scope scope) {
         condition.accept(
             new ExpressionVisitorAdapter<Void>() {
 
                 @Override
                 public <S> Void visit(net.sf.jsqlparser.schema.Column column, S context) {
-                    resolveColumn(column, sources);
+                    resolveColumn(column, scope);
 
                     return null;
                 }
@@ -1881,20 +2022,20 @@ public final class QueryAnalyzer {
      */
     private void resolveBindingParameters(
         PlainSelect plainSelect,
-        List<Source> sources,
-        Placeholders placeholders
+        Scope scope,
+        Analysis analysis
     ) {
-        resolveJoinConditionParameters(plainSelect, sources, placeholders);
+        resolveJoinConditionParameters(plainSelect, scope, analysis);
 
         if (plainSelect.getWhere() != null) {
             resolveParameters(
                 plainSelect.getWhere(),
-                sources,
-                placeholders
+                scope,
+                analysis
             );
         }
 
-        resolvePaginationParameters(plainSelect, placeholders);
+        resolvePaginationParameters(plainSelect, analysis.placeholders());
     }
 
     /**
@@ -1905,8 +2046,8 @@ public final class QueryAnalyzer {
      */
     private void resolveJoinConditionParameters(
         PlainSelect plainSelect,
-        List<Source> sources,
-        Placeholders placeholders
+        Scope scope,
+        Analysis analysis
     ) {
         List<Join> joins = plainSelect.getJoins();
 
@@ -1917,8 +2058,8 @@ public final class QueryAnalyzer {
         for (int index = 0; index < joins.size(); index++) {
             resolveParameters(
                 requireJoinCondition(joins.get(index)),
-                sources.subList(0, index + 2),
-                placeholders
+                scope.narrowedTo(scope.sources().subList(0, index + 2)),
+                analysis
             );
         }
     }
@@ -1986,20 +2127,34 @@ public final class QueryAnalyzer {
             : limit.getRowCount();
     }
 
+    /**
+     * Resolves the parameters one predicate types, over the level the predicate
+     * stands in. A negated predicate states the same operands as the predicate
+     * it negates, so the rules descend through {@code NOT} as they do through
+     * {@code AND}, {@code OR}, and parentheses.
+     *
+     * <p>A subquery of {@code EXISTS}, which {@code NOT EXISTS} negates, is
+     * analyzed as the level inside this one.
+     */
     private void resolveParameters(
         Expression expression,
-        List<Source> sources,
-        Placeholders placeholders
+        Scope scope,
+        Analysis analysis
     ) {
         if (expression instanceof AndExpression and) {
-            resolveParameters(and.getLeftExpression(), sources, placeholders);
-            resolveParameters(and.getRightExpression(), sources, placeholders);
+            resolveParameters(and.getLeftExpression(), scope, analysis);
+            resolveParameters(and.getRightExpression(), scope, analysis);
             return;
         }
 
         if (expression instanceof OrExpression or) {
-            resolveParameters(or.getLeftExpression(), sources, placeholders);
-            resolveParameters(or.getRightExpression(), sources, placeholders);
+            resolveParameters(or.getLeftExpression(), scope, analysis);
+            resolveParameters(or.getRightExpression(), scope, analysis);
+            return;
+        }
+
+        if (expression instanceof NotExpression not) {
+            resolveParameters(not.getExpression(), scope, analysis);
             return;
         }
 
@@ -2007,52 +2162,77 @@ public final class QueryAnalyzer {
             for (Expression nestedExpression : parentheses) {
                 resolveParameters(
                     nestedExpression,
-                    sources,
-                    placeholders
+                    scope,
+                    analysis
                 );
             }
             return;
         }
 
+        if (expression instanceof ExistsExpression exists) {
+            if (exists.getRightExpression() instanceof ParenthesedSelect subquery) {
+                analyzePredicateSubquery(subquery, scope, analysis);
+            }
+
+            return;
+        }
+
         if (expression instanceof InExpression in) {
-            resolveInExpression(in, sources, placeholders);
+            resolveInExpression(in, scope, analysis);
             return;
         }
 
         if (expression instanceof LikeExpression like) {
-            resolveLikeExpression(like, sources, placeholders);
+            resolveLikeExpression(like, scope, analysis);
             return;
         }
 
         if (expression instanceof IsNullExpression isNull) {
-            resolveIsNullExpression(isNull, sources);
+            resolveIsNullExpression(isNull, scope);
             return;
         }
 
         if (expression instanceof Between between) {
-            resolveBetweenExpression(between, sources, placeholders);
+            resolveBetweenExpression(between, scope, analysis);
             return;
         }
 
         if (expression instanceof ComparisonOperator comparison) {
-            resolveParameterComparison(comparison, sources, placeholders);
+            resolveParameterComparison(comparison, scope, analysis);
         }
     }
 
-    private void resolveInExpression(InExpression in, List<Source> sources, Placeholders placeholders) {
+    /**
+     * Resolves one {@code IN} or {@code NOT IN} predicate. A tested direct
+     * column resolves against the level the predicate stands in, and a
+     * membership query is analyzed as the level inside it, whatever the tested
+     * value is, because the query states its own rows rather than values of
+     * that column.
+     */
+    private void resolveInExpression(InExpression in, Scope scope, Analysis analysis) {
         net.sf.jsqlparser.schema.Column column = directColumn(in.getLeftExpression());
+
+        if (in.getRightExpression() instanceof ParenthesedSelect subquery) {
+            if (column != null) {
+                resolveColumn(column, scope);
+            }
+
+            analyzePredicateSubquery(subquery, scope, analysis);
+
+            return;
+        }
 
         if (column == null) {
             return;
         }
 
-        dev.sqlcj.schema.Column schemaColumn = resolveColumn(column, sources).column();
+        dev.sqlcj.schema.Column schemaColumn = resolveColumn(column, scope).column();
 
         Expression rightExpression = in.getRightExpression();
 
         if (rightExpression instanceof ExpressionList<?> expressionList) {
             for (Expression expression : expressionList) {
-                resolveColumnValue(expression, schemaColumn, placeholders);
+                resolveColumnValue(expression, schemaColumn, analysis.placeholders());
             }
 
             return;
@@ -2061,17 +2241,19 @@ public final class QueryAnalyzer {
         resolveInExpression(
             rightExpression,
             schemaColumn,
-            sources,
-            placeholders
+            scope,
+            analysis
         );
     }
 
     private void resolveInExpression(
         Expression expression,
         dev.sqlcj.schema.Column schemaColumn,
-        List<Source> sources,
-        Placeholders placeholders
+        Scope scope,
+        Analysis analysis
     ) {
+        Placeholders placeholders = analysis.placeholders();
+
         Placeholder placeholder = placeholders.of(expression);
 
         if (placeholder != null) {
@@ -2083,15 +2265,15 @@ public final class QueryAnalyzer {
             resolveInExpression(
                 and.getLeftExpression(),
                 schemaColumn,
-                sources,
-                placeholders
+                scope,
+                analysis
             );
 
             resolveInExpression(
                 and.getRightExpression(),
                 schemaColumn,
-                sources,
-                placeholders
+                scope,
+                analysis
             );
 
             return;
@@ -2101,15 +2283,15 @@ public final class QueryAnalyzer {
             resolveInExpression(
                 or.getLeftExpression(),
                 schemaColumn,
-                sources,
-                placeholders
+                scope,
+                analysis
             );
 
             resolveInExpression(
                 or.getRightExpression(),
                 schemaColumn,
-                sources,
-                placeholders
+                scope,
+                analysis
             );
 
             return;
@@ -2124,8 +2306,8 @@ public final class QueryAnalyzer {
                 } else {
                     resolveParameters(
                         nestedExpression,
-                        sources,
-                        placeholders
+                        scope,
+                        analysis
                     );
                 }
             }
@@ -2155,9 +2337,11 @@ public final class QueryAnalyzer {
      */
     private void resolveLikeExpression(
         LikeExpression like,
-        List<Source> sources,
-        Placeholders placeholders
+        Scope scope,
+        Analysis analysis
     ) {
+        Placeholders placeholders = analysis.placeholders();
+
         Expression left = like.getLeftExpression();
         Expression right = like.getRightExpression();
 
@@ -2178,7 +2362,7 @@ public final class QueryAnalyzer {
                 return;
             }
 
-            dev.sqlcj.schema.Column schemaColumn = resolveColumn(testedColumn, sources).column();
+            dev.sqlcj.schema.Column schemaColumn = resolveColumn(testedColumn, scope).column();
 
             requireSupportedType(schemaColumn);
 
@@ -2201,7 +2385,7 @@ public final class QueryAnalyzer {
         ) {
             addCastParameter(
                 castPattern,
-                resolveColumn(testedColumn, sources).column().name(),
+                resolveColumn(testedColumn, scope).column().name(),
                 placeholders
             );
         }
@@ -2276,11 +2460,11 @@ public final class QueryAnalyzer {
      * tested value, so a tested value that is not a direct column is left to
      * the cast that types its own placeholder.
      */
-    private void resolveIsNullExpression(IsNullExpression isNull, List<Source> sources) {
+    private void resolveIsNullExpression(IsNullExpression isNull, Scope scope) {
         Expression tested = isNull.getLeftExpression();
 
         if (tested instanceof net.sf.jsqlparser.schema.Column column) {
-            resolveColumn(column, sources);
+            resolveColumn(column, scope);
         }
     }
 
@@ -2293,9 +2477,11 @@ public final class QueryAnalyzer {
      */
     private void resolveBetweenExpression(
         Between between,
-        List<Source> sources,
-        Placeholders placeholders
+        Scope scope,
+        Analysis analysis
     ) {
+        Placeholders placeholders = analysis.placeholders();
+
         Expression left = between.getLeftExpression();
         Expression start = between.getBetweenExpressionStart();
         Expression end = between.getBetweenExpressionEnd();
@@ -2307,7 +2493,7 @@ public final class QueryAnalyzer {
         net.sf.jsqlparser.schema.Column testedColumn = directColumn(left);
 
         if (testedColumn != null && (bindsValue(start, placeholders) || bindsValue(end, placeholders))) {
-            dev.sqlcj.schema.Column schemaColumn = resolveColumn(testedColumn, sources).column();
+            dev.sqlcj.schema.Column schemaColumn = resolveColumn(testedColumn, scope).column();
 
             resolveColumnValue(start, schemaColumn, placeholders);
             resolveColumnValue(end, schemaColumn, placeholders);
@@ -2321,14 +2507,24 @@ public final class QueryAnalyzer {
      * column's name. A placeholder inside the {@code = ANY(p)} form takes a
      * list of the compared column's values. Every other operand contributes
      * only the parameters its own cast placeholders state.
+     *
+     * <p>An operand that is a subquery states its own value rather than a
+     * column's, so it is analyzed as the level inside the one the comparison
+     * stands in and types no parameter of this comparison.
      */
     private void resolveParameterComparison(
         ComparisonOperator comparison,
-        List<Source> sources,
-        Placeholders placeholders
+        Scope scope,
+        Analysis analysis
     ) {
+        Placeholders placeholders = analysis.placeholders();
+
         Expression left = comparison.getLeftExpression();
         Expression right = comparison.getRightExpression();
+
+        if (resolveComparisonSubqueries(left, right, scope, analysis)) {
+            return;
+        }
 
         Placeholder leftPlaceholder = placeholders.of(left);
         Placeholder rightPlaceholder = placeholders.of(right);
@@ -2339,7 +2535,7 @@ public final class QueryAnalyzer {
         if (leftColumn != null && rightPlaceholder != null) {
             addParameter(
                 rightPlaceholder,
-                resolveColumn(leftColumn, sources).column(),
+                resolveColumn(leftColumn, scope).column(),
                 placeholders
             );
             return;
@@ -2348,7 +2544,7 @@ public final class QueryAnalyzer {
         if (leftPlaceholder != null && rightColumn != null) {
             addParameter(
                 leftPlaceholder,
-                resolveColumn(rightColumn, sources).column(),
+                resolveColumn(rightColumn, scope).column(),
                 placeholders
             );
             return;
@@ -2358,7 +2554,7 @@ public final class QueryAnalyzer {
             Expression listArgument = anyListArgument(right, placeholders);
 
             if (listArgument != null) {
-                resolveAnyListParameter(listArgument, leftColumn, sources, placeholders);
+                resolveAnyListParameter(listArgument, leftColumn, scope, placeholders);
                 return;
             }
         }
@@ -2370,7 +2566,7 @@ public final class QueryAnalyzer {
                 if (cast != null) {
                     addCastParameter(
                         cast,
-                        resolveColumn(leftColumn, sources).column().name(),
+                        resolveColumn(leftColumn, scope).column().name(),
                         placeholders
                     );
                     return;
@@ -2381,12 +2577,42 @@ public final class QueryAnalyzer {
                 if (cast != null) {
                     addCastParameter(
                         cast,
-                        resolveColumn(rightColumn, sources).column().name(),
+                        resolveColumn(rightColumn, scope).column().name(),
                         placeholders
                     );
                 }
             }
         }
+    }
+
+    /**
+     * Analyzes each operand of one comparison that is a subquery, as the level
+     * inside the one the comparison stands in, and reports whether the
+     * comparison compares one. No parameter rule of a comparison reads such an
+     * operand, so a comparison with one types no parameter of its own and
+     * leaves a placeholder beside it to the cast that states its type.
+     */
+    private boolean resolveComparisonSubqueries(
+        Expression left,
+        Expression right,
+        Scope scope,
+        Analysis analysis
+    ) {
+        boolean subquery = false;
+
+        if (left instanceof ParenthesedSelect leftSubquery) {
+            analyzePredicateSubquery(leftSubquery, scope, analysis);
+
+            subquery = true;
+        }
+
+        if (right instanceof ParenthesedSelect rightSubquery) {
+            analyzePredicateSubquery(rightSubquery, scope, analysis);
+
+            subquery = true;
+        }
+
+        return subquery;
     }
 
     /**
@@ -2460,10 +2686,10 @@ public final class QueryAnalyzer {
     private void resolveAnyListParameter(
         Expression argument,
         net.sf.jsqlparser.schema.Column column,
-        List<Source> sources,
+        Scope scope,
         Placeholders placeholders
     ) {
-        dev.sqlcj.schema.Column schemaColumn = resolveColumn(column, sources).column();
+        dev.sqlcj.schema.Column schemaColumn = resolveColumn(column, scope).column();
         Placeholder placeholder = placeholders.of(argument);
 
         if (placeholder == null) {
@@ -2702,8 +2928,10 @@ public final class QueryAnalyzer {
     private List<dev.sqlcj.schema.Column> resolveColumns(
         PlainSelect plainSelect,
         Analysis analysis,
-        List<Source> sources
+        Scope scope
     ) {
+        List<Source> sources = scope.sources();
+
         List<dev.sqlcj.schema.Column> columns = new ArrayList<>();
 
         for (SelectItem<?> selectItem : plainSelect.getSelectItems()) {
@@ -2733,7 +2961,7 @@ public final class QueryAnalyzer {
             net.sf.jsqlparser.schema.Column selectedColumn = directColumn(expression);
 
             if (selectedColumn != null) {
-                ResolvedColumn resolved = resolveColumn(selectedColumn, sources);
+                ResolvedColumn resolved = resolveColumn(selectedColumn, scope);
                 dev.sqlcj.schema.Column schemaColumn = resolved.column();
 
                 columns.add(
@@ -2926,41 +3154,49 @@ public final class QueryAnalyzer {
     }
 
     /**
-     * Resolves one column reference against the ordered query sources. A
-     * qualified reference resolves through the exposed source name, and an
-     * unqualified reference must be contained by exactly one source.
+     * Resolves one column reference against the levels in scope, innermost
+     * first, as PostgreSQL resolves a reference inside a subquery.
+     *
+     * <p>A qualified reference resolves through the innermost source of that
+     * exposed name. An unqualified reference resolves in the innermost level
+     * that has the column and is ambiguous only within that level, so the same
+     * column name in an enclosing level never makes a reference ambiguous. A
+     * reference no level has names every visible source, from the innermost
+     * level outward.
      */
-    private ResolvedColumn resolveColumn(net.sf.jsqlparser.schema.Column column, List<Source> sources) {
+    private ResolvedColumn resolveColumn(net.sf.jsqlparser.schema.Column column, Scope scope) {
         String columnName = column.getUnquotedColumnName();
         String qualifier = qualifier(column);
 
         if (qualifier != null) {
-            Source source = findSource(sources, qualifier);
+            Source source = findSource(scope, qualifier);
 
             return new ResolvedColumn(source, findColumn(source.table(), columnName));
         }
 
-        List<Source> matches = sources.stream()
-            .filter(source -> lookupColumn(source.table(), columnName).isPresent())
-            .toList();
+        for (Scope level = scope; level != null; level = level.enclosing()) {
+            List<Source> matches = level.sources().stream()
+                .filter(source -> lookupColumn(source.table(), columnName).isPresent())
+                .toList();
 
-        if (matches.size() > 1) {
-            throw new IllegalArgumentException(
-                "Ambiguous column reference '%s' in sources: %s"
-                    .formatted(columnName, sourceNames(matches))
-            );
+            if (matches.size() > 1) {
+                throw new IllegalArgumentException(
+                    "Ambiguous column reference '%s' in sources: %s"
+                        .formatted(columnName, sourceNames(matches))
+                );
+            }
+
+            if (!matches.isEmpty()) {
+                Source source = matches.get(0);
+
+                return new ResolvedColumn(source, findColumn(source.table(), columnName));
+            }
         }
 
-        if (matches.isEmpty()) {
-            throw new IllegalArgumentException(
-                "Column not found in sources %s: %s"
-                    .formatted(sourceNames(sources), columnName)
-            );
-        }
-
-        Source source = matches.get(0);
-
-        return new ResolvedColumn(source, findColumn(source.table(), columnName));
+        throw new IllegalArgumentException(
+            "Column not found in sources %s: %s"
+                .formatted(sourceNames(scope.visibleSources()), columnName)
+        );
     }
 
     private String qualifier(net.sf.jsqlparser.schema.Column column) {
@@ -2972,14 +3208,35 @@ public final class QueryAnalyzer {
     }
 
     private Source findSource(List<Source> sources, String name) {
+        return lookupSource(sources, name)
+            .orElseThrow(() -> unknownSourceQualifier(name));
+    }
+
+    /**
+     * The innermost source of one exposed name, which is the source a qualified
+     * reference reads: a source of the level the reference stands in before one
+     * of an enclosing level.
+     */
+    private Source findSource(Scope scope, String name) {
+        for (Scope level = scope; level != null; level = level.enclosing()) {
+            Optional<Source> source = lookupSource(level.sources(), name);
+
+            if (source.isPresent()) {
+                return source.get();
+            }
+        }
+
+        throw unknownSourceQualifier(name);
+    }
+
+    private Optional<Source> lookupSource(List<Source> sources, String name) {
         return sources.stream()
             .filter(source -> source.name().equalsIgnoreCase(name))
-            .findFirst()
-            .orElseThrow(
-                () -> new IllegalArgumentException(
-                    "Unknown source qualifier in query: " + name
-                )
-            );
+            .findFirst();
+    }
+
+    private IllegalArgumentException unknownSourceQualifier(String name) {
+        return new IllegalArgumentException("Unknown source qualifier in query: " + name);
     }
 
     private String sourceNames(List<Source> sources) {
