@@ -3223,6 +3223,96 @@ class PostgresIntegrationTest {
     }
 
     /**
+     * Covers derived sources end to end: a report over a left-joined common
+     * table expression and a read over a subquery source are generated,
+     * compiled, and executed against PostgreSQL, so the columns their bodies
+     * state are read through the generated result records, and an unmatched
+     * row reads the common table expression's column as {@code null}.
+     */
+    @Test
+    void shouldExecuteGeneratedDerivedSourcesAgainstPostgres() throws Exception {
+        execute(CONSTRAINT_SCHEMA);
+
+        Path classesDirectory = generateAndCompile(
+            CONSTRAINT_SCHEMA,
+            """
+                -- name: ListCustomerOrderTotals :many
+                WITH totals AS (SELECT customer_id, SUM(quantity)::int AS ordered
+                                FROM customer_orders
+                                WHERE quantity >= :minQuantity
+                                GROUP BY customer_id)
+                SELECT c.name, totals.ordered
+                FROM customers c
+                LEFT JOIN totals ON totals.customer_id = c.id
+                ORDER BY c.name;
+
+                -- name: ListRecentCustomerOrders :many
+                SELECT recent.id, recent.quantity
+                FROM (SELECT id, quantity
+                      FROM customer_orders
+                      WHERE customer_id = :customerId
+                      ORDER BY id DESC
+                      LIMIT :pageSize) recent
+                ORDER BY recent.id;
+                """
+        );
+
+        execute("INSERT INTO customers (id, name) VALUES (1, 'Alice'), (2, 'Bob')");
+
+        execute(
+            """
+                INSERT INTO customer_orders (id, customer_id, quantity)
+                VALUES (10, 1, 3), (20, 1, 4), (30, 1, 1)
+                """
+        );
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method totals = repository.getClass().getMethod(
+                "listCustomerOrderTotals",
+                Integer.class
+            );
+
+            List<?> reports = (List<?>) totals.invoke(repository, 2);
+
+            assertEquals(2, reports.size());
+
+            assertEquals(
+                List.of("name", "ordered"),
+                recordComponentNames(reports.get(0))
+            );
+
+            assertEquals("Alice", component(reports.get(0), "name"));
+            assertEquals(7, component(reports.get(0), "ordered"));
+
+            assertEquals("Bob", component(reports.get(1), "name"));
+            assertNull(component(reports.get(1), "ordered"));
+
+            Method recent = repository.getClass().getMethod(
+                "listRecentCustomerOrders",
+                Long.class,
+                Integer.class
+            );
+
+            List<?> orders = (List<?>) recent.invoke(repository, 1L, 2);
+
+            assertEquals(2, orders.size());
+
+            assertEquals(
+                List.of("id", "quantity"),
+                recordComponentNames(orders.get(0))
+            );
+
+            assertEquals(20L, component(orders.get(0), "id"));
+            assertEquals(4, component(orders.get(0), "quantity"));
+
+            assertEquals(30L, component(orders.get(1), "id"));
+            assertEquals(1, component(orders.get(1), "quantity"));
+        }
+    }
+
+    /**
      * Covers a returning insert: the database-generated serial values and the
      * target-table order of {@code RETURNING *} are read through the generated
      * typed result record.

@@ -144,16 +144,6 @@ class ReferenceServiceIntegrationTest {
             "LATERAL is not supported."
         ),
         new UnsupportedQuery(
-            "cte_source.sql",
-            "ListOpenTaskTitles",
-            "A common table expression used as a source is not supported: open_tasks"
-        ),
-        new UnsupportedQuery(
-            "from_subquery.sql",
-            "ListRecentTaskTitles",
-            "A subquery in FROM is not supported."
-        ),
-        new UnsupportedQuery(
             "multi_row_values.sql",
             "CreateTwoProjects",
             "INSERT requires a single VALUES row."

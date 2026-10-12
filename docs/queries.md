@@ -77,14 +77,49 @@ configuration entry.
 
 ### Sources
 
-- The `FROM` item must be a table of that schema, optionally with an alias. A
-  `LATERAL` source is rejected as `LATERAL is not supported.` and a subquery
-  source as `A subquery in FROM is not supported.`
-- A `FROM` or `JOIN` source that names a `WITH` clause of its own query, which
-  in PostgreSQL reads that query and not the table of the same name, is rejected
-  as `A common table expression used as a source is not supported: <name>`
-  before the schema is consulted, so a `WITH` clause named like a table never
-  reads that table.
+- The `FROM` item must be a table of that schema, a `WITH` clause in scope, or a
+  subquery, optionally with an alias. A `LATERAL` source is rejected as
+  `LATERAL is not supported.`, before the source is resolved, and a doubly
+  parenthesized source, such as `FROM ((SELECT ...)) s`, as
+  `Only table sources are supported.`
+- A `FROM` or `JOIN` source whose unqualified name matches a `WITH` clause in
+  scope reads that clause and not the table of the same name, as PostgreSQL
+  resolves it, matched case-insensitively and taking the innermost declaration
+  of that name. A schema-qualified name always names a table.
+- A `WITH` clause and a subquery source are **derived sources**: the source's
+  columns are the result columns of its own `SELECT`, in order, with the names,
+  types, enum types, arrays, and nullability that `SELECT` states. A derived
+  source returns no shared `<TableName>Row` record, so `SELECT * FROM <name>`
+  over one returns this query's own result record even when the source is named
+  like a table, and every column of a left-joined derived source is nullable,
+  as it is for a left-joined table.
+- The body of a derived source is analyzed exactly like a top-level `SELECT`:
+  it is classified inside its own parentheses, so a set operation or another
+  statement form there is rejected with that diagnostic; its sources resolve and
+  its joins follow the join rules; its projection follows the projection rules,
+  including the rejection of a computed item without a cast and an alias; and
+  its `ON`, `WHERE`, `LIMIT`, and `OFFSET` placeholders are typed by those
+  clause rules, so `WHERE total = $1` inside a `WITH` body needs no cast.
+- A subquery source requires an alias,
+  `A subquery in FROM requires an alias, such as (SELECT ...) AS recent.`, and
+  sees no source of the query around it, as PostgreSQL scopes a subquery that is
+  not `LATERAL`.
+- A column list on a `WITH` name or on a subquery alias, such as
+  `WITH recent (n) AS (...)` or `(SELECT ...) AS s(n)`, is rejected as
+  `A column list on <name> is not supported; alias the columns in its SELECT
+  instead.`, and a derived source two of whose columns expose one name, compared
+  ignoring case, as
+  `Derived source <name> has more than one column named <column>; give each a
+  distinct alias.`
+- Every `WITH` clause of every statement is analyzed in the order the query
+  writes it, whether or not a source reads it, so its placeholders are typed by
+  its own clause rules. A clause sees the clauses written before it in its own
+  list and those of every enclosing query, so a clause named like a table reads
+  that table inside its own body. `MATERIALIZED` and `NOT MATERIALIZED` are
+  accepted, while `WITH RECURSIVE` is rejected as
+  `WITH RECURSIVE is not supported.` and a data-modifying body as
+  `A data-modifying statement in WITH is not supported; run it as a query of its
+  own.`
 - sqlcj models one namespace, so a source resolves by its unqualified name:
   `users`, `public.users`, and `"public"."users"` are one table, matched without
   SQL identifier delimiters and case-insensitively. A source qualified with any
@@ -93,8 +128,9 @@ configuration entry.
   target of an `INSERT`, an `UPDATE`, and a `DELETE` alike. `search_path` is
   not followed; see
   [Schema Snapshot Input](postgresql.md#schema-snapshot-input).
-- A table may be joined with `JOIN`, `INNER JOIN`, `LEFT JOIN`, or
-  `LEFT OUTER JOIN`, and inner and left joins may be chained in any order.
+- A table or a derived source may be joined with `JOIN`, `INNER JOIN`,
+  `LEFT JOIN`, or `LEFT OUTER JOIN`, and inner and left joins may be chained in
+  any order.
 - Every other join is rejected, and a join that can be written as a supported
   one says what to write:
   - `FULL JOIN is not supported.`
@@ -104,10 +140,10 @@ configuration entry.
   - `JOIN ... USING is not supported; write the join condition with ON.`
   - `A comma-separated FROM list is not supported; write JOIN ... ON with the join condition.`
 
-  A `LATERAL` or subquery join source is reported as the same unsupported
-  source as a `FROM` item of that kind, before the join kind, and every
-  remaining modifier — a bare `OUTER`, `SEMI`, `APPLY`, `STRAIGHT`, `GLOBAL`,
-  and a join hint — is rejected as
+  A `LATERAL` join source is reported as the same unsupported source as a
+  `FROM` item of that kind, before the join kind, while every other joined
+  source is resolved after it, and every remaining modifier — a bare `OUTER`,
+  `SEMI`, `APPLY`, `STRAIGHT`, `GLOBAL`, and a join hint — is rejected as
   `Only unmodified INNER JOIN and LEFT JOIN clauses are supported.`
 - Each join requires exactly one `ON` condition, which may be any boolean
   expression, including `ON TRUE`. Its column references, qualified or not,
@@ -595,9 +631,15 @@ column of the target table either, so it is rejected as a computed item, with or
 without an alias.
 
 Multi-row `VALUES`, `INSERT ... SELECT`, `UPDATE ... FROM`, and
-`DELETE ... USING` are rejected in every write, and common table expressions in
-a returning write, while an accepted `ON CONFLICT` clause is analyzed the same
-way with and without `RETURNING`.
+`DELETE ... USING` are rejected in every write, while an accepted
+`ON CONFLICT` clause is analyzed the same way with and without `RETURNING`.
+
+A write may declare `WITH` clauses of its own, with or without `RETURNING`.
+Each body is analyzed by the rules [Sources](#sources) states, so its
+placeholders are typed from its own columns, while the returned columns stay
+the write target's. No clause of a supported write resolves a source beside its
+target, so such a clause is read only by a predicate subquery, which reaches
+the database as written.
 
 ## Parameters
 
@@ -621,6 +663,10 @@ string literal, a quoted identifier, or a comment is not a parameter.
   `pageSize` rather than `limit`.
 - The Java type of a placeholder is the type of the column it is compared with,
   assigned to, or inserted into.
+- The clause rules apply in an analyzed nested `SELECT` — a `WITH` body and a
+  subquery source — exactly as they do at top level, so a placeholder of
+  such a body's `ON`, `WHERE`, `LIMIT`, or `OFFSET` clause is typed and named
+  from its own clause without a cast.
 - A placeholder written as the direct operand of `::type` or
   `CAST(... AS type)` is typed by that cast instead, wherever it appears in an
   accepted statement: a projection, a join `ON` condition, `WHERE`, `GROUP BY`,
@@ -640,7 +686,10 @@ string literal, a quoted identifier, or a comment is not a parameter.
   column — so `name = $1::text` names `name` as
   `name = $1` does. An indexed cast placeholder that is the whole `LIMIT` row
   count or `OFFSET` value is named `limit` or `offset`, as an uncast one is.
-  Every other indexed cast placeholder is named `param<N>`
+  These names come from the clause the placeholder stands in, in an analyzed
+  nested `SELECT` as at top level, so `orders.total = $1::numeric` in a `WITH`
+  body names `total`. Every other indexed cast placeholder, including one in a
+  clause or a nested query sqlcj does not analyze, is named `param<N>`
   after its own index, as in `param1` for `$1`, and colliding names take the
   usual numeric suffix.
 - A column written with an array subscript or slice names no parameter, because
@@ -940,6 +989,10 @@ query name, and its header line.
 - A set operation, `UNION`, `UNION ALL`, `INTERSECT`, or `EXCEPT`, written
   directly or inside parentheses, rejected as
   `UNION, INTERSECT, and EXCEPT are not supported; write one query per SELECT.`
+  A `WITH` body and a subquery source are classified inside their own
+  parentheses the same way, so a set operation there is rejected with that
+  diagnostic and another statement form, such as a `VALUES` body, with the
+  statement diagnostic.
 - A result expression that is not a direct column, a wildcard, an aliased
   `COUNT(*)`, or an aliased cast, including another function call, another
   aggregate, and a literal. A `COUNT(*)` without an alias, a cast projection
@@ -949,9 +1002,14 @@ query name, and its header line.
   `lower(name) AS n`, `name || 'x' AS n`, and the `FILTER` and `OVER` forms are
   rejected as `Cannot infer the type of COUNT(*) OVER () in SELECT; state it
   with a cast and an alias, such as SUM(amount)::numeric AS total`.
-- A `FROM` or `JOIN` source that is not a table of the schema: a `LATERAL`
-  source, a subquery source, and a source that names a `WITH` clause of its own
-  query, each with the diagnostic [Sources](#sources) states.
+- A `FROM` or `JOIN` source outside the subset: a `LATERAL` source, a doubly
+  parenthesized source, a subquery source without an alias, a column list on a
+  `WITH` name or on a subquery alias, and a derived source two of whose columns
+  expose one name, each with the diagnostic [Sources](#sources) states.
+- A `WITH` clause outside the subset, on a read and on a write alike: a
+  `WITH RECURSIVE` clause and a data-modifying body, each with the diagnostic
+  [Sources](#sources) states. Both are rejected whether or not a source reads
+  the clause, because every body is analyzed.
 - A join kind outside a plain inner or left join, each with the diagnostic
   [Sources](#sources) states, which says what to write instead for `RIGHT`,
   `CROSS`, `NATURAL`, `USING`, and a comma-separated `FROM` list, and a join
@@ -1032,8 +1090,7 @@ query name, and its header line.
   `UPDATE ... FROM` or joined `UPDATE`, rejected as
   `UPDATE ... FROM and joined updates are not supported.`; and a
   `DELETE ... USING` or joined `DELETE`, rejected as
-  `DELETE ... USING and joined deletes are not supported.` A common table
-  expression in a returning write is rejected too.
+  `DELETE ... USING and joined deletes are not supported.`
 - Any annotation other than `:one`, `:optional`, `:many`, and `:exec`.
 
 An unexpected failure of schema parsing, query analysis, or generation is not a
@@ -1056,8 +1113,10 @@ them:
   `LIKE` with a literal pattern, a range whose bounds are both literal such as
   `id BETWEEN 1 AND 10`, `IN` with a subquery, or `= ANY` over something other
   than a placeholder, such as `id = ANY('{1,2}')`,
-- a common table expression whose name no source reads, and subqueries outside
-  the `FROM` item,
+- subqueries outside a `FROM` or `JOIN` item, such as `EXISTS`,
+  `IN (SELECT ...)`, a scalar comparison subquery, and one in a projection,
+  `GROUP BY`, `HAVING`, `ORDER BY`, a written value, or `RETURNING`, whose
+  tables and columns PostgreSQL rather than sqlcj checks,
 - the unique index an accepted `ON CONFLICT` target matches, the constraint an
   `ON CONSTRAINT` target names, the column references of an `EXCLUDED` value
   that is not exactly `EXCLUDED.column`, and a conflict-predicate column that
@@ -1065,9 +1124,9 @@ them:
 
 A clause that is not analyzed still binds the placeholders a cast types inside
 it, in textual order, and nothing else of it is checked. A cast placeholder in a
-`GROUP BY`, `HAVING`, `ORDER BY`, `WITH` body, or subquery therefore generates
-one typed method parameter while PostgreSQL rather than sqlcj checks the
-surrounding expression, including its tables and columns.
+`GROUP BY`, `HAVING`, `ORDER BY`, or subquery therefore generates one typed
+method parameter while PostgreSQL rather than sqlcj checks the surrounding
+expression, including its tables and columns.
 
 sqlcj itself provides no macros, dynamic `IN` expansion, or query-building API.
 The `= ANY` list predicate is the only analyzed array operator. An array
@@ -1283,6 +1342,36 @@ Reads:
   `PostgresIntegrationTest.shouldExecuteGeneratedFilteredLeftJoinAgainstPostgres`
   executes a filtered left join against PostgreSQL 16 whose filtered-out and
   unmatched rows read the joined components as `null`.
+- `QueryAnalyzerTest.shouldResolveCommonTableExpressionSource`,
+  `QueryAnalyzerTest.shouldResolveChainedCommonTableExpressions`,
+  `QueryAnalyzerTest.shouldReadTheSchemaTableInsideACommonTableExpressionNamedLikeIt`,
+  `QueryAnalyzerTest.shouldResolveCommonTableExpressionDeclaredInsideASubquerySource`,
+  `QueryAnalyzerTest.shouldResolveSubquerySourceOfAJoin`,
+  `QueryAnalyzerTest.shouldReadColumnsOfALeftJoinedDerivedSourceAsNullable`,
+  `QueryAnalyzerTest.shouldResolveCountAndCastColumnsThroughADerivedSource`,
+  `QueryAnalyzerTest.shouldResolveQuerySpecificResultForAllColumnsOfADerivedSource`,
+  `QueryAnalyzerTest.shouldBindDerivedSourceParametersInTextualOrder`,
+  `QueryAnalyzerTest.shouldAnalyzeACommonTableExpressionReadOnlyInsideAPredicateSubquery`,
+  `QueryAnalyzerTest.shouldAcceptMaterializedCommonTableExpression`,
+  `QueryAnalyzerTest.shouldRejectAnOuterSourceReferenceInsideASubquerySource`, and
+  `QueryAnalyzerTest.shouldRejectExcludedDerivedSourceForm` cover the derived
+  sources: a `WITH` source whose placeholder is typed and named from its own
+  column, chained clauses, a clause named like a table whose body reads that
+  table, a clause declared inside a subquery source, a joined subquery, the
+  nullable columns of a left-joined derived source selected by name and by
+  wildcard, an aliased `COUNT(*)` and an aliased cast read through a derived
+  source, the query-specific result of `SELECT *` over one, the textual binding
+  order across a `WITH` body, a subquery source, and the outer query, a clause
+  read only inside a predicate subquery, the accepted `MATERIALIZED` spellings,
+  the outer source a subquery body does not see, and every rejected
+  derived-source and `WITH` form, including a data-modifying body reported
+  without an internal error;
+  `SqlcjCompilerIntegrationTest.shouldGenerateCompilableJavaForDerivedSources`
+  compiles a repository over a left-joined `WITH` report and a paged subquery
+  source, and
+  `PostgresIntegrationTest.shouldExecuteGeneratedDerivedSourcesAgainstPostgres`
+  executes both against PostgreSQL 16, reading the unmatched report row's
+  derived column as `null`.
 - `QueryAnalyzerTest.shouldResolveRowTableForFullRowSelect`,
   `QueryAnalyzerTest.shouldNotResolveRowTableForQuerySpecificResult`,
   `QueryAnalyzerTest.shouldNotResolveRowTableForJoinedWildcard`, and
@@ -1299,7 +1388,11 @@ Writes and `RETURNING`:
   `QueryAnalyzerTest.shouldRejectUnsupportedReturningItem`,
   `QueryAnalyzerTest.shouldRejectUnknownReturningColumn`, and
   `QueryAnalyzerTest.shouldRejectExcludedReturningWriteForm` cover the write
-  shapes.
+  shapes, and
+  `QueryAnalyzerTest.shouldAnalyzeReturningWriteWithACommonTableExpression` and
+  `QueryAnalyzerTest.shouldAnalyzeCommonTableExpressionOfAWriteWithoutReturning`
+  cover the `WITH` clause of a returning and of an `:exec` write, whose body
+  types its own placeholders while the returned columns stay the target's.
 - `QueryAnalyzerTest.shouldNameInsertReturningColumnsFromTheirAliases`,
   `QueryAnalyzerTest.shouldNameUpdateReturningColumnFromABareAlias`,
   `QueryAnalyzerTest.shouldNameDeleteReturningColumnQualifiedThroughTheTargetAlias`,
@@ -1382,18 +1475,20 @@ Unsupported queries and internal errors:
   parentheses, the `VALUES`, `TABLE`, `MERGE`, `TRUNCATE`, `EXPLAIN`,
   `EXECUTE`, `CREATE TABLE`, and `SET` statements, a window and a
   concatenation projection, a computed `RETURNING` item, the `RIGHT`, `FULL`,
-  `USING`, `NATURAL`, `CROSS`, comma, and `LATERAL` joins, a `FROM` subquery, a
-  common table expression used as a source and one named like a schema table,
-  a multi-row `VALUES`, an `INSERT ... SELECT` on `:exec` and with
+  `USING`, `NATURAL`, `CROSS`, comma, and `LATERAL` joins, a column list on a
+  subquery alias, a subquery source without an alias, a `WITH RECURSIVE`
+  clause, a data-modifying `WITH` body, a multi-row `VALUES`, an
+  `INSERT ... SELECT` on `:exec` and with
   `RETURNING`, and an `:exec` `UPDATE ... FROM`, comma-joined `UPDATE`,
   `DELETE ... USING`, and joined `DELETE`, while
   `QueryAnalyzerTest.shouldRejectUnsupportedCountProjectionForm`,
   `QueryAnalyzerTest.shouldRejectUnsupportedJoinModifier`,
   `QueryAnalyzerTest.shouldRejectUnsupportedReturningItem`,
-  `QueryAnalyzerTest.shouldRejectExcludedReturningWriteForm`, and
+  `QueryAnalyzerTest.shouldRejectExcludedReturningWriteForm`,
+  `QueryAnalyzerTest.shouldRejectExcludedDerivedSourceForm`, and
   `QueryAnalyzerTest.shouldRejectParenthesizedInsertQuerySource` cover the
-  projection, join, and write rejections per form, including the modifiers that
-  keep the general join rejection, and
+  projection, join, derived-source, and write rejections per form, including
+  the modifiers that keep the general join rejection, and
   `QueryAnalyzerTest.shouldAnalyzeParenthesizedSelectAsTheQueryItEncloses` and
   `QueryAnalyzerTest.shouldAnalyzeInsertWhoseValuesRowIsParenthesized` cover
   the doubly parenthesized read that analyzes like the query it encloses and
@@ -1556,9 +1651,8 @@ Reference service:
   covers the whole located diagnostic line, and the absence of generated
   output, of every entry of the reference service's unsupported query
   catalogue: the two set operations, the `RIGHT`, `FULL`, `USING`, `NATURAL`,
-  `CROSS`, comma, and `LATERAL` joins, a common table expression used as a
-  source, a `FROM` subquery, a multi-row `VALUES`, an `INSERT ... SELECT`, an
-  `UPDATE ... FROM`, a `DELETE ... USING`, an uncast `lower(:email)`, and a
-  placeholder beside a subscripted column, and
+  `CROSS`, comma, and `LATERAL` joins, a multi-row `VALUES`, an
+  `INSERT ... SELECT`, an `UPDATE ... FROM`, a `DELETE ... USING`, an uncast
+  `lower(:email)`, and a placeholder beside a subscripted column, and
   `ReferenceServiceIntegrationTest.shouldCatalogueExactlyTheUnsupportedQueryFiles`
   covers that the catalogue directory holds exactly those queries.

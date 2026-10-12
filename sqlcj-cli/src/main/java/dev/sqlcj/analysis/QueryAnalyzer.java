@@ -34,14 +34,17 @@ import net.sf.jsqlparser.expression.operators.relational.NotEqualsTo;
 import net.sf.jsqlparser.expression.operators.relational.ParenthesedExpressionList;
 import net.sf.jsqlparser.schema.MultiPartName;
 import net.sf.jsqlparser.schema.Table;
+import net.sf.jsqlparser.statement.ParenthesedStatement;
 import net.sf.jsqlparser.statement.ReturningClause;
 import net.sf.jsqlparser.statement.Statement;
 import net.sf.jsqlparser.statement.create.table.Index;
 import net.sf.jsqlparser.statement.delete.Delete;
+import net.sf.jsqlparser.statement.delete.ParenthesedDelete;
 import net.sf.jsqlparser.statement.insert.ConflictActionType;
 import net.sf.jsqlparser.statement.insert.Insert;
 import net.sf.jsqlparser.statement.insert.InsertConflictAction;
 import net.sf.jsqlparser.statement.insert.InsertConflictTarget;
+import net.sf.jsqlparser.statement.insert.ParenthesedInsert;
 import net.sf.jsqlparser.statement.select.AllColumns;
 import net.sf.jsqlparser.statement.select.AllTableColumns;
 import net.sf.jsqlparser.statement.select.FromItem;
@@ -56,6 +59,7 @@ import net.sf.jsqlparser.statement.select.SelectItem;
 import net.sf.jsqlparser.statement.select.SetOperationList;
 import net.sf.jsqlparser.statement.select.Values;
 import net.sf.jsqlparser.statement.select.WithItem;
+import net.sf.jsqlparser.statement.update.ParenthesedUpdate;
 import net.sf.jsqlparser.statement.update.Update;
 import net.sf.jsqlparser.statement.update.UpdateSet;
 
@@ -116,13 +120,34 @@ public final class QueryAnalyzer {
     /** The rejection of a {@code LATERAL} source. */
     private static final String LATERAL_REJECTION = "LATERAL is not supported.";
 
-    /** The rejection of a subquery source. */
-    private static final String FROM_SUBQUERY_REJECTION = """
-        A subquery in FROM is not supported.""";
+    /**
+     * The rejection of a subquery source without an alias, which exposes no
+     * name its columns could be read through.
+     */
+    private static final String UNALIASED_FROM_SUBQUERY_REJECTION = """
+        A subquery in FROM requires an alias, such as (SELECT ...) AS recent.""";
 
-    /** The rejection of a source that names a common table expression. */
-    private static final String CTE_SOURCE_REJECTION = """
-        A common table expression used as a source is not supported: %s""";
+    /**
+     * The rejection of a column list on a derived source, written on a
+     * {@code WITH} name or on a subquery alias, which renames the columns of
+     * its {@code SELECT} by position.
+     */
+    private static final String DERIVED_SOURCE_COLUMN_LIST_REJECTION = """
+        A column list on %s is not supported; alias the columns in its SELECT instead.""";
+
+    /**
+     * The rejection of a derived source two of whose columns expose one name,
+     * which makes a reference to that name ambiguous.
+     */
+    private static final String DERIVED_SOURCE_COLUMN_NAME_REJECTION = """
+        Derived source %s has more than one column named %s; give each a distinct alias.""";
+
+    /** The rejection of a recursive {@code WITH} clause. */
+    private static final String RECURSIVE_WITH_REJECTION = "WITH RECURSIVE is not supported.";
+
+    /** The rejection of a {@code WITH} body that writes rows. */
+    private static final String DATA_MODIFYING_WITH_REJECTION = """
+        A data-modifying statement in WITH is not supported; run it as a query of its own.""";
 
     /** The rejection of an {@code INSERT} whose rows come from a query. */
     private static final String INSERT_SELECT_REJECTION = """
@@ -173,8 +198,48 @@ public final class QueryAnalyzer {
      * its alias when present and otherwise its table name. A left-joined
      * source contributes no row when the join finds no match, so every column
      * read from it is nullable regardless of its schema declaration.
+     *
+     * <p>A derived source — a common table expression or a subquery source —
+     * carries the result columns of its own {@code SELECT} under its exposed
+     * name instead of a schema table's columns.
      */
-    private record Source(String name, dev.sqlcj.schema.Table table, boolean leftJoined) {
+    private record Source(
+        String name,
+        dev.sqlcj.schema.Table table,
+        boolean derived,
+        boolean leftJoined
+    ) {
+
+        /**
+         * The schema's declared name of the table whose complete row this
+         * source contributes, and {@code null} for a derived source, whose
+         * columns are specific to the query that declares it.
+         */
+        private String rowTable() {
+            return derived
+                ? null
+                : table.name();
+        }
+    }
+
+    /**
+     * The inputs every analyzed {@code SELECT} of one statement shares: the
+     * parsed source, the schema it resolves against, and the placeholders its
+     * clauses type.
+     */
+    private record Analysis(ParsedSql parsedSql, Schema schema, Placeholders placeholders) {
+    }
+
+    /**
+     * The analyzed facts of one {@code SELECT}: the name the query writes for
+     * its first source, its ordered sources, and its result columns in
+     * selected order, which are the columns a derived source exposes.
+     */
+    private record AnalyzedSelect(
+        String table,
+        List<Source> sources,
+        List<dev.sqlcj.schema.Column> columns
+    ) {
     }
 
     /** One column reference resolved against the ordered query sources. */
@@ -384,11 +449,12 @@ public final class QueryAnalyzer {
     }
 
     /**
-     * Classifies a {@code SELECT} statement by the query it writes inside its
-     * parentheses, at any depth, so a parenthesized query is the query it
-     * encloses. A set operation and every other query form, such as a
-     * {@code VALUES} or {@code TABLE} statement, states no single supported
-     * query, so it is rejected before the annotation is checked.
+     * Analyzes a {@code SELECT} statement, which is classified by the query it
+     * writes inside its parentheses, at any depth, so a parenthesized query is
+     * the query it encloses. The analyzed read is the top-level statement, so
+     * the annotation, the row table, and the query model are decided here,
+     * while the sources, the result columns, and the clause placeholders follow
+     * the rules every analyzed {@code SELECT} shares.
      */
     private QueryModel analyzeSelectStatement(
         Query query,
@@ -396,6 +462,60 @@ public final class QueryAnalyzer {
         Select select,
         Schema schema
     ) {
+        List<Select> selects = parenthesisLevels(select);
+
+        PlainSelect plainSelect = requirePlainSelect(selects);
+
+        requireResultQueryType(query);
+
+        Analysis analysis = new Analysis(parsedSql, schema, toPlaceholders(parsedSql, schema));
+
+        AnalyzedSelect analyzed = analyzePlainSelect(
+            plainSelect,
+            analysis,
+            analyzeCommonTableExpressions(selects, analysis, List.of())
+        );
+
+        return toQueryModel(
+            query,
+            parsedSql,
+            analyzed.table(),
+            toQueryColumns(analyzed.columns()),
+            analysis.placeholders(),
+            resolveSelectRowTable(plainSelect, analyzed.sources())
+        );
+    }
+
+    /**
+     * Analyzes one nested {@code SELECT} by the rules of a top-level read: it
+     * is classified inside its own parentheses, its own {@code WITH} list is
+     * analyzed beside the common table expressions of the queries around it,
+     * and its sources, result columns, and clause placeholders are resolved as
+     * a top-level read's are. Its annotation, its row table, and the query
+     * model stay the top-level statement's own facts.
+     */
+    private AnalyzedSelect analyzeNestedSelect(
+        Select select,
+        Analysis analysis,
+        List<Source> commonTableExpressions
+    ) {
+        List<Select> selects = parenthesisLevels(select);
+
+        PlainSelect plainSelect = requirePlainSelect(selects);
+
+        return analyzePlainSelect(
+            plainSelect,
+            analysis,
+            analyzeCommonTableExpressions(selects, analysis, commonTableExpressions)
+        );
+    }
+
+    /**
+     * The {@code SELECT} of each parenthesis level of one query, outermost
+     * first, because a parenthesized query is the query it encloses, at any
+     * depth, and each level may declare a {@code WITH} list of its own.
+     */
+    private List<Select> parenthesisLevels(Select select) {
         List<Select> selects = new ArrayList<>();
         Select enclosed = select;
 
@@ -407,14 +527,21 @@ public final class QueryAnalyzer {
             selects.add(enclosed);
         }
 
+        return selects;
+    }
+
+    /**
+     * Requires the query a {@code SELECT} encloses to be a single plain
+     * {@code SELECT}. A set operation and every other query form, such as a
+     * {@code VALUES} or {@code TABLE} statement, states no single supported
+     * query, so it is rejected before the annotation is checked and before any
+     * {@code WITH} body is analyzed.
+     */
+    private PlainSelect requirePlainSelect(List<Select> selects) {
+        Select enclosed = selects.get(selects.size() - 1);
+
         if (enclosed instanceof PlainSelect plainSelect) {
-            return analyzeSelect(
-                query,
-                parsedSql,
-                plainSelect,
-                commonTableExpressionNames(selects),
-                schema
-            );
+            return plainSelect;
         }
 
         if (enclosed instanceof SetOperationList) {
@@ -425,12 +552,56 @@ public final class QueryAnalyzer {
     }
 
     /**
-     * The names the {@code WITH} clauses of one analyzed query declare, which a
-     * source of that query may name instead of a schema table, as PostgreSQL
-     * resolves it.
+     * Analyzes one plain {@code SELECT} against the common table expressions in
+     * scope: its sources, its result columns, and the parameters its join
+     * conditions, {@code WHERE}, and pagination clauses type.
      */
-    private List<String> commonTableExpressionNames(List<Select> selects) {
-        List<String> names = new ArrayList<>();
+    private AnalyzedSelect analyzePlainSelect(
+        PlainSelect plainSelect,
+        Analysis analysis,
+        List<Source> commonTableExpressions
+    ) {
+        List<Source> sources = resolveSources(plainSelect, analysis, commonTableExpressions);
+
+        List<dev.sqlcj.schema.Column> columns = resolveColumns(plainSelect, analysis, sources);
+
+        resolveBindingParameters(plainSelect, sources, analysis.placeholders());
+
+        return new AnalyzedSelect(
+            declaredSourceName(plainSelect.getFromItem(), sources.get(0)),
+            sources,
+            columns
+        );
+    }
+
+    /**
+     * The name the query writes for its first source, which the analyzed model
+     * carries as the query's table: the table's own name as the query spells
+     * it, and the exposed name of a derived source, which names no table.
+     */
+    private String declaredSourceName(FromItem fromItem, Source source) {
+        return source.derived()
+            ? source.name()
+            : ((Table) fromItem).getUnquotedName();
+    }
+
+    /**
+     * Analyzes the {@code WITH} items each parenthesis level of one query
+     * declares, in the order the query writes them, and reports the derived
+     * sources they declare after the ones the queries around it declared.
+     *
+     * <p>Every body is analyzed, whether or not a source reads it, so its
+     * placeholders are typed by its own clause rules. A body sees the common
+     * table expressions written before it and those of every enclosing query,
+     * so a name declared here reads the schema table of that name inside its
+     * own body.
+     */
+    private List<Source> analyzeCommonTableExpressions(
+        List<Select> selects,
+        Analysis analysis,
+        List<Source> commonTableExpressions
+    ) {
+        List<Source> scope = new ArrayList<>(commonTableExpressions);
 
         for (Select select : selects) {
             List<WithItem<?>> withItems = select.getWithItemsList();
@@ -440,40 +611,82 @@ public final class QueryAnalyzer {
             }
 
             for (WithItem<?> withItem : withItems) {
-                names.add(withItem.getUnquotedAliasName());
+                scope.add(analyzeCommonTableExpression(withItem, analysis, List.copyOf(scope)));
             }
         }
 
-        return List.copyOf(names);
+        return List.copyOf(scope);
     }
 
-    private QueryModel analyzeSelect(
-        Query query,
-        ParsedSql parsedSql,
-        PlainSelect plainSelect,
-        List<String> commonTableExpressions,
-        Schema schema
+    /**
+     * Analyzes the {@code WITH} items of one statement, which are the only ones
+     * a write declares, because no clause of a supported write reads a source
+     * beside its target.
+     */
+    private void analyzeCommonTableExpressions(List<WithItem<?>> withItems, Analysis analysis) {
+        if (withItems == null) {
+            return;
+        }
+
+        List<Source> scope = new ArrayList<>();
+
+        for (WithItem<?> withItem : withItems) {
+            scope.add(analyzeCommonTableExpression(withItem, analysis, List.copyOf(scope)));
+        }
+    }
+
+    /**
+     * Analyzes one {@code WITH} item into the derived source it declares, whose
+     * columns are its body's result columns. A recursive item reads itself, and
+     * a data-modifying one writes rows, neither of which this subset models.
+     */
+    private Source analyzeCommonTableExpression(
+        WithItem<?> withItem,
+        Analysis analysis,
+        List<Source> commonTableExpressions
     ) {
-        requireResultQueryType(query);
+        if (withItem.isRecursive()) {
+            throw new UnsupportedOperationException(RECURSIVE_WITH_REJECTION);
+        }
 
-        Table table = getTable(plainSelect, commonTableExpressions);
+        Select body = requireSelectBody(withItem);
+        String name = withItem.getUnquotedAliasName();
 
-        List<Source> sources = resolveSources(plainSelect, table, commonTableExpressions, schema);
+        if (withItem.getWithItemList() != null) {
+            throw new UnsupportedOperationException(
+                DERIVED_SOURCE_COLUMN_LIST_REJECTION.formatted(name)
+            );
+        }
 
-        List<QueryColumn> columns = resolveColumns(plainSelect, parsedSql, sources, schema);
-
-        Placeholders placeholders = toPlaceholders(parsedSql, schema);
-
-        resolveBindingParameters(plainSelect, sources, placeholders);
-
-        return toQueryModel(
-            query,
-            parsedSql,
-            table.getUnquotedName(),
-            columns,
-            placeholders,
-            resolveSelectRowTable(plainSelect, sources)
+        return toDerivedSource(
+            name,
+            analyzeNestedSelect(body, analysis, commonTableExpressions).columns(),
+            false
         );
+    }
+
+    /**
+     * The {@code SELECT} one {@code WITH} item states inside its parentheses. A
+     * body that writes rows is rejected from the parsed statement kind, because
+     * reading such a body as a {@code SELECT} is an error of the parser's own
+     * model, and every other body states no query at all.
+     */
+    private Select requireSelectBody(WithItem<?> withItem) {
+        ParenthesedStatement statement = withItem.getParenthesedStatement();
+
+        if (statement instanceof ParenthesedSelect select) {
+            return select.getSelect();
+        }
+
+        if (
+            statement instanceof ParenthesedInsert
+                || statement instanceof ParenthesedUpdate
+                || statement instanceof ParenthesedDelete
+        ) {
+            throw new UnsupportedOperationException(DATA_MODIFYING_WITH_REJECTION);
+        }
+
+        throw new UnsupportedOperationException(UNSUPPORTED_STATEMENT_REJECTION);
     }
 
     private QueryModel analyzeInsert(Query query, ParsedSql parsedSql, Insert insert, Schema schema) {
@@ -485,6 +698,13 @@ public final class QueryAnalyzer {
         Table table = insert.getTable();
         Source source = toSource(table, schema);
 
+        Placeholders placeholders = toPlaceholders(parsedSql, schema);
+
+        analyzeCommonTableExpressions(
+            insert.getWithItemsList(),
+            new Analysis(parsedSql, schema, placeholders)
+        );
+
         List<QueryColumn> columns = List.of();
         String rowTable = null;
 
@@ -494,8 +714,6 @@ public final class QueryAnalyzer {
             columns = resolveReturningColumns(returningClause, source);
             rowTable = resolveReturningRowTable(returningClause, source);
         }
-
-        Placeholders placeholders = toPlaceholders(parsedSql, schema);
 
         resolveInsertParameters(insert, source.table(), placeholders);
         resolveConflictParameters(insert, source, placeholders);
@@ -519,17 +737,20 @@ public final class QueryAnalyzer {
         Table table = update.getTable();
         Source source = toSource(table, schema);
 
+        Placeholders placeholders = toPlaceholders(parsedSql, schema);
+
+        analyzeCommonTableExpressions(
+            update.getWithItemsList(),
+            new Analysis(parsedSql, schema, placeholders)
+        );
+
         List<QueryColumn> columns = List.of();
         String rowTable = null;
 
         if (returningClause != null) {
-            requireNoCommonTableExpressions(update.getWithItemsList());
-
             columns = resolveReturningColumns(returningClause, source);
             rowTable = resolveReturningRowTable(returningClause, source);
         }
-
-        Placeholders placeholders = toPlaceholders(parsedSql, schema);
 
         resolveUpdateSetParameters(update.getUpdateSets(), source.table(), placeholders);
 
@@ -556,17 +777,20 @@ public final class QueryAnalyzer {
         Table table = delete.getTable();
         Source source = toSource(table, schema);
 
+        Placeholders placeholders = toPlaceholders(parsedSql, schema);
+
+        analyzeCommonTableExpressions(
+            delete.getWithItemsList(),
+            new Analysis(parsedSql, schema, placeholders)
+        );
+
         List<QueryColumn> columns = List.of();
         String rowTable = null;
 
         if (returningClause != null) {
-            requireNoCommonTableExpressions(delete.getWithItemsList());
-
             columns = resolveReturningColumns(returningClause, source);
             rowTable = resolveReturningRowTable(returningClause, source);
         }
-
-        Placeholders placeholders = toPlaceholders(parsedSql, schema);
 
         if (delete.getWhere() != null) {
             resolveParameters(delete.getWhere(), List.of(source), placeholders);
@@ -692,7 +916,7 @@ public final class QueryAnalyzer {
                 );
             }
 
-            return resolveAllColumns(source);
+            return toQueryColumns(resolveAllColumns(source));
         }
 
         net.sf.jsqlparser.schema.Column returnedColumn = directColumn(expression);
@@ -739,8 +963,6 @@ public final class QueryAnalyzer {
                 "RETURNING requires an INSERT with a single VALUES row."
             );
         }
-
-        requireNoCommonTableExpressions(insert.getWithItemsList());
     }
 
     /**
@@ -794,14 +1016,6 @@ public final class QueryAnalyzer {
         if (using || delete.getJoins() != null) {
             throw new UnsupportedOperationException(
                 "DELETE ... USING and joined deletes are not supported."
-            );
-        }
-    }
-
-    private void requireNoCommonTableExpressions(List<?> withItems) {
-        if (withItems != null && !withItems.isEmpty()) {
-            throw new UnsupportedOperationException(
-                "Common table expressions are not supported in a returning write."
             );
         }
     }
@@ -937,7 +1151,7 @@ public final class QueryAnalyzer {
         if (action.getWhereExpression() != null) {
             resolveParameters(
                 action.getWhereExpression(),
-                List.of(source, new Source(EXCLUDED_QUALIFIER, source.table(), false)),
+                List.of(source, new Source(EXCLUDED_QUALIFIER, source.table(), false, false)),
                 placeholders
             );
         }
@@ -1273,86 +1487,181 @@ public final class QueryAnalyzer {
         }
     }
 
-    private Table getTable(PlainSelect plainSelect, List<String> commonTableExpressions) {
-        return requireTableSource(
-            plainSelect.getFromItem(),
-            "Only table sources are supported.",
-            commonTableExpressions
-        );
-    }
-
     /**
-     * Requires one query source to be a table of the schema. A
-     * {@code LATERAL} source and a subquery source each state a source this
-     * subset does not model, and a source that names a common table
-     * expression of the query reads that expression rather than the schema
-     * table of the same name, as PostgreSQL resolves it.
+     * Resolves one query source: a subquery in the clause, a source that names
+     * a common table expression in scope, which reads that expression rather
+     * than the schema table of the same name as PostgreSQL resolves it, or a
+     * table of the schema. A {@code LATERAL} source states a source this subset
+     * does not model at all, and is classified first.
      */
-    private Table requireTableSource(
+    private Source resolveSource(
         FromItem fromItem,
         String unsupportedSourceRejection,
-        List<String> commonTableExpressions
+        Analysis analysis,
+        List<Source> commonTableExpressions,
+        boolean leftJoined
     ) {
-        requireModeledSourceKind(fromItem);
+        requireNoLateralSource(fromItem);
+
+        if (fromItem instanceof ParenthesedSelect subquery) {
+            return toSubquerySource(subquery, analysis, commonTableExpressions, leftJoined);
+        }
 
         if (!(fromItem instanceof Table table)) {
             throw new UnsupportedOperationException(unsupportedSourceRejection);
         }
 
-        requireNoCommonTableExpressionSource(table, commonTableExpressions);
+        Source commonTableExpression = findCommonTableExpression(table, commonTableExpressions);
 
-        return table;
+        if (commonTableExpression != null) {
+            return toDerivedSource(
+                table.getAlias() == null
+                    ? commonTableExpression.name()
+                    : table.getAlias().getUnquotedName(),
+                commonTableExpression.table().columns(),
+                leftJoined
+            );
+        }
+
+        return toSource(table, analysis.schema(), leftJoined);
     }
 
     /**
-     * Rejects the source kinds that state a source this subset does not model
-     * at all, so neither a {@code LATERAL} source nor a subquery source is
-     * reported as a join kind that could be rewritten.
+     * Rejects a {@code LATERAL} source, which reads the sources written before
+     * it, so it is never reported as a join kind that could be rewritten.
      */
-    private void requireModeledSourceKind(FromItem fromItem) {
+    private void requireNoLateralSource(FromItem fromItem) {
         if (fromItem instanceof LateralSubSelect) {
             throw new UnsupportedOperationException(LATERAL_REJECTION);
         }
-
-        if (fromItem instanceof ParenthesedSelect) {
-            throw new UnsupportedOperationException(FROM_SUBQUERY_REJECTION);
-        }
     }
 
     /**
-     * Rejects a source that names a common table expression of its own query,
-     * before the schema is consulted, because such a source reads the
-     * expression and not the schema table of that name. Only an unqualified
-     * name can name one.
+     * Resolves a subquery source into the derived source its own
+     * {@code SELECT} exposes. The body sees only the common table expressions
+     * in scope and no source of the query around it, as PostgreSQL scopes a
+     * subquery source that is not {@code LATERAL}.
+     *
+     * <p>The alias is the only name the subquery's columns can be read through,
+     * so it is required, and a column list on it would rename those columns by
+     * position, which this subset does not model.
      */
-    private void requireNoCommonTableExpressionSource(Table table, List<String> commonTableExpressions) {
+    private Source toSubquerySource(
+        ParenthesedSelect subquery,
+        Analysis analysis,
+        List<Source> commonTableExpressions,
+        boolean leftJoined
+    ) {
+        Alias alias = subquery.getAlias();
+
+        if (alias == null) {
+            throw new UnsupportedOperationException(UNALIASED_FROM_SUBQUERY_REJECTION);
+        }
+
+        String name = alias.getUnquotedName();
+
+        if (alias.getAliasColumns() != null && !alias.getAliasColumns().isEmpty()) {
+            throw new UnsupportedOperationException(
+                DERIVED_SOURCE_COLUMN_LIST_REJECTION.formatted(name)
+            );
+        }
+
+        return toDerivedSource(
+            name,
+            analyzeNestedSelect(subquery.getSelect(), analysis, commonTableExpressions).columns(),
+            leftJoined
+        );
+    }
+
+    /**
+     * The common table expression in scope one source names, and {@code null}
+     * when the source names none. Only an unqualified name can name one, and
+     * the innermost declaration of that name, compared ignoring case, is the
+     * one the source reads.
+     */
+    private Source findCommonTableExpression(Table table, List<Source> commonTableExpressions) {
         if (table.getSchemaName() != null) {
-            return;
+            return null;
         }
 
         String name = table.getUnquotedName();
 
-        boolean commonTableExpression = commonTableExpressions.stream()
-            .anyMatch(declared -> declared.equalsIgnoreCase(name));
+        for (int index = commonTableExpressions.size() - 1; index >= 0; index--) {
+            Source commonTableExpression = commonTableExpressions.get(index);
 
-        if (commonTableExpression) {
-            throw new UnsupportedOperationException(CTE_SOURCE_REJECTION.formatted(name));
+            if (commonTableExpression.name().equalsIgnoreCase(name)) {
+                return commonTableExpression;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * One derived source — a common table expression or a subquery source —
+     * under the name the query exposes it as, whose columns are the result
+     * columns of its own {@code SELECT}. A left join of the source makes every
+     * one of them nullable, as it does for a table source.
+     */
+    private Source toDerivedSource(
+        String name,
+        List<dev.sqlcj.schema.Column> columns,
+        boolean leftJoined
+    ) {
+        requireDistinctDerivedColumnNames(name, columns);
+
+        return new Source(
+            name,
+            new dev.sqlcj.schema.Table(name, columns, List.of()),
+            true,
+            leftJoined
+        );
+    }
+
+    /**
+     * Requires the columns of a derived source to expose distinct names,
+     * compared ignoring case as a column reference resolves them, because a
+     * repeated name makes every reference to it ambiguous.
+     */
+    private void requireDistinctDerivedColumnNames(
+        String name,
+        List<dev.sqlcj.schema.Column> columns
+    ) {
+        for (int index = 0; index < columns.size(); index++) {
+            String columnName = columns.get(index).name();
+
+            boolean repeated = columns.subList(0, index).stream()
+                .anyMatch(column -> column.name().equalsIgnoreCase(columnName));
+
+            if (repeated) {
+                throw new UnsupportedOperationException(
+                    DERIVED_SOURCE_COLUMN_NAME_REJECTION.formatted(name, columnName)
+                );
+            }
         }
     }
 
     /**
-     * Resolves the ordered query sources from the base table followed by every
-     * joined table, rejecting an exposed name that repeats.
+     * Resolves the ordered query sources from the first source followed by
+     * every joined source, rejecting an exposed name that repeats.
      */
     private List<Source> resolveSources(
         PlainSelect plainSelect,
-        Table table,
-        List<String> commonTableExpressions,
-        Schema schema
+        Analysis analysis,
+        List<Source> commonTableExpressions
     ) {
         List<Source> sources = new ArrayList<>();
 
-        addSource(sources, table, schema, false);
+        addSource(
+            sources,
+            resolveSource(
+                plainSelect.getFromItem(),
+                "Only table sources are supported.",
+                analysis,
+                commonTableExpressions,
+                false
+            )
+        );
 
         List<Join> joins = plainSelect.getJoins();
 
@@ -1361,12 +1670,7 @@ public final class QueryAnalyzer {
         }
 
         for (Join join : joins) {
-            addSource(
-                sources,
-                requireSupportedJoin(join, commonTableExpressions),
-                schema,
-                join.isLeft()
-            );
+            addSource(sources, requireSupportedJoin(join, analysis, commonTableExpressions));
 
             resolveJoinConditionColumns(requireJoinCondition(join), sources);
         }
@@ -1374,9 +1678,7 @@ public final class QueryAnalyzer {
         return List.copyOf(sources);
     }
 
-    private Source addSource(List<Source> sources, Table table, Schema schema, boolean leftJoined) {
-        Source source = toSource(table, schema, leftJoined);
-
+    private void addSource(List<Source> sources, Source source) {
         boolean duplicate = sources.stream()
             .anyMatch(existing -> existing.name().equalsIgnoreCase(source.name()));
 
@@ -1387,11 +1689,9 @@ public final class QueryAnalyzer {
         }
 
         sources.add(source);
-
-        return source;
     }
 
-    /** A base or write source, which always contributes a row of its own. */
+    /** A write source, which always contributes a row of its own. */
     private Source toSource(Table table, Schema schema) {
         return toSource(table, schema, false);
     }
@@ -1402,6 +1702,7 @@ public final class QueryAnalyzer {
                 ? table.getUnquotedName()
                 : table.getAlias().getUnquotedName(),
             findSourceTable(schema, table),
+            false,
             leftJoined
         );
     }
@@ -1425,17 +1726,21 @@ public final class QueryAnalyzer {
     /**
      * Accepts only a bare {@code JOIN} or explicit {@code INNER JOIN}, or a
      * {@code LEFT JOIN} in its bare or {@code LEFT OUTER JOIN} spelling, of one
-     * table source. {@link Join#isInnerJoin()} and {@link Join#isLeft()} also
-     * report shapes that this subset excludes, so every excluded modifier is
-     * rejected explicitly.
+     * table or derived source. {@link Join#isInnerJoin()} and
+     * {@link Join#isLeft()} also report shapes that this subset excludes, so
+     * every excluded modifier is rejected explicitly.
      *
-     * <p>The joined source is classified first, because a source this subset
-     * does not model cannot be written as a supported join at all, and the join
-     * kinds that can be written another way are then reported with that
-     * rewrite. Every remaining modifier keeps the general rejection.
+     * <p>A {@code LATERAL} joined source is classified first, because a source
+     * this subset does not model cannot be written as a supported join at all,
+     * and the join kinds that can be written another way are then reported with
+     * that rewrite. Every remaining modifier keeps the general rejection.
      */
-    private Table requireSupportedJoin(Join join, List<String> commonTableExpressions) {
-        requireModeledSourceKind(join.getRightItem());
+    private Source requireSupportedJoin(
+        Join join,
+        Analysis analysis,
+        List<Source> commonTableExpressions
+    ) {
+        requireNoLateralSource(join.getRightItem());
         requireSupportedJoinKind(join);
 
         if (!isSupportedInnerJoin(join) && !isSupportedLeftJoin(join)) {
@@ -1444,10 +1749,12 @@ public final class QueryAnalyzer {
             );
         }
 
-        return requireTableSource(
+        return resolveSource(
             join.getRightItem(),
             "Only table join sources are supported.",
-            commonTableExpressions
+            analysis,
+            commonTableExpressions,
+            join.isLeft()
         );
     }
 
@@ -2392,13 +2699,12 @@ public final class QueryAnalyzer {
      * <p>A subscripted reference projects an element rather than the column, so
      * it is rejected as any other computed item is, and a cast states its type.
      */
-    private List<QueryColumn> resolveColumns(
+    private List<dev.sqlcj.schema.Column> resolveColumns(
         PlainSelect plainSelect,
-        ParsedSql parsedSql,
-        List<Source> sources,
-        Schema schema
+        Analysis analysis,
+        List<Source> sources
     ) {
-        List<QueryColumn> columns = new ArrayList<>();
+        List<dev.sqlcj.schema.Column> columns = new ArrayList<>();
 
         for (SelectItem<?> selectItem : plainSelect.getSelectItems()) {
             Expression expression = selectItem.getExpression();
@@ -2431,12 +2737,14 @@ public final class QueryAnalyzer {
                 dev.sqlcj.schema.Column schemaColumn = resolved.column();
 
                 columns.add(
-                    new QueryColumn(
+                    new dev.sqlcj.schema.Column(
                         selectedColumnName(selectItem.getAlias(), schemaColumn),
                         requireSupportedType(schemaColumn),
                         schemaColumn.nullable() || resolved.source().leftJoined(),
+                        null,
                         schemaColumn.enumType(),
-                        schemaColumn.array()
+                        schemaColumn.array(),
+                        schemaColumn.blankPadded()
                     )
                 );
 
@@ -2450,13 +2758,13 @@ public final class QueryAnalyzer {
             }
 
             if (expression instanceof CastExpression cast && cast.getColDataType() != null) {
-                columns.add(castColumn(cast, selectItem.getAlias(), schema));
+                columns.add(castColumn(cast, selectItem.getAlias(), analysis.schema()));
 
                 continue;
             }
 
             if (expression instanceof JdbcParameter || expression instanceof JdbcNamedParameter) {
-                throw untypedPlaceholder(occurrenceOf(parsedSql, expression));
+                throw untypedPlaceholder(occurrenceOf(analysis.parsedSql(), expression));
             }
 
             throw new UnsupportedOperationException(
@@ -2498,14 +2806,14 @@ public final class QueryAnalyzer {
      * {@code count(*)} returns {@code bigint}, and it is non-null because a
      * count is always a number, {@code 0} when no row matches.
      */
-    private QueryColumn scalarCountColumn(Alias alias) {
+    private dev.sqlcj.schema.Column scalarCountColumn(Alias alias) {
         if (alias == null) {
             throw new UnsupportedOperationException(
                 "COUNT(*) requires a result alias, such as COUNT(*) AS total."
             );
         }
 
-        return new QueryColumn(alias.getUnquotedName(), ColumnType.BIGINT, false);
+        return new dev.sqlcj.schema.Column(alias.getUnquotedName(), ColumnType.BIGINT, false);
     }
 
     /**
@@ -2517,7 +2825,7 @@ public final class QueryAnalyzer {
      * <p>The operand itself reaches the database as written, as a non-binding
      * write value does, so PostgreSQL rather than sqlcj checks it.
      */
-    private QueryColumn castColumn(CastExpression cast, Alias alias, Schema schema) {
+    private dev.sqlcj.schema.Column castColumn(CastExpression cast, Alias alias, Schema schema) {
         if (alias == null) {
             throw new UnsupportedOperationException(
                 "A cast projection requires a result alias, such as SUM(amount)::numeric AS total."
@@ -2538,7 +2846,15 @@ public final class QueryAnalyzer {
             );
         }
 
-        return new QueryColumn(name, type.type(), true, type.enumType(), type.array());
+        return new dev.sqlcj.schema.Column(
+            name,
+            type.type(),
+            true,
+            null,
+            type.enumType(),
+            type.array(),
+            type.blankPadded()
+        );
     }
 
     /**
@@ -2547,6 +2863,9 @@ public final class QueryAnalyzer {
      * {@code qualifier.*}, and {@code null} for every other projection. The
      * name is the schema's own spelling of the table, so a query-side alias or
      * spelling never splits one row identity.
+     *
+     * <p>A derived source names no table, so a read over one returns a result
+     * specific to its own query even when the source is named like a table.
      */
     private String resolveSelectRowTable(PlainSelect plainSelect, List<Source> sources) {
         List<SelectItem<?>> selectItems = plainSelect.getSelectItems();
@@ -2556,8 +2875,26 @@ public final class QueryAnalyzer {
         }
 
         return selectItems.get(0).getExpression() instanceof AllColumns
-            ? sources.get(0).table().name()
+            ? sources.get(0).rowTable()
             : null;
+    }
+
+    /**
+     * The analyzed result columns of one query, which carry the facts code
+     * generation reads from a selected column.
+     */
+    private List<QueryColumn> toQueryColumns(List<dev.sqlcj.schema.Column> columns) {
+        return columns.stream()
+            .map(
+                column -> new QueryColumn(
+                    column.name(),
+                    column.type(),
+                    column.nullable(),
+                    column.enumType(),
+                    column.array()
+                )
+            )
+            .toList();
     }
 
     /**
@@ -2662,15 +2999,22 @@ public final class QueryAnalyzer {
             );
     }
 
-    private List<QueryColumn> resolveAllColumns(Source source) {
+    /**
+     * The columns one source exposes in its own order, each nullable when the
+     * source is left-joined, which is the expansion of a wildcard over that
+     * source.
+     */
+    private List<dev.sqlcj.schema.Column> resolveAllColumns(Source source) {
         return source.table().columns().stream()
             .map(
-                column -> new QueryColumn(
+                column -> new dev.sqlcj.schema.Column(
                     column.name(),
                     requireSupportedType(column),
                     column.nullable() || source.leftJoined(),
+                    null,
                     column.enumType(),
-                    column.array()
+                    column.array(),
+                    column.blankPadded()
                 )
             )
             .toList();
