@@ -2437,18 +2437,25 @@ class SqlcjCompilerIntegrationTest {
             ),
             Arguments.of(
                 ":many",
-                "SELECT s.id FROM (SELECT id FROM users) s",
-                "A subquery in FROM is not supported."
+                "SELECT s.id FROM (SELECT id FROM users) AS s(n)",
+                "A column list on s is not supported; alias the columns in its SELECT instead."
             ),
             Arguments.of(
                 ":many",
-                "WITH recent AS (SELECT id FROM users) SELECT id FROM recent",
-                "A common table expression used as a source is not supported: recent"
+                "SELECT id FROM (SELECT id FROM users)",
+                "A subquery in FROM requires an alias, such as (SELECT ...) AS recent."
             ),
             Arguments.of(
                 ":many",
-                "WITH users AS (SELECT id FROM users) SELECT id FROM users",
-                "A common table expression used as a source is not supported: users"
+                "WITH RECURSIVE recent AS (SELECT id FROM users) SELECT id FROM recent",
+                "WITH RECURSIVE is not supported."
+            ),
+            Arguments.of(
+                ":many",
+                "WITH moved AS (DELETE FROM users WHERE id = $1 RETURNING id)"
+                    + " SELECT id FROM moved",
+                "A data-modifying statement in WITH is not supported;"
+                    + " run it as a query of its own."
             ),
             Arguments.of(
                 ":exec",
@@ -3855,6 +3862,64 @@ class SqlcjCompilerIntegrationTest {
                 "public List<ListBuyersResult> listBuyers(BigDecimal total)"
             ),
             repository
+        );
+    }
+
+    /**
+     * A common table expression and a subquery source generate compilable Java
+     * whose result components carry the types their bodies state, with the
+     * columns of a left-joined derived source nullable.
+     */
+    @Test
+    void shouldGenerateCompilableJavaForDerivedSources() throws IOException {
+        generateAndCompile(
+            JOIN_SCHEMA,
+            """
+                -- name: ListUserOrderTotals :many
+                WITH totals AS (SELECT user_id, SUM(total)::numeric AS amount
+                                FROM orders
+                                WHERE total = $1
+                                GROUP BY user_id)
+                SELECT u.name, totals.amount
+                FROM users u
+                LEFT JOIN totals ON totals.user_id = u.id;
+
+                -- name: ListRecentOrders :many
+                SELECT recent.id, recent.total
+                FROM (SELECT id, total
+                      FROM orders
+                      WHERE user_id = $1
+                      ORDER BY id DESC
+                      LIMIT $2) recent;
+                """
+        );
+
+        String source = Files.readString(
+            tempDir.resolve("generated/generated/UsersRepository.java")
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<ListUserOrderTotalsResult> listUserOrderTotals(BigDecimal total)"
+            ),
+            source
+        );
+
+        assertEquals(
+            List.of("String name", "BigDecimal amount"),
+            recordComponents(source, "ListUserOrderTotalsResult")
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<ListRecentOrdersResult> listRecentOrders(Long userId, Integer limit)"
+            ),
+            source
+        );
+
+        assertEquals(
+            List.of("Long id", "BigDecimal total"),
+            recordComponents(source, "ListRecentOrdersResult")
         );
     }
 

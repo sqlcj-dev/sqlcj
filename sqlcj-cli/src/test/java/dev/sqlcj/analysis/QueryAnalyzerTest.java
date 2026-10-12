@@ -3979,9 +3979,9 @@ class QueryAnalyzerTest {
     }
 
     /**
-     * A {@code WITH} body is carried unanalyzed, so its cast placeholder is
-     * typed by that cast alone and binds before the analyzed clauses that
-     * follow it.
+     * A {@code WITH} body is analyzed by its own clause rules, so its cast
+     * placeholder is typed by that cast, named after the column it is compared
+     * with, and binds before the clauses that follow it.
      */
     @ParameterizedTest
     @CsvSource(
@@ -4003,7 +4003,7 @@ class QueryAnalyzerTest {
 
         assertEquals(
             List.of(
-                new QueryParameter(1, "param1", ColumnType.DECIMAL),
+                new QueryParameter(1, "total", ColumnType.DECIMAL),
                 new QueryParameter(2, "id", ColumnType.BIGINT)
             ),
             model.parameters()
@@ -4628,8 +4628,6 @@ class QueryAnalyzerTest {
                 + "|RETURNING requires an INSERT with a single VALUES row.",
             "INSERT INTO users (id) VALUES ($1), ($2) RETURNING id"
                 + "|INSERT requires a single VALUES row.",
-            "WITH known AS (SELECT id FROM users) INSERT INTO users (id) VALUES ($1) RETURNING id"
-                + "|Common table expressions are not supported in a returning write.",
             "UPDATE users SET name = $2 FROM profiles WHERE users.id = $1 RETURNING id"
                 + "|UPDATE ... FROM and joined updates are not supported.",
             "DELETE FROM users USING profiles WHERE users.id = $1 RETURNING id"
@@ -6636,5 +6634,546 @@ class QueryAnalyzerTest {
             )
                 .getMessage()
         );
+    }
+
+    /**
+     * A source that names a common table expression reads that expression, so
+     * its result columns are the body's own columns and an uncast placeholder
+     * of the body is typed and named from the column it is compared with.
+     */
+    @Test
+    void shouldResolveCommonTableExpressionSource() {
+        String sql = """
+            WITH recent AS (SELECT user_id, total
+                            FROM orders
+                            WHERE total = $1)
+            SELECT recent.user_id, recent.total
+            FROM recent
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListRecentOrders", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals("recent", model.table());
+        assertNull(model.rowTable());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("user_id", ColumnType.BIGINT, false),
+                new QueryColumn("total", ColumnType.DECIMAL, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "total", ColumnType.DECIMAL)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A common table expression sees the ones written before it in its own
+     * list, so a chain of expressions resolves its columns through each link,
+     * and an aliased source exposes the chain's last link under its alias.
+     */
+    @Test
+    void shouldResolveChainedCommonTableExpressions() {
+        String sql = """
+            WITH matching AS (SELECT id, user_id, total
+                              FROM orders
+                              WHERE total = $1),
+                 totals AS (SELECT user_id, total AS amount
+                            FROM matching)
+            SELECT t.user_id, t.amount
+            FROM totals t
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListOrderTotals", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals("t", model.table());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("user_id", ColumnType.BIGINT, false),
+                new QueryColumn("amount", ColumnType.DECIMAL, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "total", ColumnType.DECIMAL)),
+            model.parameters()
+        );
+    }
+
+    /**
+     * A common table expression named like a schema table shadows that table
+     * for the sources written after it, while its own body reads the table, as
+     * PostgreSQL scopes it.
+     */
+    @Test
+    void shouldReadTheSchemaTableInsideACommonTableExpressionNamedLikeIt() {
+        String sql = """
+            WITH orders AS (SELECT id, total
+                            FROM orders
+                            WHERE total = $1)
+            SELECT orders.id
+            FROM orders
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListOrderIds", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "total", ColumnType.DECIMAL)),
+            model.parameters()
+        );
+    }
+
+    /**
+     * A subquery source analyzes its own {@code WITH} list, so a common table
+     * expression declared inside it is a source of that body alone.
+     */
+    @Test
+    void shouldResolveCommonTableExpressionDeclaredInsideASubquerySource() {
+        String sql = """
+            SELECT s.total
+            FROM (WITH matching AS (SELECT total
+                                    FROM orders
+                                    WHERE total = $1)
+                  SELECT total
+                  FROM matching) s
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListTotals", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals("s", model.table());
+
+        assertEquals(
+            List.of(new QueryColumn("total", ColumnType.DECIMAL, true)),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "total", ColumnType.DECIMAL)),
+            model.parameters()
+        );
+    }
+
+    /**
+     * A subquery may be joined like a table, and its columns are read through
+     * its alias.
+     */
+    @Test
+    void shouldResolveSubquerySourceOfAJoin() {
+        String sql = """
+            SELECT u.name, s.total
+            FROM users u
+            JOIN (SELECT user_id, total
+                  FROM orders
+                  WHERE total = $1) s ON s.user_id = u.id
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUserOrders", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals("users", model.table());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("name", ColumnType.VARCHAR, true),
+                new QueryColumn("total", ColumnType.DECIMAL, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "total", ColumnType.DECIMAL)),
+            model.parameters()
+        );
+    }
+
+    /**
+     * A left join of a derived source reads every one of its columns as
+     * nullable, including the ones its body declares {@code NOT NULL}, both
+     * selected by name and expanded by a wildcard.
+     */
+    @Test
+    void shouldReadColumnsOfALeftJoinedDerivedSourceAsNullable() {
+        String sql = """
+            WITH totals AS (SELECT user_id, total
+                            FROM orders)
+            SELECT u.id, totals.user_id, totals.*
+            FROM users u
+            LEFT JOIN totals ON totals.user_id = u.id
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUserTotals", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("user_id", ColumnType.BIGINT, true),
+                new QueryColumn("user_id", ColumnType.BIGINT, true),
+                new QueryColumn("total", ColumnType.DECIMAL, true)
+            ),
+            model.columns()
+        );
+    }
+
+    /**
+     * A derived source exposes an aliased {@code COUNT(*)} and an aliased cast
+     * as columns of its own, so a reader of the source takes their types
+     * without restating the cast.
+     */
+    @Test
+    void shouldResolveCountAndCastColumnsThroughADerivedSource() {
+        String sql = """
+            WITH stats AS (SELECT user_id,
+                                  COUNT(*) AS order_count,
+                                  SUM(total)::numeric AS amount
+                           FROM orders
+                           GROUP BY user_id)
+            SELECT stats.user_id, stats.order_count, stats.amount
+            FROM stats
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListOrderStats", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("user_id", ColumnType.BIGINT, false),
+                new QueryColumn("order_count", ColumnType.BIGINT, false),
+                new QueryColumn("amount", ColumnType.DECIMAL, true)
+            ),
+            model.columns()
+        );
+    }
+
+    /**
+     * A derived source returns no shared table row, so {@code SELECT *} over a
+     * common table expression or a subquery returns a result specific to its
+     * own query, even when the source is named like a schema table.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "WITH users AS (SELECT id, name FROM users) SELECT * FROM users|users",
+            "SELECT * FROM (SELECT id, name FROM users) s|s"
+        }
+    )
+    void shouldResolveQuerySpecificResultForAllColumnsOfADerivedSource(String sql, String table) {
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(table, model.table());
+        assertNull(model.rowTable());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+    }
+
+    /**
+     * Every placeholder binds in the textual order the parser reported,
+     * whatever order the analyzer resolves the scopes in, so a common table
+     * expression body, a subquery source, and the outer query bind in the order
+     * the query writes them.
+     */
+    @Test
+    void shouldBindDerivedSourceParametersInTextualOrder() {
+        String sql = """
+            WITH recent AS (SELECT user_id
+                            FROM orders
+                            WHERE total = $3)
+            SELECT s.user_id
+            FROM (SELECT user_id
+                  FROM recent
+                  WHERE user_id = $2) s
+            WHERE s.user_id = $1
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListRecentUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "user_id", ColumnType.BIGINT),
+                new QueryParameter(2, "user_id", ColumnType.BIGINT),
+                new QueryParameter(3, "total", ColumnType.DECIMAL)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(3, 2, 1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A returning write may declare a common table expression, whose body is
+     * analyzed by its own clause rules while the returned columns stay the
+     * write target's.
+     */
+    @Test
+    void shouldAnalyzeReturningWriteWithACommonTableExpression() {
+        String sql = """
+            WITH known AS (SELECT id
+                           FROM users
+                           WHERE name = $1)
+            INSERT INTO users (id)
+            VALUES ($2)
+            RETURNING id
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("CreateUser", QueryType.ONE, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertEquals("users", model.table());
+        assertNull(model.rowTable());
+
+        assertEquals(
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "name", ColumnType.VARCHAR),
+                new QueryParameter(2, "id", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+    }
+
+    /**
+     * The common table expressions of a write without {@code RETURNING} are
+     * analyzed as well, so an uncast placeholder of a body is typed from the
+     * column it is compared with.
+     */
+    @Test
+    void shouldAnalyzeCommonTableExpressionOfAWriteWithoutReturning() {
+        String sql = """
+            WITH recent AS (SELECT user_id
+                            FROM orders
+                            WHERE total = $1)
+            DELETE FROM users
+            WHERE id = $2
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("DeleteUser", QueryType.EXEC, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "total", ColumnType.DECIMAL),
+                new QueryParameter(2, "id", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A common table expression no source reads is analyzed too, so its body's
+     * placeholders are typed, and a subquery that reads it in a predicate
+     * keeps today's handling.
+     */
+    @Test
+    void shouldAnalyzeACommonTableExpressionReadOnlyInsideAPredicateSubquery() {
+        String sql = """
+            WITH recent AS (SELECT user_id
+                            FROM orders
+                            WHERE total = $1)
+            SELECT id
+            FROM users
+            WHERE id IN (SELECT user_id FROM recent)
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListRecentUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals("users", model.table());
+
+        assertEquals(
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "total", ColumnType.DECIMAL)),
+            model.parameters()
+        );
+    }
+
+    /**
+     * A {@code MATERIALIZED} and a {@code NOT MATERIALIZED} clause state how
+     * PostgreSQL evaluates the body, not what it returns, so both analyze like
+     * a plain one.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = { "MATERIALIZED ", "NOT MATERIALIZED ", "" })
+    void shouldAcceptMaterializedCommonTableExpression(String materialized) {
+        String sql = "WITH recent AS %s(SELECT id FROM orders WHERE total = $1) SELECT id FROM recent"
+            .formatted(materialized);
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListRecentOrders", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "total", ColumnType.DECIMAL)),
+            model.parameters()
+        );
+    }
+
+    /**
+     * A subquery source that is not {@code LATERAL} sees no source of the query
+     * around it, as PostgreSQL scopes it, so a reference to one is an unknown
+     * qualifier.
+     */
+    @Test
+    void shouldRejectAnOuterSourceReferenceInsideASubquerySource() {
+        String sql = "SELECT s.name FROM users u JOIN (SELECT u.name FROM orders) s ON TRUE";
+
+        Query query = new Query("ListUserOrders", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
+        );
+
+        assertEquals("Unknown source qualifier in query: u", exception.getMessage());
+    }
+
+    /**
+     * The derived-source forms outside this subset are rejected with their own
+     * diagnostic: a recursive and a data-modifying {@code WITH} item, a
+     * subquery source without an alias, a column list on a {@code WITH} name or
+     * on a subquery alias, a body that is not a plain {@code SELECT}, which is
+     * classified inside its own parentheses, a {@code LATERAL} source, which is
+     * classified first, a doubly parenthesized source, which states a source
+     * kind of its own, and a derived source whose columns repeat a name.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "MANY|WITH RECURSIVE recent AS (SELECT id FROM users) SELECT id FROM recent"
+                + "|WITH RECURSIVE is not supported.",
+            "MANY|WITH moved AS (UPDATE users SET name = $1 WHERE id = $2 RETURNING id)"
+                + " SELECT id FROM moved"
+                + "|A data-modifying statement in WITH is not supported;"
+                + " run it as a query of its own.",
+            "EXEC|WITH removed AS (DELETE FROM users WHERE id = $1 RETURNING id)"
+                + " DELETE FROM users WHERE id = $2"
+                + "|A data-modifying statement in WITH is not supported;"
+                + " run it as a query of its own.",
+            "EXEC|WITH added AS (INSERT INTO users (id) VALUES ($1) RETURNING id)"
+                + " UPDATE users SET name = $2 WHERE id = $3"
+                + "|A data-modifying statement in WITH is not supported;"
+                + " run it as a query of its own.",
+            "MANY|WITH rows AS (VALUES (1)) SELECT * FROM rows"
+                + "|Only SELECT, INSERT, UPDATE, and DELETE statements are supported.",
+            "MANY|WITH combined AS (SELECT id FROM users UNION SELECT id FROM profiles)"
+                + " SELECT id FROM combined"
+                + "|UNION, INTERSECT, and EXCEPT are not supported; write one query per SELECT.",
+            "MANY|SELECT s.id FROM (SELECT id FROM users UNION SELECT id FROM profiles) s"
+                + "|UNION, INTERSECT, and EXCEPT are not supported; write one query per SELECT.",
+            "MANY|WITH recent (n) AS (SELECT id FROM users) SELECT n FROM recent"
+                + "|A column list on recent is not supported;"
+                + " alias the columns in its SELECT instead.",
+            "MANY|SELECT s.n FROM (SELECT id FROM users) AS s(n)"
+                + "|A column list on s is not supported; alias the columns in its SELECT instead.",
+            "MANY|SELECT id FROM (SELECT id FROM users)"
+                + "|A subquery in FROM requires an alias, such as (SELECT ...) AS recent.",
+            "MANY|SELECT u.id FROM users u JOIN (SELECT user_id FROM orders) ON TRUE"
+                + "|A subquery in FROM requires an alias, such as (SELECT ...) AS recent.",
+            "MANY|SELECT s.id FROM LATERAL (SELECT id FROM users) s"
+                + "|LATERAL is not supported.",
+            "MANY|SELECT s.id FROM ((SELECT id FROM users)) s"
+                + "|Only table sources are supported.",
+            "MANY|WITH pairs AS (SELECT u.id, p.id FROM users u JOIN profiles p"
+                + " ON p.user_id = u.id) SELECT * FROM pairs"
+                + "|Derived source pairs has more than one column named id;"
+                + " give each a distinct alias.",
+            "MANY|SELECT s.id FROM (SELECT id, name AS ID FROM users) s"
+                + "|Derived source s has more than one column named ID;"
+                + " give each a distinct alias."
+        }
+    )
+    void shouldRejectExcludedDerivedSourceForm(QueryType type, String sql, String message) {
+        Query query = new Query("ReadUsers", type, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
+        );
+
+        assertEquals(message, exception.getMessage());
     }
 }
