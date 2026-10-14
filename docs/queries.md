@@ -487,7 +487,7 @@ A write targets exactly one table of its entry's schema.
 
 | Statement | Accepted shape |
 | --- | --- |
-| `INSERT` | an explicit column list and a single `VALUES` row, each value a placeholder or an expression that binds none, with an optional `ON CONFLICT` clause |
+| `INSERT` | an explicit column list and a row source — `VALUES` rows or a `SELECT` — writing one value per written column by position, each a placeholder or an expression that binds none, with an optional `ON CONFLICT` clause |
 | `UPDATE` | `SET` assignments that each assign one direct column a placeholder or an expression that binds none, with an optional `WHERE` using the read predicate forms |
 | `DELETE` | one target table with an optional `WHERE` using the read predicate forms |
 
@@ -508,14 +508,55 @@ FROM authors
 WHERE id = $1;
 ```
 
+An `INSERT` writes its rows either from `VALUES` rows or from a `SELECT`, each
+of which may be written inside parentheses, at any depth, as in
+`(VALUES ($1))`. Every `VALUES` row pairs with the column list by position and
+must write one value per written column, and a placeholder repeated across rows
+is one parameter bound at each of its positions:
+
+```sql
+-- name: CreateAuthors :exec
+INSERT INTO authors (name, bio)
+VALUES (:firstName, :bio),
+       (:secondName, :bio);
+
+-- name: CreateTeamMemberships :exec
+INSERT INTO memberships (team_id, user_id)
+SELECT :teamId, unnest(:userIds::bigint[]);
+```
+
+`CreateAuthors` generates
+`createAuthors(String firstName, String bio, String secondName)` and binds
+`(firstName, bio, secondName, bio)`.
+
+The `SELECT` an `INSERT` writes its rows from is analyzed by the rules
+[Sources](#sources) states for an analyzed nested read: its sources resolve, its
+join conditions, `WHERE`, and pagination placeholders are typed by those clause
+rules, and it may declare `WITH` clauses of its own. It may also omit `FROM`,
+which writes one row of values, as `CreateTeamMemberships` does, and it sees
+no source of the insert, so it cannot read the target table through its name.
+Its items pair with the column list by position and must match its count, a
+wildcard standing for the columns of its source in schema order:
+
+- a placeholder item is typed by the column it is written into, and an indexed
+  one is named after that column, exactly as a `VALUES` value is, so
+  `CreateTeamMemberships` generates
+  `createTeamMemberships(Long teamId, List<Long> userIds)`;
+- a cast placeholder item is typed by its cast and named after that column too;
+- a direct column only resolves against the select's own sources, because it
+  binds nothing, and so does each column a wildcard expands to;
+- every other item reaches the database as written, and a cast placeholder
+  inside one is typed by its own cast, as in
+  `unnest(:userIds::bigint[])` above.
+
 A written column may carry an array subscript or slice, as in
 `SET labels[1] = $1::text` or `INSERT INTO stages (id, labels[1])`. Such a
 target is not a direct column: it writes one element or one range, so its value
 is not typed from the array column and a placeholder value needs a cast, while
 the array column itself must exist in the written table and the subscript
 reaches the database as written. An uncast placeholder written there is rejected
-as an unanalyzed placeholder location, in an `UPDATE` or `DO UPDATE` assignment
-and in an `INSERT` value alike.
+as an unanalyzed placeholder location, in an `UPDATE` or `DO UPDATE` assignment,
+in a `VALUES` value, and in an item of an insert's `SELECT` alike.
 
 ### Values that bind no placeholder
 
@@ -570,7 +611,7 @@ handles, followed by one action:
 
 | Action | Accepted shape |
 | --- | --- |
-| `DO NOTHING` | no assignment, so the statement binds only its `VALUES` row |
+| `DO NOTHING` | no assignment, so the statement binds only the rows its row source writes |
 | `DO UPDATE SET` | assignments analyzed exactly as `UPDATE` assignments are, where a value may also be `EXCLUDED.column`, with an optional `WHERE` predicate |
 
 ```sql
@@ -679,17 +720,22 @@ target table. A reference written with an array subscript or slice, such as
 column of the target table either, so it is rejected as a computed item, with or
 without an alias.
 
-Multi-row `VALUES`, `INSERT ... SELECT`, `UPDATE ... FROM`, and
-`DELETE ... USING` are rejected in every write, while an accepted
-`ON CONFLICT` clause is analyzed the same way with and without `RETURNING`.
+A returning insert accepts every accepted row source — several `VALUES` rows, a
+parenthesized row source, and a `SELECT` — while `UPDATE ... FROM` and
+`DELETE ... USING` are rejected in every write. An accepted `ON CONFLICT`
+clause is analyzed the same way with and without `RETURNING`.
 
 A write may declare `WITH` clauses of its own, with or without `RETURNING`.
 Each body is analyzed by the rules [Sources](#sources) states, so its
 placeholders are typed from its own columns, while the returned columns stay
-the write target's. No clause of a supported write resolves a source beside its
-target, so such a clause is read only by a predicate subquery of the write's
-`WHERE` or of a conflict predicate, which sees the write's `WITH` clauses and
-the target beside its own sources, as [Predicates](#predicates) states.
+the write target's. Such a clause is read by the `SELECT` an `INSERT` writes
+its rows from, which resolves a source named like one of them, and otherwise
+only by a predicate subquery of the write's `WHERE` or of a conflict predicate,
+which sees the write's `WITH` clauses and the target beside its own sources, as
+[Predicates](#predicates) states. An `INSERT` may write its `WITH` clauses
+before the statement or after the column list, where they belong to the row
+source, and either placement is analyzed and read the same way, on a `SELECT`
+and on a `VALUES` row source alike.
 
 ## Parameters
 
@@ -714,11 +760,13 @@ string literal, a quoted identifier, or a comment is not a parameter.
 - The Java type of a placeholder is the type of the column it is compared with,
   assigned to, or inserted into.
 - The clause rules apply in an analyzed nested `SELECT` — a `WITH` body, a
-  subquery source, and a predicate subquery — exactly as they do at top level,
-  so a placeholder of such a body's `ON`, `WHERE`, `LIMIT`, or `OFFSET` clause
-  is typed and named from its own clause without a cast. A predicate subquery
-  also types a placeholder from a column of the query around it, as
-  [Predicates](#predicates) states.
+  subquery source, a predicate subquery, and the `SELECT` an `INSERT` writes
+  its rows from — exactly as they do at top level, so a placeholder of such a
+  body's `ON`, `WHERE`, `LIMIT`, or `OFFSET` clause is typed and named from its
+  own clause without a cast. A predicate subquery also types a placeholder from
+  a column of the query around it, as [Predicates](#predicates) states, and an
+  item of an insert's `SELECT` is typed and named by the column it is written
+  into, as [Writes](#writes) states.
 - A placeholder written as the direct operand of `::type` or
   `CAST(... AS type)` is typed by that cast instead, wherever it appears in an
   accepted statement: a projection, a join `ON` condition, `WHERE`, `GROUP BY`,
@@ -1041,10 +1089,11 @@ query name, and its header line.
 - A set operation, `UNION`, `UNION ALL`, `INTERSECT`, or `EXCEPT`, written
   directly or inside parentheses, rejected as
   `UNION, INTERSECT, and EXCEPT are not supported; write one query per SELECT.`
-  A `WITH` body, a subquery source, and a predicate subquery are classified
-  inside their own parentheses the same way, so a set operation there is
-  rejected with that diagnostic and another statement form, such as a
-  `VALUES` body, with the statement diagnostic.
+  A `WITH` body, a subquery source, a predicate subquery, and the row source of
+  an `INSERT` are classified inside their own parentheses the same way, so a
+  set operation there is rejected with that diagnostic and another statement
+  form, such as a `VALUES` body of a `WITH` item, with the statement
+  diagnostic.
 - A result expression that is not a direct column, a wildcard, an aliased
   `COUNT(*)`, or an aliased cast, including another function call, another
   aggregate, and a literal. A `COUNT(*)` without an alias, a cast projection
@@ -1124,8 +1173,13 @@ query name, and its header line.
   placeholder, each of them also as the operand of a cast, such as
   `:"x"::text`, `&x::text`, or `:a.b::text`, one name whose occurrences have
   conflicting types, and non-contiguous or non-positive placeholder indexes.
-- An `INSERT` without an explicit column list; an `UPDATE` assignment that sets
-  a column list, such as `SET (name, active) = ('a', TRUE)`; and a written
+- An `INSERT` without an explicit column list; an `INSERT` whose rows come from
+  neither parenthesized `VALUES` rows nor a `SELECT`, such as `VALUES ROW(1)`,
+  `VALUES (1), 2`, or a column list with `DEFAULT VALUES`, rejected as
+  `INSERT requires parenthesized VALUES rows or a SELECT.`; a `VALUES` row or
+  an insert `SELECT` that does not write one value per written column, rejected
+  as `INSERT column and value counts must match.`; an `UPDATE` assignment that
+  sets a column list, such as `SET (name, active) = ('a', TRUE)`; and a written
   column that the table does not declare.
 - A conflict clause outside the accepted upsert shape, on an `:exec` and on a
   returning insert alike: a `DO UPDATE` without a conflict target, which is
@@ -1140,10 +1194,8 @@ query name, and its header line.
   and `RETURNING` on `:exec`; a computed item is rejected as
   [`RETURNING`](#returning) states.
 - The shapes that read or write more than the one analyzed table, on an
-  `:exec` and on a returning write alike: an `INSERT` with more than one
-  `VALUES` row, rejected as `INSERT requires a single VALUES row.`; an
-  `INSERT ... SELECT`, rejected as `INSERT ... SELECT is not supported.`; an
-  `UPDATE ... FROM` or joined `UPDATE`, rejected as
+  `:exec` and on a returning write alike: an `UPDATE ... FROM` or joined
+  `UPDATE`, rejected as
   `UPDATE ... FROM and joined updates are not supported.`; and a
   `DELETE ... USING` or joined `DELETE`, rejected as
   `DELETE ... USING and joined deletes are not supported.`
@@ -1487,6 +1539,44 @@ Writes and `RETURNING`:
   `QueryAnalyzerTest.shouldAnalyzeCommonTableExpressionOfAWriteWithoutReturning`
   cover the `WITH` clause of a returning and of an `:exec` write, whose body
   types its own placeholders while the returned columns stay the target's.
+- `QueryAnalyzerTest.shouldAnalyzeInsertWithSeveralValuesRows`,
+  `QueryAnalyzerTest.shouldAnalyzeIndexedInsertWithSeveralValuesRows`,
+  `QueryAnalyzerTest.shouldAnalyzeInsertSelectWithoutFrom`,
+  `QueryAnalyzerTest.shouldNameAnInsertSelectCastItemAfterItsTargetColumn`,
+  `QueryAnalyzerTest.shouldNotTypeAnInsertSelectItemOfASubscriptedTarget`,
+  `QueryAnalyzerTest.shouldAnalyzeInsertSelectFromATable`,
+  `QueryAnalyzerTest.shouldCountOneInsertSelectItemPerWildcardColumn`,
+  `QueryAnalyzerTest.shouldAnalyzeInsertSelectReadingACommonTableExpressionOfTheInsert`,
+  `QueryAnalyzerTest.shouldAnalyzeACommonTableExpressionOfAnInsertSelect`,
+  `QueryAnalyzerTest.shouldAnalyzeACommonTableExpressionOfAValuesSource`,
+  `QueryAnalyzerTest.shouldAnalyzeParenthesizedValuesRowsAtAnyDepth`,
+  `QueryAnalyzerTest.shouldAnalyzeSeveralValuesRowsWithConflictAndReturningAllColumns`,
+  `QueryAnalyzerTest.shouldAnalyzeInsertSelectWithConflictUpdateAndReturningColumns`,
+  `QueryAnalyzerTest.shouldBindInsertSelectParametersInTextualOrder`,
+  `QueryAnalyzerTest.shouldRejectAnInsertRowSourceOutsideTheSubset`,
+  `QueryAnalyzerTest.shouldRejectInsertColumnAndValueCountMismatch`,
+  `QueryAnalyzerTest.shouldRejectASetOperationAsAnInsertRowSource`, and
+  `QueryAnalyzerTest.shouldRejectAnInsertSelectItemOutsideItsSources` cover the
+  multi-row and `SELECT`-sourced inserts: several rows with a repeated named
+  placeholder and with repeated indexed placeholders beside a `DEFAULT`; the
+  `FROM`-less `SELECT` of an `unnest` bulk insert; a cast item typed by its
+  cast and named after its target column; a subscripted target that types
+  nothing; a `SELECT` over joined tables whose `ON`, `WHERE`, and `LIMIT`
+  placeholders are typed by the clause rules; the wildcard items counted per
+  source column; both `WITH` placements and a `WITH` on a `VALUES` source;
+  parenthesized rows at any depth, with and without `RETURNING`;
+  `ON CONFLICT DO NOTHING` with `RETURNING *` on several rows and
+  `DO UPDATE ... WHERE` with a returned column list on a `SELECT` source; the
+  textual binding order across the insert's `WITH` body, its items, its
+  `WHERE`, and its conflict clause; and the row-source, count-mismatch,
+  set-operation, unknown-column, and target-qualifier rejections. The
+  generated sources of these inserts are compiled by
+  `SqlcjCompilerIntegrationTest.shouldGenerateCompilableJavaForMultiRowAndSelectSourcedInserts`,
+  and
+  `PostgresIntegrationTest.shouldExecuteGeneratedMultiRowAndSelectSourcedInsertsAgainstPostgres`
+  executes a multi-row insert, an `unnest` bulk insert with
+  `ON CONFLICT DO NOTHING RETURNING *`, and a table-sourced insert with a
+  `WHERE` placeholder against PostgreSQL 16.
 - `QueryAnalyzerTest.shouldNameInsertReturningColumnsFromTheirAliases`,
   `QueryAnalyzerTest.shouldNameUpdateReturningColumnFromABareAlias`,
   `QueryAnalyzerTest.shouldNameDeleteReturningColumnQualifiedThroughTheTargetAlias`,
@@ -1571,22 +1661,23 @@ Unsupported queries and internal errors:
   concatenation projection, a computed `RETURNING` item, the `RIGHT`, `FULL`,
   `USING`, `NATURAL`, `CROSS`, comma, and `LATERAL` joins, a column list on a
   subquery alias, a subquery source without an alias, a `WITH RECURSIVE`
-  clause, a data-modifying `WITH` body, a multi-row `VALUES`, an
-  `INSERT ... SELECT` on `:exec` and with
-  `RETURNING`, and an `:exec` `UPDATE ... FROM`, comma-joined `UPDATE`,
+  clause, a data-modifying `WITH` body, a set operation as an insert's row
+  source, an insert whose `SELECT` writes fewer values than its column list,
+  and an `:exec` `UPDATE ... FROM`, comma-joined `UPDATE`,
   `DELETE ... USING`, and joined `DELETE`, while
   `QueryAnalyzerTest.shouldRejectUnsupportedCountProjectionForm`,
   `QueryAnalyzerTest.shouldRejectUnsupportedJoinModifier`,
   `QueryAnalyzerTest.shouldRejectUnsupportedReturningItem`,
   `QueryAnalyzerTest.shouldRejectExcludedReturningWriteForm`,
   `QueryAnalyzerTest.shouldRejectExcludedDerivedSourceForm`, and
-  `QueryAnalyzerTest.shouldRejectParenthesizedInsertQuerySource` cover the
+  `QueryAnalyzerTest.shouldRejectAnInsertRowSourceOutsideTheSubset` cover the
   projection, join, derived-source, and write rejections per form, including
   the modifiers that keep the general join rejection, and
-  `QueryAnalyzerTest.shouldAnalyzeParenthesizedSelectAsTheQueryItEncloses` and
-  `QueryAnalyzerTest.shouldAnalyzeInsertWhoseValuesRowIsParenthesized` cover
+  `QueryAnalyzerTest.shouldAnalyzeParenthesizedSelectAsTheQueryItEncloses`,
+  `QueryAnalyzerTest.shouldAnalyzeInsertWhoseValuesRowIsParenthesized`, and
+  `QueryAnalyzerTest.shouldAnalyzeParenthesizedValuesRowsAtAnyDepth` cover
   the doubly parenthesized read that analyzes like the query it encloses and
-  the parenthesized `VALUES` row that analyzes like the row it writes.
+  the parenthesized `VALUES` rows that analyze like the rows they write.
 - `SqlcjCompilerIntegrationTest.shouldReportAnUnexpectedSchemaFailureAsAnInternalError`,
   `SqlcjCompilerIntegrationTest.shouldReportAnUnexpectedAnalysisFailureAsAnInternalError`,
   `SqlcjCompilerIntegrationTest.shouldReportAnUnexpectedGenerationFailureAsAnInternalError`,
@@ -1745,8 +1836,8 @@ Reference service:
   covers the whole located diagnostic line, and the absence of generated
   output, of every entry of the reference service's unsupported query
   catalogue: the two set operations, the `RIGHT`, `FULL`, `USING`, `NATURAL`,
-  `CROSS`, comma, and `LATERAL` joins, a multi-row `VALUES`, an
-  `INSERT ... SELECT`, an `UPDATE ... FROM`, a `DELETE ... USING`, an uncast
+  `CROSS`, comma, and `LATERAL` joins, an `UPDATE ... FROM`, a
+  `DELETE ... USING`, an uncast
   `lower(:email)`, and a placeholder beside a subscripted column, and
   `ReferenceServiceIntegrationTest.shouldCatalogueExactlyTheUnsupportedQueryFiles`
   covers that the catalogue directory holds exactly those queries.

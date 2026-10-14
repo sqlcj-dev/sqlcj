@@ -144,16 +144,6 @@ class ReferenceServiceIntegrationTest {
             "LATERAL is not supported."
         ),
         new UnsupportedQuery(
-            "multi_row_values.sql",
-            "CreateTwoProjects",
-            "INSERT requires a single VALUES row."
-        ),
-        new UnsupportedQuery(
-            "insert_select.sql",
-            "ArchiveAuditLog",
-            "INSERT ... SELECT is not supported."
-        ),
-        new UnsupportedQuery(
             "update_from.sql",
             "RaiseProjectTaskPriority",
             "UPDATE ... FROM and joined updates are not supported."

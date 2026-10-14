@@ -151,9 +151,20 @@ public final class QueryAnalyzer {
     private static final String DATA_MODIFYING_WITH_REJECTION = """
         A data-modifying statement in WITH is not supported; run it as a query of its own.""";
 
-    /** The rejection of an {@code INSERT} whose rows come from a query. */
-    private static final String INSERT_SELECT_REJECTION = """
-        INSERT ... SELECT is not supported.""";
+    /**
+     * The rejection of an {@code INSERT} whose rows come from neither
+     * parenthesized {@code VALUES} rows nor a {@code SELECT}, which are the
+     * row sources this subset models.
+     */
+    private static final String INSERT_ROW_SOURCE_REJECTION = """
+        INSERT requires parenthesized VALUES rows or a SELECT.""";
+
+    /**
+     * The rejection of a {@code VALUES} row or an insert {@code SELECT} that
+     * writes a number of values other than the number of written columns.
+     */
+    private static final String INSERT_COUNT_REJECTION = """
+        INSERT column and value counts must match.""";
 
     /**
      * The rejection of a placeholder that no clause of the query types and no
@@ -803,7 +814,6 @@ public final class QueryAnalyzer {
         ReturningClause returningClause = insert.getReturningClause();
 
         requireWriteQueryType(query, returningClause);
-        requireSupportedInsertSource(insert);
 
         Table table = insert.getTable();
         Source source = toSource(table, schema);
@@ -816,17 +826,16 @@ public final class QueryAnalyzer {
             analysis
         );
 
+        resolveInsertRows(insert, source.table(), commonTableExpressions, analysis);
+
         List<QueryColumn> columns = List.of();
         String rowTable = null;
 
         if (returningClause != null) {
-            requireSupportedReturningInsert(insert);
-
             columns = resolveReturningColumns(returningClause, source);
             rowTable = resolveReturningRowTable(returningClause, source);
         }
 
-        resolveInsertParameters(insert, source.table(), placeholders);
         resolveConflictParameters(insert, source, commonTableExpressions, analysis);
 
         return toQueryModel(
@@ -1077,41 +1086,6 @@ public final class QueryAnalyzer {
     }
 
     /**
-     * Rejects the {@code INSERT} forms whose returned rows this subset does not
-     * model, so a returning insert never silently analyzes a wider statement.
-     */
-    private void requireSupportedReturningInsert(Insert insert) {
-        if (!(insert.getSelect() instanceof Values)) {
-            throw new UnsupportedOperationException(
-                "RETURNING requires an INSERT with a single VALUES row."
-            );
-        }
-    }
-
-    /**
-     * Rejects an {@code INSERT} whose rows come from a query rather than from
-     * a {@code VALUES} row, whose written rows this subset does not model, on
-     * an {@code :exec} and on a returning insert alike. One level of
-     * parentheses around a {@code VALUES} row states that same row, and is the
-     * row the values of the insert are read from, so it states no query.
-     */
-    private void requireSupportedInsertSource(Insert insert) {
-        Select source = insert.getSelect();
-
-        if (source == null) {
-            return;
-        }
-
-        if (source instanceof ParenthesedSelect parenthesed) {
-            source = parenthesed.getSelect();
-        }
-
-        if (!(source instanceof Values)) {
-            throw new UnsupportedOperationException(INSERT_SELECT_REJECTION);
-        }
-    }
-
-    /**
      * Rejects the multi-table {@code UPDATE} forms, whose updated rows this
      * subset does not model, on an {@code :exec} and on a returning update
      * alike.
@@ -1144,19 +1118,26 @@ public final class QueryAnalyzer {
     }
 
     /**
-     * Resolves the {@code INSERT} parameters by pairing the explicit column
-     * list with the single values row, which is also their textual order. A
-     * value that binds no placeholder reaches the database as written, so only
-     * its target column must exist.
+     * Resolves the rows an {@code INSERT} writes against its explicit column
+     * list, which pairs with the written values by position and is also their
+     * textual order.
      *
-     * <p>A target written with a subscript inserts into one element of its
-     * array column, so its value is not typed from that column, which must
-     * still exist.
+     * <p>The row source is classified inside its parentheses, at any depth, as
+     * a top-level {@code SELECT} is, so {@code VALUES} rows written inside
+     * parentheses are those rows and a parenthesized query is the query it
+     * encloses. A column list with no row source, as in {@code DEFAULT VALUES},
+     * states no row of this subset at all.
+     *
+     * <p>Every parenthesis level of the row source may declare a {@code WITH}
+     * list of its own, which is analyzed beside the insert's own clauses so its
+     * placeholders are typed from its columns. A {@code VALUES} source reads no
+     * source, so the derived sources such a list declares are read by nothing.
      */
-    private void resolveInsertParameters(
+    private void resolveInsertRows(
         Insert insert,
         dev.sqlcj.schema.Table table,
-        Placeholders placeholders
+        List<Source> insertCommonTableExpressions,
+        Analysis analysis
     ) {
         ExpressionList<net.sf.jsqlparser.schema.Column> columns = insert.getColumns();
 
@@ -1164,12 +1145,80 @@ public final class QueryAnalyzer {
             throw new UnsupportedOperationException("INSERT requires an explicit column list.");
         }
 
-        ParenthesedExpressionList<?> values = resolveInsertValues(insert);
+        Select rowSource = insert.getSelect();
 
-        if (values.size() != columns.size()) {
-            throw new UnsupportedOperationException(
-                "INSERT column and value counts must match."
-            );
+        if (rowSource == null) {
+            throw new UnsupportedOperationException(INSERT_ROW_SOURCE_REJECTION);
+        }
+
+        List<Select> selects = parenthesisLevels(rowSource);
+
+        if (selects.get(selects.size() - 1) instanceof Values values) {
+            analyzeCommonTableExpressions(selects, analysis, insertCommonTableExpressions);
+            resolveInsertValueRows(values, columns, table, analysis.placeholders());
+
+            return;
+        }
+
+        PlainSelect plainSelect = requirePlainSelect(selects);
+
+        resolveInsertSelect(
+            plainSelect,
+            columns,
+            table,
+            analyzeCommonTableExpressions(selects, analysis, insertCommonTableExpressions),
+            analysis
+        );
+    }
+
+    /**
+     * Resolves the values of every {@code VALUES} row against the column list,
+     * which pairs with each row by position. The parser reports one row as the
+     * parenthesized list of its values and several rows as a list of such
+     * rows, so an element that is not a parenthesized row states no row.
+     */
+    private void resolveInsertValueRows(
+        Values values,
+        ExpressionList<net.sf.jsqlparser.schema.Column> columns,
+        dev.sqlcj.schema.Table table,
+        Placeholders placeholders
+    ) {
+        ExpressionList<?> rows = values.getExpressions();
+
+        if (rows instanceof ParenthesedExpressionList<?> singleRow) {
+            resolveInsertValueRow(singleRow, columns, table, placeholders);
+
+            return;
+        }
+
+        for (Expression element : rows) {
+            if (!(element instanceof ParenthesedExpressionList<?> row)) {
+                throw new UnsupportedOperationException(INSERT_ROW_SOURCE_REJECTION);
+            }
+
+            resolveInsertValueRow(row, columns, table, placeholders);
+        }
+    }
+
+    /**
+     * Resolves one {@code VALUES} row, each of whose values is typed from the
+     * column it is written into. A value that binds no placeholder reaches the
+     * database as written, so only its target column must exist, and a
+     * placeholder repeated across rows is one parameter bound at each of its
+     * positions.
+     *
+     * <p>A target written with a subscript inserts into one element of its
+     * array column, so its value is not typed from that column, which must
+     * still exist.
+     */
+    private void resolveInsertValueRow(
+        ParenthesedExpressionList<?> row,
+        ExpressionList<net.sf.jsqlparser.schema.Column> columns,
+        dev.sqlcj.schema.Table table,
+        Placeholders placeholders
+    ) {
+        if (row.size() != columns.size()) {
+            throw new UnsupportedOperationException(INSERT_COUNT_REJECTION);
         }
 
         for (int index = 0; index < columns.size(); index++) {
@@ -1177,21 +1226,136 @@ public final class QueryAnalyzer {
             dev.sqlcj.schema.Column column = findColumn(table, target.getUnquotedColumnName());
 
             if (directColumn(target) != null) {
-                resolveColumnValue(values.get(index), column, placeholders);
+                resolveColumnValue(row.get(index), column, placeholders);
             }
         }
     }
 
-    private ParenthesedExpressionList<?> resolveInsertValues(Insert insert) {
-        Values values = insert.getValues();
+    /**
+     * Resolves the {@code SELECT} an insert reads its rows from, which is
+     * analyzed by the rules of a nested read: its sources resolve against the
+     * common table expressions in scope, and its join conditions, {@code WHERE},
+     * and pagination clauses type their own placeholders. It sees no source of
+     * the insert, as PostgreSQL scopes it, and it may omit {@code FROM}, which
+     * states one row of values and no source at all.
+     *
+     * <p>Its items pair with the column list by position and must match its
+     * count. An item that is a placeholder, or a cast of one, is the value of
+     * its target column, so it is typed as a written value is; a direct column
+     * only resolves against the select's own sources, whether or not the schema
+     * maps its type, because it binds nothing; and every other item reaches the
+     * database as written.
+     */
+    private void resolveInsertSelect(
+        PlainSelect plainSelect,
+        ExpressionList<net.sf.jsqlparser.schema.Column> columns,
+        dev.sqlcj.schema.Table table,
+        List<Source> commonTableExpressions,
+        Analysis analysis
+    ) {
+        List<Source> sources = plainSelect.getFromItem() == null
+            ? List.of()
+            : resolveSources(plainSelect, analysis, commonTableExpressions, null);
 
-        if (values == null || !(values.getExpressions() instanceof ParenthesedExpressionList<?> row)) {
-            throw new UnsupportedOperationException(
-                "INSERT requires a single VALUES row."
+        Scope scope = Scope.of(sources, commonTableExpressions);
+
+        List<Expression> items = resolveInsertSelectItems(plainSelect, sources);
+
+        if (items.size() != columns.size()) {
+            throw new UnsupportedOperationException(INSERT_COUNT_REJECTION);
+        }
+
+        for (int index = 0; index < columns.size(); index++) {
+            net.sf.jsqlparser.schema.Column target = columns.get(index);
+
+            resolveInsertSelectItem(
+                items.get(index),
+                target,
+                findColumn(table, target.getUnquotedColumnName()),
+                scope,
+                analysis.placeholders()
             );
         }
 
-        return row;
+        resolveBindingParameters(plainSelect, scope, analysis);
+    }
+
+    /**
+     * The items an insert's {@code SELECT} writes by position, where each
+     * column a wildcard expands to is one item of its own, reported as
+     * {@code null} because it states a column of a source rather than a
+     * written value. A wildcard expands over the columns of each source in
+     * declared order, and {@code qualifier.*} over the columns of that one
+     * source, neither of which needs a mapped type, because nothing binds them.
+     */
+    private List<Expression> resolveInsertSelectItems(
+        PlainSelect plainSelect,
+        List<Source> sources
+    ) {
+        List<Expression> items = new ArrayList<>();
+
+        for (SelectItem<?> selectItem : plainSelect.getSelectItems()) {
+            Expression expression = selectItem.getExpression();
+
+            if (expression instanceof AllTableColumns allTableColumns) {
+                addWildcardItems(
+                    items,
+                    findSource(sources, allTableColumns.getTable().getUnquotedName())
+                );
+
+                continue;
+            }
+
+            if (expression instanceof AllColumns) {
+                for (Source source : sources) {
+                    addWildcardItems(items, source);
+                }
+
+                continue;
+            }
+
+            items.add(expression);
+        }
+
+        return items;
+    }
+
+    /** One wildcard item per column of the source the wildcard expands over. */
+    private void addWildcardItems(List<Expression> items, Source source) {
+        for (int index = 0; index < source.table().columns().size(); index++) {
+            items.add(null);
+        }
+    }
+
+    /**
+     * Resolves one item of an insert's {@code SELECT} as the value of the
+     * column it is written into. A wildcard's column states a column of a
+     * source rather than a value, so it types nothing, and neither does a
+     * direct column, which only resolves, nor a value of a subscripted target,
+     * whose array column must still exist.
+     */
+    private void resolveInsertSelectItem(
+        Expression item,
+        net.sf.jsqlparser.schema.Column target,
+        dev.sqlcj.schema.Column column,
+        Scope scope,
+        Placeholders placeholders
+    ) {
+        if (item == null) {
+            return;
+        }
+
+        net.sf.jsqlparser.schema.Column selectedColumn = directColumn(item);
+
+        if (selectedColumn != null) {
+            resolveColumn(selectedColumn, scope);
+
+            return;
+        }
+
+        if (directColumn(target) != null) {
+            resolveColumnValue(item, column, placeholders);
+        }
     }
 
     /**

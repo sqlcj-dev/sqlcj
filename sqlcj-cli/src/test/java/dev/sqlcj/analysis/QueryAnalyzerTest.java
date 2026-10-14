@@ -172,6 +172,45 @@ class QueryAnalyzerTest {
     );
 
     /**
+     * A schema whose {@code memberships} table is written from several
+     * {@code VALUES} rows and from the rows of the {@code invitations} and
+     * {@code users} tables. {@code invitations} carries exactly the two columns
+     * a wildcard item expands to, and {@code labels} is the array column a
+     * subscripted target writes one element of.
+     */
+    private static final Schema insertSourceSchema = new Schema(
+        List.of(
+            new Table(
+                "memberships",
+                List.of(
+                    new Column("project_id", ColumnType.BIGINT, false),
+                    new Column("user_id", ColumnType.BIGINT, false),
+                    new Column("role", ColumnType.VARCHAR, true),
+                    new Column("labels", ColumnType.VARCHAR, true, null, null, true)
+                ),
+                List.of()
+            ),
+            new Table(
+                "invitations",
+                List.of(
+                    new Column("project_id", ColumnType.BIGINT, false),
+                    new Column("user_id", ColumnType.BIGINT, false)
+                ),
+                List.of()
+            ),
+            new Table(
+                "users",
+                List.of(
+                    new Column("id", ColumnType.BIGINT, false),
+                    new Column("name", ColumnType.VARCHAR, true),
+                    new Column("active", ColumnType.BOOLEAN, true)
+                ),
+                List.of()
+            )
+        )
+    );
+
+    /**
      * A schema whose {@code users} table carries the text and {@code JSONB}
      * columns the untyped-placeholder diagnostics read around a placeholder.
      */
@@ -4625,12 +4664,6 @@ class QueryAnalyzerTest {
     @CsvSource(
         delimiter = '|',
         value = {
-            "INSERT INTO users (id) SELECT id FROM users RETURNING id"
-                + "|INSERT ... SELECT is not supported.",
-            "INSERT INTO users (id) (VALUES ($1)) RETURNING id"
-                + "|RETURNING requires an INSERT with a single VALUES row.",
-            "INSERT INTO users (id) VALUES ($1), ($2) RETURNING id"
-                + "|INSERT requires a single VALUES row.",
             "UPDATE users SET name = $2 FROM profiles WHERE users.id = $1 RETURNING id"
                 + "|UPDATE ... FROM and joined updates are not supported.",
             "DELETE FROM users USING profiles WHERE users.id = $1 RETURNING id"
@@ -5449,28 +5482,543 @@ class QueryAnalyzerTest {
     }
 
     /**
-     * Parentheses around a query source state a query all the same, so such an
-     * insert stays rejected on an {@code :exec} and on a returning insert
-     * alike.
+     * Each {@code VALUES} row pairs with the column list by position, so a
+     * named placeholder repeated across two rows is one parameter bound at both
+     * of its textual positions.
+     */
+    @Test
+    void shouldAnalyzeInsertWithSeveralValuesRows() {
+        String sql = "INSERT INTO memberships (project_id, user_id)"
+            + " VALUES (:projectId, :firstUser), (:projectId, :secondUser)";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CreateMemberships", QueryType.EXEC, sql),
+            parser.parse(sql),
+            insertSourceSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "projectId", ColumnType.BIGINT),
+                new QueryParameter(2, "firstUser", ColumnType.BIGINT),
+                new QueryParameter(3, "secondUser", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2, 1, 3), model.bindingParameterIndexes());
+
+        assertEquals(
+            "INSERT INTO memberships (project_id, user_id)"
+                + " VALUES (?, ?), (?, ?)",
+            model.executableSql()
+        );
+    }
+
+    /**
+     * Several rows written with indexed placeholders repeat one index across
+     * rows and accept a value that binds none, exactly as a single row does.
+     */
+    @Test
+    void shouldAnalyzeIndexedInsertWithSeveralValuesRows() {
+        String sql = "INSERT INTO memberships (project_id, user_id, role)"
+            + " VALUES ($1, $2, DEFAULT), ($1, $3, 'owner')";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CreateMemberships", QueryType.EXEC, sql),
+            parser.parse(sql),
+            insertSourceSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "project_id", ColumnType.BIGINT),
+                new QueryParameter(2, "user_id", ColumnType.BIGINT),
+                new QueryParameter(3, "user_id", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2, 1, 3), model.bindingParameterIndexes());
+
+        assertEquals(
+            "INSERT INTO memberships (project_id, user_id, role)"
+                + " VALUES (?, ?, DEFAULT), (?, ?, 'owner')",
+            model.executableSql()
+        );
+    }
+
+    /**
+     * An insert's {@code SELECT} may omit {@code FROM}, which states one row of
+     * values: a placeholder item is typed and named by its target column, while
+     * a cast placeholder inside a computed item keeps its own name and the type
+     * its cast states.
+     */
+    @Test
+    void shouldAnalyzeInsertSelectWithoutFrom() {
+        String sql = "INSERT INTO memberships (project_id, user_id)"
+            + " SELECT :projectId, unnest(:userIds::bigint[])";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CreateMemberships", QueryType.EXEC, sql),
+            parser.parse(sql),
+            insertSourceSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "projectId", ColumnType.BIGINT),
+                new QueryParameter(2, "userIds", ColumnType.BIGINT, null, true)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+
+        assertEquals(
+            "INSERT INTO memberships (project_id, user_id)"
+                + " SELECT ?, unnest(?::bigint[])",
+            model.executableSql()
+        );
+    }
+
+    /**
+     * A cast placeholder that is a whole item is typed by its cast and named
+     * after the column it is written into, as a cast write value is.
+     */
+    @Test
+    void shouldNameAnInsertSelectCastItemAfterItsTargetColumn() {
+        String sql = "INSERT INTO memberships (project_id, user_id) SELECT $1::bigint, $2";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CreateMembership", QueryType.EXEC, sql),
+            parser.parse(sql),
+            insertSourceSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "project_id", ColumnType.BIGINT),
+                new QueryParameter(2, "user_id", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A subscripted target writes one element of its array column rather than
+     * the column, so its item is not typed from that column and a cast
+     * placeholder there is named after its own index.
+     */
+    @Test
+    void shouldNotTypeAnInsertSelectItemOfASubscriptedTarget() {
+        String sql = "INSERT INTO memberships (project_id, labels[1]) SELECT $1, $2::text";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CreateMembership", QueryType.EXEC, sql),
+            parser.parse(sql),
+            insertSourceSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "project_id", ColumnType.BIGINT),
+                new QueryParameter(2, "param2", ColumnType.TEXT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+    }
+
+    /**
+     * An insert's {@code SELECT} over tables resolves its own sources and types
+     * its join condition, {@code WHERE}, and pagination placeholders by the
+     * clause rules of a read, while its direct column items only resolve.
+     */
+    @Test
+    void shouldAnalyzeInsertSelectFromATable() {
+        String sql = "INSERT INTO memberships (project_id, user_id)"
+            + " SELECT i.project_id, i.user_id"
+            + " FROM invitations i"
+            + " JOIN users u ON u.id = i.user_id AND u.name = :name"
+            + " WHERE u.active = :active"
+            + " LIMIT :pageSize";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CreateMemberships", QueryType.EXEC, sql),
+            parser.parse(sql),
+            insertSourceSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "name", ColumnType.VARCHAR),
+                new QueryParameter(2, "active", ColumnType.BOOLEAN),
+                new QueryParameter(3, "pageSize", ColumnType.INTEGER)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2, 3), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A wildcard item stands for the columns of its source in order, so it
+     * counts as one item per column and types nothing.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "INSERT INTO memberships (project_id, user_id) SELECT * FROM invitations",
+            "INSERT INTO memberships (project_id, user_id) SELECT i.* FROM invitations i"
+        }
+    )
+    void shouldCountOneInsertSelectItemPerWildcardColumn(String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("CreateMemberships", QueryType.EXEC, sql),
+            parser.parse(sql),
+            insertSourceSchema
+        );
+
+        assertTrue(model.parameters().isEmpty());
+        assertEquals(sql, model.executableSql());
+    }
+
+    /**
+     * A {@code WITH} clause written before the {@code INSERT} is read by the
+     * insert's own {@code SELECT}, and its body types its placeholders from its
+     * own columns.
+     */
+    @Test
+    void shouldAnalyzeInsertSelectReadingACommonTableExpressionOfTheInsert() {
+        String sql = "WITH invited AS (SELECT user_id FROM invitations WHERE user_id = :invitedUser)"
+            + " INSERT INTO memberships (project_id, user_id)"
+            + " SELECT :projectId, invited.user_id FROM invited";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CreateMemberships", QueryType.EXEC, sql),
+            parser.parse(sql),
+            insertSourceSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "invitedUser", ColumnType.BIGINT),
+                new QueryParameter(2, "projectId", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A {@code WITH} clause written after the column list belongs to the row
+     * source, and is analyzed and read exactly as the insert's own is.
+     */
+    @Test
+    void shouldAnalyzeACommonTableExpressionOfAnInsertSelect() {
+        String sql = "INSERT INTO memberships (project_id, user_id)"
+            + " WITH invited AS (SELECT user_id FROM invitations WHERE user_id = $1)"
+            + " SELECT $2, invited.user_id FROM invited";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CreateMemberships", QueryType.EXEC, sql),
+            parser.parse(sql),
+            insertSourceSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "user_id", ColumnType.BIGINT),
+                new QueryParameter(2, "project_id", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A {@code VALUES} source may declare a {@code WITH} clause of its own,
+     * whose body is analyzed for its own placeholders even though no source
+     * reads it.
+     */
+    @Test
+    void shouldAnalyzeACommonTableExpressionOfAValuesSource() {
+        String sql = "INSERT INTO memberships (project_id, user_id)"
+            + " WITH invited AS (SELECT user_id FROM invitations WHERE user_id = :invitedUser)"
+            + " VALUES (:projectId, :userId)";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CreateMembership", QueryType.EXEC, sql),
+            parser.parse(sql),
+            insertSourceSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "invitedUser", ColumnType.BIGINT),
+                new QueryParameter(2, "projectId", ColumnType.BIGINT),
+                new QueryParameter(3, "userId", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2, 3), model.bindingParameterIndexes());
+    }
+
+    /**
+     * {@code VALUES} rows written inside parentheses, at any depth, state those
+     * same rows, on an {@code :exec} and on a returning insert alike.
      */
     @ParameterizedTest
     @CsvSource(
         delimiter = '|',
         value = {
-            "EXEC|INSERT INTO users (id, name) (SELECT id, name FROM users)",
-            "ONE|INSERT INTO users (id, name) (SELECT id, name FROM users) RETURNING id"
+            "ONE|INSERT INTO memberships (project_id) (VALUES ($1)) RETURNING project_id",
+            "EXEC|INSERT INTO memberships (project_id) ((VALUES ($1)))"
         }
     )
-    void shouldRejectParenthesizedInsertQuerySource(QueryType type, String sql) {
-        Query query = new Query("CopyUsers", type, sql);
+    void shouldAnalyzeParenthesizedValuesRowsAtAnyDepth(QueryType type, String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("CreateMembership", type, sql),
+            parser.parse(sql),
+            insertSourceSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "project_id", ColumnType.BIGINT)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+        assertEquals(sql.replace("$1", "?"), model.executableSql());
+    }
+
+    /**
+     * A multi-row insert accepts a conflict clause and a bare
+     * {@code RETURNING *}, which returns the complete row of the target table.
+     */
+    @Test
+    void shouldAnalyzeSeveralValuesRowsWithConflictAndReturningAllColumns() {
+        String sql = "INSERT INTO memberships (project_id, user_id)"
+            + " VALUES ($1, $2), ($1, $3)"
+            + " ON CONFLICT (project_id, user_id) DO NOTHING"
+            + " RETURNING *";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CreateMemberships", QueryType.MANY, sql),
+            parser.parse(sql),
+            insertSourceSchema
+        );
+
+        assertEquals("memberships", model.rowTable());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("project_id", ColumnType.BIGINT, false),
+                new QueryColumn("user_id", ColumnType.BIGINT, false),
+                new QueryColumn("role", ColumnType.VARCHAR, true),
+                new QueryColumn("labels", ColumnType.VARCHAR, true, null, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "project_id", ColumnType.BIGINT),
+                new QueryParameter(2, "user_id", ColumnType.BIGINT),
+                new QueryParameter(3, "user_id", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2, 1, 3), model.bindingParameterIndexes());
+    }
+
+    /**
+     * An insert's {@code SELECT} accepts a {@code DO UPDATE} action whose
+     * predicate placeholder is typed by the predicate rules, and a returned
+     * column list, which keeps the query's own result.
+     */
+    @Test
+    void shouldAnalyzeInsertSelectWithConflictUpdateAndReturningColumns() {
+        String sql = "INSERT INTO memberships (project_id, user_id)"
+            + " SELECT i.project_id, i.user_id FROM invitations i"
+            + " ON CONFLICT (project_id, user_id) DO UPDATE"
+            + " SET role = :role"
+            + " WHERE memberships.user_id = :owner"
+            + " RETURNING project_id, user_id";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CreateMemberships", QueryType.MANY, sql),
+            parser.parse(sql),
+            insertSourceSchema
+        );
+
+        assertNull(model.rowTable());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("project_id", ColumnType.BIGINT, false),
+                new QueryColumn("user_id", ColumnType.BIGINT, false)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "role", ColumnType.VARCHAR),
+                new QueryParameter(2, "owner", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+    }
+
+    /**
+     * Every placeholder of an insert binds in the textual order the query
+     * writes it, across the insert's {@code WITH} body, the items and
+     * {@code WHERE} of its {@code SELECT}, and its conflict clause.
+     */
+    @Test
+    void shouldBindInsertSelectParametersInTextualOrder() {
+        String sql = "WITH invited AS (SELECT user_id FROM invitations WHERE user_id = $4)"
+            + " INSERT INTO memberships (project_id, user_id)"
+            + " SELECT $3, invited.user_id FROM invited"
+            + " WHERE invited.user_id = $2"
+            + " ON CONFLICT (project_id, user_id) DO UPDATE SET role = $1";
+
+        QueryModel model = analyzer.analyze(
+            new Query("CreateMemberships", QueryType.EXEC, sql),
+            parser.parse(sql),
+            insertSourceSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "role", ColumnType.VARCHAR),
+                new QueryParameter(2, "user_id", ColumnType.BIGINT),
+                new QueryParameter(3, "project_id", ColumnType.BIGINT),
+                new QueryParameter(4, "user_id", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(4, 3, 2, 1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * An insert writes its rows from parenthesized {@code VALUES} rows or from
+     * a {@code SELECT}, so an element that is not a parenthesized row and a
+     * column list with no row source at all state no row of this subset.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "INSERT INTO memberships (project_id) VALUES ROW(1)",
+            "INSERT INTO memberships (project_id) VALUES (1), 2",
+            "INSERT INTO memberships (project_id) DEFAULT VALUES"
+        }
+    )
+    void shouldRejectAnInsertRowSourceOutsideTheSubset(String sql) {
+        Query query = new Query("CreateMembership", QueryType.EXEC, sql);
         ParsedSql parsedSql = parser.parse(sql);
 
         UnsupportedOperationException exception = assertThrows(
             UnsupportedOperationException.class,
-            () -> analyzer.analyze(query, parsedSql, writeSchema)
+            () -> analyzer.analyze(query, parsedSql, insertSourceSchema)
         );
 
-        assertEquals("INSERT ... SELECT is not supported.", exception.getMessage());
+        assertEquals(
+            "INSERT requires parenthesized VALUES rows or a SELECT.",
+            exception.getMessage()
+        );
+    }
+
+    /** Each {@code VALUES} row and an insert's {@code SELECT} must write one value per written column. */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "INSERT INTO memberships (project_id, user_id) VALUES ($1, $2), ($3)",
+            "INSERT INTO memberships (project_id) SELECT * FROM invitations"
+        }
+    )
+    void shouldRejectInsertColumnAndValueCountMismatch(String sql) {
+        Query query = new Query("CreateMemberships", QueryType.EXEC, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, insertSourceSchema)
+        );
+
+        assertEquals("INSERT column and value counts must match.", exception.getMessage());
+    }
+
+    /**
+     * An insert's row source is classified inside its parentheses as a
+     * top-level read is, so a set operation there keeps the set-operation
+     * diagnostic.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "INSERT INTO memberships (project_id, user_id)"
+                + " SELECT project_id, user_id FROM invitations"
+                + " UNION SELECT project_id, user_id FROM invitations",
+            "INSERT INTO memberships (project_id, user_id)"
+                + " (SELECT project_id, user_id FROM invitations"
+                + " UNION SELECT project_id, user_id FROM invitations)"
+        }
+    )
+    void shouldRejectASetOperationAsAnInsertRowSource(String sql) {
+        Query query = new Query("CreateMemberships", QueryType.EXEC, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, insertSourceSchema)
+        );
+
+        assertEquals(
+            "UNION, INTERSECT, and EXCEPT are not supported; write one query per SELECT.",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A direct column item resolves against the sources of the insert's
+     * {@code SELECT} alone, which expose neither an unknown column nor the
+     * insert's target.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        value = {
+            "INSERT INTO memberships (project_id, user_id)"
+                + " SELECT project_id, missing FROM invitations"
+                + "|Column not found in sources invitations: missing",
+            "INSERT INTO memberships (project_id, user_id)"
+                + " SELECT memberships.project_id, user_id FROM invitations"
+                + "|Unknown source qualifier in query: memberships"
+        }
+    )
+    void shouldRejectAnInsertSelectItemOutsideItsSources(String sql, String message) {
+        Query query = new Query("CreateMemberships", QueryType.EXEC, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, parsedSql, insertSourceSchema)
+        );
+
+        assertEquals(message, exception.getMessage());
     }
 
     /**
@@ -5672,19 +6220,11 @@ class QueryAnalyzerTest {
         );
     }
 
-    /** A row assignment and a multi-row insert stay rejected. */
-    @ParameterizedTest
-    @CsvSource(
-        delimiter = '|',
-        quoteCharacter = '"',
-        value = {
-            "UPDATE users SET (name, active) = ('a', true)|"
-                + "UPDATE assignments must set one column at a time.",
-            "INSERT INTO users (id, name) VALUES (1, 'a'), (2, 'b')|"
-                + "INSERT requires a single VALUES row."
-        }
-    )
-    void shouldRejectExcludedWriteValueForm(String sql, String message) {
+    /** An assignment that sets a row of columns at once stays rejected. */
+    @Test
+    void shouldRejectExcludedWriteValueForm() {
+        String sql = "UPDATE users SET (name, active) = ('a', true)";
+
         Query query = new Query("TouchUsers", QueryType.EXEC, sql);
         ParsedSql parsedSql = parser.parse(sql);
 
@@ -5693,7 +6233,10 @@ class QueryAnalyzerTest {
             () -> analyzer.analyze(query, parsedSql, writeSchema)
         );
 
-        assertEquals(message, exception.getMessage());
+        assertEquals(
+            "UPDATE assignments must set one column at a time.",
+            exception.getMessage()
+        );
     }
 
     /**

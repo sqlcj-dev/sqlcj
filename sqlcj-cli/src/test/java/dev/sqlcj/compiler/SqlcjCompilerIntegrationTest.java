@@ -2459,18 +2459,14 @@ class SqlcjCompilerIntegrationTest {
             ),
             Arguments.of(
                 ":exec",
-                "INSERT INTO users (id, name) VALUES ($1, $2), ($3, $4)",
-                "INSERT requires a single VALUES row."
+                "INSERT INTO users (id, name) SELECT id, nickname FROM profiles"
+                    + " UNION SELECT id, nickname FROM profiles",
+                setOperation
             ),
             Arguments.of(
                 ":exec",
-                "INSERT INTO users (id, name) SELECT id, nickname FROM profiles",
-                "INSERT ... SELECT is not supported."
-            ),
-            Arguments.of(
-                ":many",
-                "INSERT INTO users (id, name) SELECT id, nickname FROM profiles RETURNING id",
-                "INSERT ... SELECT is not supported."
+                "INSERT INTO users (id, name) SELECT id FROM profiles",
+                "INSERT column and value counts must match."
             ),
             Arguments.of(
                 ":exec",
@@ -3983,6 +3979,77 @@ class SqlcjCompilerIntegrationTest {
             ),
             source
         );
+    }
+
+    /**
+     * Several {@code VALUES} rows, an insert's {@code SELECT} without
+     * {@code FROM}, and an insert over a common table expression and a join
+     * generate compilable Java whose method parameters are typed from the
+     * written columns, while a returning insert keeps the target's shared row
+     * record.
+     */
+    @Test
+    void shouldGenerateCompilableJavaForMultiRowAndSelectSourcedInserts() throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Files.writeString(schemaFile, JOIN_SCHEMA);
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: CreateTwoProfiles :exec
+                INSERT INTO profiles (id, user_id, nickname)
+                VALUES (:firstId, :userId, :firstNickname),
+                       (:secondId, :userId, :secondNickname);
+
+                -- name: CreateUserProfiles :many
+                INSERT INTO profiles (id, user_id)
+                SELECT :profileId, unnest(:userIds::bigint[])
+                ON CONFLICT (id) DO NOTHING
+                RETURNING *;
+
+                -- name: CopyRecentOrderProfiles :exec
+                WITH recent AS (SELECT o.id, o.user_id
+                                FROM orders o
+                                WHERE o.total = :total)
+                INSERT INTO profiles (id, user_id, nickname)
+                SELECT recent.id, recent.user_id, u.name
+                FROM recent
+                JOIN users u ON u.id = recent.user_id;
+                """
+        );
+
+        String source = Files.readString(
+            generateUsersRepository(
+                List.of(schemaFile.toString()),
+                queriesFile,
+                generatedDirectory
+            )
+        );
+
+        assertTrue(
+            source.contains(
+                "public int createTwoProfiles(Long firstId, Long userId, String firstNickname,"
+                    + " Long secondId, String secondNickname)"
+            ),
+            source
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<ProfilesRow> createUserProfiles(Long profileId, List<Long> userIds)"
+            ),
+            source
+        );
+
+        assertTrue(
+            source.contains("public int copyRecentOrderProfiles(BigDecimal total)"),
+            source
+        );
+
+        assertCompiles(generatedDirectory, tempDir.resolve("classes"));
     }
 
     /**
