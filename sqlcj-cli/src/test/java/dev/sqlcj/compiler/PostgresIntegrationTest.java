@@ -3489,6 +3489,125 @@ class PostgresIntegrationTest {
     }
 
     /**
+     * Covers joined writes end to end: an update whose rows a joined source
+     * selects returns the target's complete row through the shared row record a
+     * full-row read of the same table returns, and a {@code USING} delete
+     * returns one column of each of its two sources. PostgreSQL does not
+     * guarantee the returned row order, so the updated rows are compared as a
+     * set.
+     */
+    @Test
+    void shouldExecuteGeneratedJoinedWritesAgainstPostgres() throws Exception {
+        execute(CONSTRAINT_SCHEMA);
+
+        Path classesDirectory = generateAndCompile(
+            CONSTRAINT_SCHEMA,
+            """
+                -- name: SetCustomerOrderQuantities :many
+                UPDATE customer_orders o
+                SET quantity = :quantity
+                FROM customers c
+                WHERE c.id = o.customer_id
+                  AND c.name = :name
+                RETURNING o.*;
+
+                -- name: DeleteCustomerOrders :many
+                DELETE FROM customer_orders o
+                USING customers c
+                WHERE c.id = o.customer_id
+                  AND c.name = :name
+                RETURNING o.id, c.name;
+
+                -- name: ListCustomerOrderRows :many
+                SELECT *
+                FROM customer_orders
+                ORDER BY id;
+                """
+        );
+
+        execute("INSERT INTO customers (id, name) VALUES (1, 'Alice'), (2, 'Bob')");
+
+        execute(
+            """
+                INSERT INTO customer_orders (id, customer_id, quantity)
+                VALUES (10, 1, 3), (20, 1, 4), (30, 2, 1)
+                """
+        );
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            List<?> updated = assertInstanceOf(
+                List.class,
+                repository
+                    .getClass()
+                    .getMethod("setCustomerOrderQuantities", Integer.class, String.class)
+                    .invoke(repository, 9, "Alice")
+            );
+
+            assertEquals(2, updated.size());
+
+            assertEquals(
+                List.of("id", "customerId", "quantity", "status", "createdAt"),
+                recordComponentNames(updated.get(0))
+            );
+
+            List<List<Object>> updatedRows = new ArrayList<>();
+
+            for (Object updatedRow : updated) {
+                updatedRows.add(
+                    List.of(
+                        component(updatedRow, "id"),
+                        component(updatedRow, "customerId"),
+                        component(updatedRow, "quantity")
+                    )
+                );
+            }
+
+            assertEquals(
+                Set.of(
+                    List.of(10L, 1L, 9),
+                    List.of(20L, 1L, 9)
+                ),
+                Set.copyOf(updatedRows)
+            );
+
+            List<?> deletedRows = assertInstanceOf(
+                List.class,
+                repository
+                    .getClass()
+                    .getMethod("deleteCustomerOrders", String.class)
+                    .invoke(repository, "Bob")
+            );
+
+            assertEquals(1, deletedRows.size());
+
+            assertEquals(
+                List.of("id", "name"),
+                recordComponentNames(deletedRows.get(0))
+            );
+
+            assertEquals(30L, component(deletedRows.get(0), "id"));
+            assertEquals("Bob", component(deletedRows.get(0), "name"));
+
+            List<?> rows = assertInstanceOf(
+                List.class,
+                repository.getClass().getMethod("listCustomerOrderRows").invoke(repository)
+            );
+
+            assertEquals(2, rows.size());
+
+            assertEquals(updated.get(0).getClass(), rows.get(0).getClass());
+
+            assertEquals(10L, component(rows.get(0), "id"));
+            assertEquals(9, component(rows.get(0), "quantity"));
+
+            assertEquals(20L, component(rows.get(1), "id"));
+            assertEquals(9, component(rows.get(1), "quantity"));
+        }
+    }
+
+    /**
      * Covers a returning insert: the database-generated serial values and the
      * target-table order of {@code RETURNING *} are read through the generated
      * typed result record.

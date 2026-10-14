@@ -144,16 +144,6 @@ class ReferenceServiceIntegrationTest {
             "LATERAL is not supported."
         ),
         new UnsupportedQuery(
-            "update_from.sql",
-            "RaiseProjectTaskPriority",
-            "UPDATE ... FROM and joined updates are not supported."
-        ),
-        new UnsupportedQuery(
-            "delete_using.sql",
-            "DeleteProjectComments",
-            "DELETE ... USING and joined deletes are not supported."
-        ),
-        new UnsupportedQuery(
             "uncast_lower.sql",
             "FindUserByEmail",
             "Cannot infer the type of :email in lower(:email); "

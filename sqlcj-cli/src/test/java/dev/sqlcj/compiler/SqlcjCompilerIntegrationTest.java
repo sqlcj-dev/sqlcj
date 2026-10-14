@@ -2470,24 +2470,28 @@ class SqlcjCompilerIntegrationTest {
             ),
             Arguments.of(
                 ":exec",
-                "UPDATE users SET name = $2 FROM profiles WHERE users.id = $1",
-                "UPDATE ... FROM and joined updates are not supported."
-            ),
-            Arguments.of(
-                ":exec",
                 "UPDATE users, profiles SET name = $2 WHERE users.id = $1",
-                "UPDATE ... FROM and joined updates are not supported."
+                "UPDATE of several tables is not supported;"
+                    + " write the other sources in UPDATE ... FROM."
             ),
             Arguments.of(
                 ":exec",
-                "DELETE FROM users USING profiles WHERE users.id = $1",
-                "DELETE ... USING and joined deletes are not supported."
+                "UPDATE users u JOIN profiles p ON p.user_id = u.id SET name = $1",
+                "UPDATE of several tables is not supported;"
+                    + " write the other sources in UPDATE ... FROM."
             ),
             Arguments.of(
                 ":exec",
                 "DELETE users FROM users JOIN profiles ON profiles.user_id = users.id"
                     + " WHERE users.id = $1",
-                "DELETE ... USING and joined deletes are not supported."
+                "A joined DELETE is not supported;"
+                    + " write the other sources in DELETE ... USING."
+            ),
+            Arguments.of(
+                ":many",
+                "UPDATE users u SET name = $1 FROM profiles p WHERE p.user_id = u.id RETURNING *",
+                "RETURNING * is not supported with UPDATE ... FROM or DELETE ... USING;"
+                    + " write RETURNING u.* for the target's row."
             )
         );
     }
@@ -4047,6 +4051,94 @@ class SqlcjCompilerIntegrationTest {
         assertTrue(
             source.contains("public int copyRecentOrderProfiles(BigDecimal total)"),
             source
+        );
+
+        assertCompiles(generatedDirectory, tempDir.resolve("classes"));
+    }
+
+    /**
+     * A joined update and a {@code USING} delete generate compilable Java whose
+     * method parameters are typed from the columns of their added sources,
+     * whose returned columns of a left-joined source are nullable, and whose
+     * {@code RETURNING <target>.*} keeps the target's shared row record.
+     */
+    @Test
+    void shouldGenerateCompilableJavaForJoinedWrites() throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Files.writeString(schemaFile, JOIN_SCHEMA);
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: RenameProfiledUsers :many
+                UPDATE users u
+                SET name = :name
+                FROM profiles p
+                WHERE p.user_id = u.id
+                  AND p.nickname = :nickname
+                RETURNING u.*;
+
+                -- name: ListRenamedOrderTotals :many
+                UPDATE users u
+                SET name = :name
+                FROM profiles p
+                LEFT JOIN orders o ON o.user_id = p.user_id
+                    AND o.total = :total
+                WHERE p.user_id = u.id
+                RETURNING u.id, o.id AS order_id, o.total;
+
+                -- name: DeleteOrderingUsers :many
+                WITH top_orders AS (SELECT user_id, total
+                                    FROM orders
+                                    WHERE total = :total)
+                DELETE FROM users u
+                USING top_orders
+                WHERE top_orders.user_id = u.id
+                RETURNING u.name, top_orders.total;
+                """
+        );
+
+        String source = Files.readString(
+            generateUsersRepository(
+                List.of(schemaFile.toString()),
+                queriesFile,
+                generatedDirectory
+            )
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<UsersRow> renameProfiledUsers(String name, String nickname)"
+            ),
+            source
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<ListRenamedOrderTotalsResult> listRenamedOrderTotals(String name,"
+                    + " BigDecimal total)"
+            ),
+            source
+        );
+
+        assertEquals(
+            List.of("Long id", "Long orderId", "BigDecimal total"),
+            recordComponents(source, "ListRenamedOrderTotalsResult")
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<DeleteOrderingUsersResult> deleteOrderingUsers(BigDecimal total)"
+            ),
+            source
+        );
+
+        assertEquals(
+            List.of("String name", "BigDecimal total"),
+            recordComponents(source, "DeleteOrderingUsersResult")
         );
 
         assertCompiles(generatedDirectory, tempDir.resolve("classes"));

@@ -119,6 +119,57 @@ public final class QueryAnalyzer {
     private static final String COMPUTED_RETURNING_REJECTION = """
         Unsupported RETURNING item %s; return columns of the target table or *""";
 
+    /**
+     * The rejection of an aliased returned wildcard, which is written as the
+     * query spells the wildcard, because an alias names one result component
+     * and a wildcard returns a row of them.
+     */
+    private static final String RETURNING_WILDCARD_ALIAS_REJECTION = """
+        RETURNING %s must not be aliased.""";
+
+    /**
+     * The rejection of a modified returned wildcard, which is written as the
+     * query spells the wildcard, because a modifier changes which columns the
+     * wildcard returns.
+     */
+    private static final String RETURNING_WILDCARD_MODIFIER_REJECTION = """
+        RETURNING %s must not be modified.""";
+
+    /**
+     * The rejection of a bare {@code *} on a joined write, which PostgreSQL
+     * returns the columns of every source for, while the only complete row such
+     * a write returns here is its target's.
+     */
+    private static final String JOINED_RETURNING_ALL_REJECTION = """
+        RETURNING * is not supported with UPDATE ... FROM or DELETE ... USING; \
+        write RETURNING %s.* for the target's row.""";
+
+    /**
+     * The rejection of a returned wildcard of a source other than the write
+     * target, whose complete row the write does not return, named by the source
+     * the qualifier exposes.
+     */
+    private static final String OTHER_SOURCE_RETURNING_WILDCARD_REJECTION = """
+        RETURNING %s.* is not supported; return the columns of %s by name.""";
+
+    /**
+     * The rejection of an {@code UPDATE} that names several targets, whose
+     * updated rows this subset does not model, naming the clause that adds a
+     * source instead.
+     */
+    private static final String MULTI_TABLE_UPDATE_REJECTION = """
+        UPDATE of several tables is not supported; write the other sources in UPDATE ... FROM.""";
+
+    /**
+     * The rejection of a joined {@code DELETE}, whose deleted rows this subset
+     * does not model, naming the clause that adds a source instead.
+     */
+    private static final String JOINED_DELETE_REJECTION = """
+        A joined DELETE is not supported; write the other sources in DELETE ... USING.""";
+
+    /** The rejection of a source of a write's {@code FROM} or {@code USING}. */
+    private static final String WRITE_SOURCE_REJECTION = "Only table sources are supported.";
+
     /** The rejection of a {@code LATERAL} source. */
     private static final String LATERAL_REJECTION = "LATERAL is not supported.";
 
@@ -832,8 +883,8 @@ public final class QueryAnalyzer {
         String rowTable = null;
 
         if (returningClause != null) {
-            columns = resolveReturningColumns(returningClause, source);
-            rowTable = resolveReturningRowTable(returningClause, source);
+            columns = resolveReturningColumns(returningClause, List.of(source));
+            rowTable = resolveReturningRowTable(returningClause, List.of(source));
         }
 
         resolveConflictParameters(insert, source, commonTableExpressions, analysis);
@@ -855,7 +906,7 @@ public final class QueryAnalyzer {
         requireSupportedUpdateSources(update);
 
         Table table = update.getTable();
-        Source source = toSource(table, schema);
+        Source target = toSource(table, schema);
 
         Placeholders placeholders = toPlaceholders(parsedSql, schema);
         Analysis analysis = new Analysis(parsedSql, schema, placeholders);
@@ -865,20 +916,30 @@ public final class QueryAnalyzer {
             analysis
         );
 
+        List<Source> sources = resolveWriteSources(
+            target,
+            update.getFromItem() == null
+                ? List.of()
+                : List.of(update.getFromItem()),
+            update.getJoins(),
+            analysis,
+            commonTableExpressions
+        );
+
         List<QueryColumn> columns = List.of();
         String rowTable = null;
 
         if (returningClause != null) {
-            columns = resolveReturningColumns(returningClause, source);
-            rowTable = resolveReturningRowTable(returningClause, source);
+            columns = resolveReturningColumns(returningClause, sources);
+            rowTable = resolveReturningRowTable(returningClause, sources);
         }
 
-        resolveUpdateSetParameters(update.getUpdateSets(), source.table(), placeholders);
+        resolveUpdateSetParameters(update.getUpdateSets(), target.table(), placeholders);
 
         if (update.getWhere() != null) {
             resolveParameters(
                 update.getWhere(),
-                Scope.of(List.of(source), commonTableExpressions),
+                Scope.of(sources, commonTableExpressions),
                 analysis
             );
         }
@@ -900,7 +961,7 @@ public final class QueryAnalyzer {
         requireSupportedDeleteSources(delete);
 
         Table table = delete.getTable();
-        Source source = toSource(table, schema);
+        Source target = toSource(table, schema);
 
         Placeholders placeholders = toPlaceholders(parsedSql, schema);
         Analysis analysis = new Analysis(parsedSql, schema, placeholders);
@@ -910,18 +971,26 @@ public final class QueryAnalyzer {
             analysis
         );
 
+        List<Source> sources = resolveWriteSources(
+            target,
+            delete.getUsingFromItemList(),
+            null,
+            analysis,
+            commonTableExpressions
+        );
+
         List<QueryColumn> columns = List.of();
         String rowTable = null;
 
         if (returningClause != null) {
-            columns = resolveReturningColumns(returningClause, source);
-            rowTable = resolveReturningRowTable(returningClause, source);
+            columns = resolveReturningColumns(returningClause, sources);
+            rowTable = resolveReturningRowTable(returningClause, sources);
         }
 
         if (delete.getWhere() != null) {
             resolveParameters(
                 delete.getWhere(),
-                Scope.of(List.of(source), commonTableExpressions),
+                Scope.of(sources, commonTableExpressions),
                 analysis
             );
         }
@@ -975,10 +1044,14 @@ public final class QueryAnalyzer {
     }
 
     /**
-     * Resolves the returned columns in declared order against the single write
-     * target, expanding a bare {@code *} in schema column order.
+     * Resolves the returned columns in declared order against the write's
+     * sources, the target first, expanding a wildcard of the target in schema
+     * column order.
      */
-    private List<QueryColumn> resolveReturningColumns(ReturningClause returningClause, Source source) {
+    private List<QueryColumn> resolveReturningColumns(
+        ReturningClause returningClause,
+        List<Source> sources
+    ) {
         if (
             returningClause.getKeyword() != ReturningClause.Keyword.RETURNING
                 || returningClause.getDataItems() != null
@@ -995,7 +1068,7 @@ public final class QueryAnalyzer {
                 resolveReturningItem(
                     returningItem.getExpression(),
                     returningItem.getAlias(),
-                    source
+                    sources
                 )
             );
         }
@@ -1005,63 +1078,66 @@ public final class QueryAnalyzer {
 
     /**
      * Reports the table whose complete row a returning write returns, which is
-     * the write target when the clause is exactly a bare {@code *}, and
+     * the write target when the clause is exactly a wildcard of the target, and
      * {@code null} for a returned column list. The name is the schema's own
      * spelling of the table, so every query returning that row shares one row
      * identity.
+     *
+     * <p>A bare {@code *} is such a wildcard only on a single-table write,
+     * because a joined write returns the columns of every source for it and is
+     * rejected where the returned columns are resolved.
      */
-    private String resolveReturningRowTable(ReturningClause returningClause, Source source) {
+    private String resolveReturningRowTable(ReturningClause returningClause, List<Source> sources) {
         if (returningClause.size() != 1) {
             return null;
         }
 
-        return returningClause.get(0).getExpression() instanceof AllColumns
-            ? source.table().name()
+        Expression expression = returningClause.get(0).getExpression();
+        Source target = sources.get(0);
+
+        if (expression instanceof AllTableColumns qualified) {
+            return lookupSource(sources, returningQualifier(qualified))
+                .filter(source -> source == target)
+                .map(source -> source.table().name())
+                .orElse(null);
+        }
+
+        return expression instanceof AllColumns && sources.size() == 1
+            ? target.table().name()
             : null;
     }
 
     /**
-     * Resolves one returned item, which is either a bare {@code *} or a direct
-     * column of the write target, whose alias names its result component. A
-     * computed item, a subscripted reference included, has no schema type to
-     * generate, so it is rejected instead of analyzed.
+     * Resolves one returned item, which is either a wildcard of the write
+     * target or a direct column of one of the write's sources, whose alias
+     * names its result component. A computed item, a subscripted reference
+     * included, has no schema type to generate, so it is rejected instead of
+     * analyzed.
+     *
+     * <p>A returned column of a left-joined source is nullable even when its
+     * schema declaration is not, because an unmatched row reads it as
+     * {@code NULL}.
      */
-    private List<QueryColumn> resolveReturningItem(Expression expression, Alias alias, Source source) {
-        if (expression instanceof AllTableColumns) {
-            throw new UnsupportedOperationException(
-                "Only an unqualified RETURNING * is supported."
-            );
-        }
-
+    private List<QueryColumn> resolveReturningItem(
+        Expression expression,
+        Alias alias,
+        List<Source> sources
+    ) {
         if (expression instanceof AllColumns allColumns) {
-            if (alias != null) {
-                throw new UnsupportedOperationException(
-                    "RETURNING * must not be aliased."
-                );
-            }
-
-            if (allColumns.getExceptColumns() != null || allColumns.getReplaceExpressions() != null) {
-                throw new UnsupportedOperationException(
-                    "RETURNING * must not be modified."
-                );
-            }
-
-            return toQueryColumns(resolveAllColumns(source));
+            return resolveReturningWildcard(allColumns, alias, sources);
         }
 
         net.sf.jsqlparser.schema.Column returnedColumn = directColumn(expression);
 
         if (returnedColumn != null) {
-            dev.sqlcj.schema.Column schemaColumn = resolveColumn(
-                returnedColumn,
-                Scope.of(List.of(source))
-            ).column();
+            ResolvedColumn resolved = resolveColumn(returnedColumn, Scope.of(sources));
+            dev.sqlcj.schema.Column schemaColumn = resolved.column();
 
             return List.of(
                 new QueryColumn(
                     selectedColumnName(alias, schemaColumn),
                     requireSupportedType(schemaColumn),
-                    schemaColumn.nullable(),
+                    schemaColumn.nullable() || resolved.source().leftJoined(),
                     schemaColumn.enumType(),
                     schemaColumn.array()
                 )
@@ -1071,6 +1147,82 @@ public final class QueryAnalyzer {
         throw new UnsupportedOperationException(
             COMPUTED_RETURNING_REJECTION.formatted(written(expression))
         );
+    }
+
+    /**
+     * Resolves one returned wildcard, which returns the complete row of the
+     * write target: a bare {@code *} on a single-table write, and
+     * {@code target.*} on any write. The columns of another source are
+     * returnable by name, and a bare {@code *} on a joined write would return
+     * every source's columns, so each is rejected naming what to write instead.
+     *
+     * <p>An alias names one result component and a modifier changes which
+     * columns the wildcard returns, so neither is supported on a bare or a
+     * qualified wildcard.
+     */
+    private List<QueryColumn> resolveReturningWildcard(
+        AllColumns allColumns,
+        Alias alias,
+        List<Source> sources
+    ) {
+        String written = writtenReturningWildcard(allColumns);
+
+        if (alias != null) {
+            throw new UnsupportedOperationException(
+                RETURNING_WILDCARD_ALIAS_REJECTION.formatted(written)
+            );
+        }
+
+        if (allColumns.getExceptColumns() != null || allColumns.getReplaceExpressions() != null) {
+            throw new UnsupportedOperationException(
+                RETURNING_WILDCARD_MODIFIER_REJECTION.formatted(written)
+            );
+        }
+
+        Source target = sources.get(0);
+
+        if (!(allColumns instanceof AllTableColumns qualified)) {
+            if (sources.size() > 1) {
+                throw new UnsupportedOperationException(
+                    JOINED_RETURNING_ALL_REJECTION.formatted(target.name())
+                );
+            }
+
+            return toQueryColumns(resolveAllColumns(target));
+        }
+
+        Source source = findSource(sources, returningQualifier(qualified));
+
+        if (source != target) {
+            throw new UnsupportedOperationException(
+                OTHER_SOURCE_RETURNING_WILDCARD_REJECTION.formatted(source.name(), source.name())
+            );
+        }
+
+        return toQueryColumns(resolveAllColumns(target));
+    }
+
+    /**
+     * The exposed name a qualified returned wildcard names, which the parser
+     * reports as the wildcard's own table, and as a returning qualifier for the
+     * {@code old} and {@code new} row aliases of a write.
+     */
+    private String returningQualifier(AllTableColumns allTableColumns) {
+        Table table = allTableColumns.getTable();
+
+        return table == null
+            ? allTableColumns.getReturningQualifier()
+            : table.getUnquotedName();
+    }
+
+    /**
+     * One returned wildcard as the query writes it, which a diagnostic names,
+     * without any modifier the wildcard carries.
+     */
+    private String writtenReturningWildcard(AllColumns allColumns) {
+        return allColumns instanceof AllTableColumns qualified
+            ? returningQualifier(qualified) + ".*"
+            : "*";
     }
 
     /**
@@ -1086,34 +1238,27 @@ public final class QueryAnalyzer {
     }
 
     /**
-     * Rejects the multi-table {@code UPDATE} forms, whose updated rows this
-     * subset does not model, on an {@code :exec} and on a returning update
-     * alike.
+     * Rejects an {@code UPDATE} that names several tables before {@code SET},
+     * whose updated rows this subset does not model, on an {@code :exec} and on
+     * a returning update alike. The parser reports both the comma-separated and
+     * the joined spelling of that form as the joins of the target, so a source
+     * written in {@code FROM}, which this subset models, is not one of them.
      */
     private void requireSupportedUpdateSources(Update update) {
-        if (
-            update.getFromItem() != null
-                || update.getJoins() != null
-                || update.getStartJoins() != null
-        ) {
-            throw new UnsupportedOperationException(
-                "UPDATE ... FROM and joined updates are not supported."
-            );
+        if (update.getStartJoins() != null) {
+            throw new UnsupportedOperationException(MULTI_TABLE_UPDATE_REJECTION);
         }
     }
 
     /**
-     * Rejects the multi-table {@code DELETE} forms, whose deleted rows this
-     * subset does not model, on an {@code :exec} and on a returning delete
-     * alike.
+     * Rejects a joined {@code DELETE}, whose deleted rows this subset does not
+     * model, on an {@code :exec} and on a returning delete alike. The parser
+     * reports a {@code USING} source, which this subset models, as a source of
+     * its own clause rather than as a join.
      */
     private void requireSupportedDeleteSources(Delete delete) {
-        boolean using = delete.getUsingList() != null && !delete.getUsingList().isEmpty();
-
-        if (using || delete.getJoins() != null) {
-            throw new UnsupportedOperationException(
-                "DELETE ... USING and joined deletes are not supported."
-            );
+        if (delete.getJoins() != null) {
+            throw new UnsupportedOperationException(JOINED_DELETE_REJECTION);
         }
     }
 
@@ -1979,6 +2124,105 @@ public final class QueryAnalyzer {
         }
 
         return List.copyOf(sources);
+    }
+
+    /**
+     * Resolves the ordered sources of one write: its target, which its rows
+     * belong to, followed by every source its {@code FROM} or {@code USING}
+     * clause adds, in the order the query writes them. An exposed name that
+     * repeats among them is rejected as it is in a read, the target included.
+     *
+     * <p>Each added item written beside the others — the single {@code FROM}
+     * item, a comma-separated source after it, and each {@code USING} source —
+     * starts a join group, and each joined source joins the group it is written
+     * onto, because PostgreSQL binds a {@code JOIN} more tightly than a comma.
+     * A join condition therefore resolves its columns and types its
+     * placeholders over its own group up to and including its joined source,
+     * which never includes the target, as PostgreSQL scopes a condition inside
+     * {@code FROM}.
+     */
+    private List<Source> resolveWriteSources(
+        Source target,
+        List<FromItem> addedItems,
+        List<Join> joins,
+        Analysis analysis,
+        List<Source> commonTableExpressions
+    ) {
+        List<Source> sources = new ArrayList<>();
+        List<Source> joinGroup = new ArrayList<>();
+
+        addSource(sources, target);
+
+        for (FromItem addedItem : addedItems) {
+            addWriteSource(
+                sources,
+                joinGroup,
+                resolveSource(
+                    addedItem,
+                    WRITE_SOURCE_REJECTION,
+                    analysis,
+                    commonTableExpressions,
+                    false
+                )
+            );
+        }
+
+        if (joins == null) {
+            return List.copyOf(sources);
+        }
+
+        for (Join join : joins) {
+            if (join.isSimple()) {
+                addWriteSource(
+                    sources,
+                    joinGroup,
+                    resolveSource(
+                        join.getRightItem(),
+                        WRITE_SOURCE_REJECTION,
+                        analysis,
+                        commonTableExpressions,
+                        false
+                    )
+                );
+
+                continue;
+            }
+
+            addJoinedWriteSource(
+                sources,
+                joinGroup,
+                requireSupportedJoin(join, analysis, commonTableExpressions)
+            );
+
+            Expression condition = requireJoinCondition(join);
+            Scope scope = Scope.of(List.copyOf(joinGroup), commonTableExpressions);
+
+            resolveJoinConditionColumns(condition, scope);
+            resolveParameters(condition, scope, analysis);
+        }
+
+        return List.copyOf(sources);
+    }
+
+    /**
+     * Adds one source a write's {@code FROM} or {@code USING} clause writes
+     * beside the others, which starts a join group of its own.
+     */
+    private void addWriteSource(List<Source> sources, List<Source> joinGroup, Source source) {
+        addSource(sources, source);
+
+        joinGroup.clear();
+        joinGroup.add(source);
+    }
+
+    /**
+     * Adds one source a write's {@code FROM} clause joins onto the group it is
+     * written onto, which is the scope of its own join condition.
+     */
+    private void addJoinedWriteSource(List<Source> sources, List<Source> joinGroup, Source source) {
+        addSource(sources, source);
+
+        joinGroup.add(source);
     }
 
     private void addSource(List<Source> sources, Source source) {
