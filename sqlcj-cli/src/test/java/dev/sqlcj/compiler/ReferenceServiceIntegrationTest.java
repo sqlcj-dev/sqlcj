@@ -144,6 +144,17 @@ class ReferenceServiceIntegrationTest {
             "LATERAL is not supported."
         ),
         new UnsupportedQuery(
+            "recursive_cte.sql",
+            "ListPriorityLevels",
+            "WITH RECURSIVE is not supported."
+        ),
+        new UnsupportedQuery(
+            "data_modifying_cte.sql",
+            "DeleteDoneTasks",
+            "A data-modifying statement in WITH is not supported; "
+                + "run it as a query of its own."
+        ),
+        new UnsupportedQuery(
             "uncast_lower.sql",
             "FindUserByEmail",
             "Cannot infer the type of :email in lower(:email); "
@@ -743,6 +754,213 @@ class ReferenceServiceIntegrationTest {
                 ),
                 "the conflict-target predicate leaves a live handle to its owner"
             );
+        }
+    }
+
+    /**
+     * The generated repository executes the nested-query and multi-row write
+     * shapes this milestone adds against the migrated database: the
+     * {@code NOT EXISTS} check, the CTE report, the aliased subquery source
+     * with a {@code LIMIT} placeholder, the multi-row insert, the
+     * {@code unnest} bulk insert, the {@code INSERT ... SELECT} from a table,
+     * the joined update returning the shared task row, and the {@code USING}
+     * delete.
+     *
+     * <p>The database is shared with the other tests of this class, so this one
+     * works inside its own organization, projects, and users, and writes no
+     * audit entry.
+     */
+    @Test
+    void shouldExecuteTheGeneratedNestedQueriesAndMultiRowWrites() throws Exception {
+        Path generatedDirectory = tempDir.resolve("generated-nested");
+
+        generate(List.of(migrations().toString()), generatedDirectory);
+
+        Path classesDirectory = compile(generatedDirectory, tempDir.resolve("classes-nested"));
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Long organizationId = (Long) component(
+                invoke(repository, "createOrganization", "Nest Test", "{}"),
+                "id"
+            );
+
+            Long authorId = (Long) component(
+                invoke(repository, "createUser", organizationId, "edsger@example.com", "Edsger Dijkstra"),
+                "id"
+            );
+
+            Long otherAuthorId = (Long) component(
+                invoke(repository, "createUser", organizationId, "barbara@example.com", "Barbara Liskov"),
+                "id"
+            );
+
+            Long nestedProjectId = (Long) component(
+                invoke(repository, "createProject", organizationId, "NEST", "Nested"),
+                "id"
+            );
+
+            Long copyProjectId = (Long) component(
+                invoke(repository, "createProject", organizationId, "COPY", "Copies"),
+                "id"
+            );
+
+            assertEquals(
+                2,
+                invoke(repository, "createTwoTasks", nestedProjectId, "Alpha", "Beta"),
+                "the multi-row insert writes both rows of its VALUES list"
+            );
+
+            assertEquals(
+                2,
+                invoke(repository, "addMembers", organizationId, List.of(authorId, otherAuthorId)),
+                "the unnest bulk insert writes one membership per array element"
+            );
+
+            assertEquals(
+                0,
+                invoke(repository, "addMembers", organizationId, List.of(authorId, otherAuthorId)),
+                "the unnest bulk insert keeps the existing memberships"
+            );
+
+            List<?> uncommented = (List<?>) invoke(
+                repository,
+                "listTasksUncommentedBy",
+                nestedProjectId,
+                authorId
+            );
+
+            assertEquals(
+                List.of("Alpha", "Beta"),
+                componentsOf(uncommented, "title"),
+                "both inserted tasks are uncommented"
+            );
+
+            Long alphaId = (Long) component(uncommented.get(0), "id");
+
+            assertNotNull(invoke(repository, "addComment", alphaId, authorId, "Mine."));
+
+            assertEquals(
+                List.of("Beta"),
+                componentsOf(
+                    (List<?>) invoke(
+                        repository,
+                        "listTasksUncommentedBy",
+                        nestedProjectId,
+                        authorId
+                    ),
+                    "title"
+                ),
+                "NOT EXISTS drops the task its correlated author commented on"
+            );
+
+            assertEquals(
+                List.of("Alpha", "Beta"),
+                componentsOf(
+                    (List<?>) invoke(
+                        repository,
+                        "listTasksUncommentedBy",
+                        nestedProjectId,
+                        otherAuthorId
+                    ),
+                    "title"
+                ),
+                "NOT EXISTS keeps every task the other author left uncommented"
+            );
+
+            List<?> onePriority = (List<?>) invoke(
+                repository,
+                "countOpenTasksByProject",
+                (short) 1,
+                organizationId
+            );
+
+            assertEquals(List.of("NEST"), componentsOf(onePriority, "code"));
+
+            assertEquals(
+                List.of(1L),
+                componentsOf(onePriority, "openTasks"),
+                "the CTE report counts the tasks its placeholder admits"
+            );
+
+            List<?> everyPriority = (List<?>) invoke(
+                repository,
+                "countOpenTasksByProject",
+                (short) 5,
+                organizationId
+            );
+
+            assertEquals(List.of("NEST"), componentsOf(everyPriority, "code"));
+
+            assertEquals(List.of(2L), componentsOf(everyPriority, "openTasks"));
+
+            assertEquals(
+                List.of("Beta"),
+                componentsOf(
+                    (List<?>) invoke(repository, "listRecentTaskTitles", nestedProjectId, 1),
+                    "title"
+                ),
+                "the subquery source applies its own LIMIT placeholder"
+            );
+
+            assertEquals(
+                2,
+                invoke(repository, "copyOpenTasks", copyProjectId, nestedProjectId),
+                "INSERT ... SELECT copies the source project's open tasks"
+            );
+
+            List<?> raised = (List<?>) invoke(
+                repository,
+                "raiseProjectTaskPriority",
+                (short) 5,
+                organizationId,
+                "COPY"
+            );
+
+            assertEquals(2, raised.size(), "the joined update raises the copied tasks");
+
+            assertEquals(
+                "TasksRow",
+                raised.get(0).getClass().getSimpleName(),
+                "RETURNING t.* returns the shared row record"
+            );
+
+            assertEquals(
+                List.of("Alpha", "Beta"),
+                componentsOf(raised, "title").stream()
+                    .map(String.class::cast)
+                    .sorted()
+                    .toList()
+            );
+
+            assertEquals(
+                List.of(copyProjectId, copyProjectId),
+                componentsOf(raised, "projectId")
+            );
+
+            assertEquals(
+                List.of((short) 5, (short) 5),
+                componentsOf(raised, "priority"),
+                "the joined update sets the priority its placeholder states"
+            );
+
+            assertEquals(
+                1,
+                invoke(repository, "deleteProjectComments", nestedProjectId),
+                "the USING delete removes the comments of its project's tasks"
+            );
+
+            List<?> bothProjects = (List<?>) invoke(
+                repository,
+                "countOpenTasksByProject",
+                (short) 5,
+                organizationId
+            );
+
+            assertEquals(List.of("COPY", "NEST"), componentsOf(bothProjects, "code"));
+
+            assertEquals(List.of(2L, 2L), componentsOf(bothProjects, "openTasks"));
         }
     }
 
