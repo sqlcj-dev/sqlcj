@@ -100,7 +100,7 @@ FROM projects p
 WHERE EXISTS (SELECT 1
               FROM memberships m
               WHERE m.organization_id = p.organization_id
-                AND m.user_id = :userId::bigint)
+                AND m.user_id = :userId)
 ORDER BY p.id;
 
 -- name: ListOrganizationTasks :many
@@ -109,7 +109,7 @@ SELECT t.id,
 FROM tasks t
 WHERE t.project_id IN (SELECT p.id
                        FROM projects p
-                       WHERE p.organization_id = :organizationId::bigint)
+                       WHERE p.organization_id = :organizationId)
 ORDER BY t.id;
 
 -- name: ListTasksWithRecentComments :many
@@ -172,3 +172,74 @@ UPDATE users
 SET deleted_at = now()
 WHERE id = :id
   AND deleted_at IS NULL;
+
+-- name: ListTasksUncommentedBy :many
+SELECT t.id,
+       t.title
+FROM tasks t
+WHERE t.project_id = :projectId
+  AND NOT EXISTS (SELECT 1
+                  FROM comments c
+                  WHERE c.task_id = t.id
+                    AND c.author_id = :authorId)
+ORDER BY t.id;
+
+-- name: CountOpenTasksByProject :many
+WITH open_tasks AS (SELECT project_id
+                    FROM tasks
+                    WHERE status = 'open'
+                      AND priority <= :maxPriority)
+SELECT p.code,
+       COUNT(*) AS open_tasks
+FROM projects p
+         JOIN open_tasks o ON o.project_id = p.id
+WHERE p.organization_id = :organizationId
+GROUP BY p.code
+ORDER BY p.code;
+
+-- name: ListRecentTaskTitles :many
+SELECT recent.id,
+       recent.title
+FROM (SELECT t.id,
+             t.title
+      FROM tasks t
+      WHERE t.project_id = :projectId
+      ORDER BY t.id DESC
+      LIMIT :limit) recent
+ORDER BY recent.title;
+
+-- name: CreateTwoTasks :exec
+INSERT INTO tasks (project_id, title, priority)
+VALUES (:projectId, :firstTitle, 1),
+       (:projectId, :secondTitle, 2);
+
+-- name: AddMembers :exec
+INSERT INTO memberships (organization_id, user_id)
+SELECT :organizationId, unnest(:userIds::bigint[])
+ON CONFLICT DO NOTHING;
+
+-- name: CopyOpenTasks :exec
+INSERT INTO tasks (project_id, title, priority, labels)
+SELECT :targetProjectId,
+       title,
+       priority,
+       labels
+FROM tasks
+WHERE project_id = :sourceProjectId
+  AND status = 'open';
+
+-- name: RaiseProjectTaskPriority :many
+UPDATE tasks t
+SET priority = :priority
+FROM projects p
+WHERE p.id = t.project_id
+  AND p.organization_id = :organizationId
+  AND p.code = :code
+RETURNING t.*;
+
+-- name: DeleteProjectComments :exec
+DELETE
+FROM comments c
+    USING tasks t
+WHERE t.id = c.task_id
+  AND t.project_id = :projectId;

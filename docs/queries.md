@@ -1956,11 +1956,19 @@ Reference service:
   role, its conflict-target predicate over a partial unique index, and the
   aliased `RETURNING` of an optimistic update, against PostgreSQL 16 through the
   generated repository.
+- `ReferenceServiceIntegrationTest.shouldExecuteTheGeneratedNestedQueriesAndMultiRowWrites`
+  executes the reference service's `NOT EXISTS` check, its CTE report joined to
+  `projects`, its aliased subquery source with a `LIMIT` placeholder, its
+  two-row insert sharing one placeholder, its
+  `INSERT ... SELECT ... unnest(:userIds::bigint[]) ON CONFLICT DO NOTHING`,
+  its `INSERT ... SELECT` from a table, its `UPDATE ... FROM` returning the
+  shared task row, and its `DELETE ... USING`, against PostgreSQL 16 through
+  the generated repository.
 - `ReferenceServiceIntegrationTest.shouldRejectEachUnsupportedCatalogueQuery`
   covers the whole located diagnostic line, and the absence of generated
   output, of every entry of the reference service's unsupported query
   catalogue: the two set operations, the `RIGHT`, `FULL`, `USING`, `NATURAL`,
-  `CROSS`, comma, and `LATERAL` joins, an uncast
-  `lower(:email)`, and a placeholder beside a subscripted column, and
+  `CROSS`, comma, and `LATERAL` joins, a recursive and a data-modifying CTE, an
+  uncast `lower(:email)`, and a placeholder beside a subscripted column, and
   `ReferenceServiceIntegrationTest.shouldCatalogueExactlyTheUnsupportedQueryFiles`
   covers that the catalogue directory holds exactly those queries.
