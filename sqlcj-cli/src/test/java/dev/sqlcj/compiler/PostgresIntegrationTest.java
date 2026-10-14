@@ -3386,6 +3386,109 @@ class PostgresIntegrationTest {
     }
 
     /**
+     * Covers multi-row and {@code SELECT}-sourced inserts end to end: two
+     * {@code VALUES} rows that share one placeholder write two rows, an
+     * {@code unnest} bulk insert writes one row per array element and skips the
+     * conflicting one while returning the rows it wrote, and an insert whose
+     * rows come from a table writes one row per matching source row.
+     */
+    @Test
+    void shouldExecuteGeneratedMultiRowAndSelectSourcedInsertsAgainstPostgres() throws Exception {
+        execute(CONSTRAINT_SCHEMA);
+
+        Path classesDirectory = generateAndCompile(
+            CONSTRAINT_SCHEMA,
+            """
+                -- name: CreateTwoOrders :exec
+                INSERT INTO customer_orders (id, customer_id, quantity)
+                VALUES (:firstId, :customerId, :firstQuantity),
+                       (:secondId, :customerId, :secondQuantity);
+
+                -- name: CreateOrdersForIds :many
+                INSERT INTO customer_orders (id, customer_id, quantity)
+                SELECT unnest(:ids::bigint[]), :customerId, :quantity
+                ON CONFLICT (id) DO NOTHING
+                RETURNING *;
+
+                -- name: CreateOrdersForCustomer :exec
+                INSERT INTO customer_orders (id, customer_id, quantity)
+                SELECT c.id + 200, c.id, :quantity
+                FROM customers c
+                WHERE c.name = :name;
+
+                -- name: ListOrders :many
+                SELECT id, customer_id, quantity
+                FROM customer_orders
+                ORDER BY id;
+                """
+        );
+
+        execute("INSERT INTO customers (id, name) VALUES (1, 'Alice'), (2, 'Bob')");
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method createTwoOrders = repository.getClass().getMethod(
+                "createTwoOrders",
+                Long.class,
+                Long.class,
+                Integer.class,
+                Long.class,
+                Integer.class
+            );
+
+            assertEquals(2, createTwoOrders.invoke(repository, 10L, 1L, 3, 20L, 4));
+
+            Method createForIds = repository.getClass().getMethod(
+                "createOrdersForIds",
+                List.class,
+                Long.class,
+                Integer.class
+            );
+
+            List<?> created = (List<?>) createForIds.invoke(
+                repository,
+                List.of(20L, 30L),
+                2L,
+                5
+            );
+
+            assertEquals(1, created.size());
+
+            assertEquals(
+                List.of("id", "customerId", "quantity", "status", "createdAt"),
+                recordComponentNames(created.get(0))
+            );
+
+            assertEquals(30L, component(created.get(0), "id"));
+            assertEquals(2L, component(created.get(0), "customerId"));
+            assertEquals(5, component(created.get(0), "quantity"));
+
+            Method createForCustomer = repository.getClass().getMethod(
+                "createOrdersForCustomer",
+                Integer.class,
+                String.class
+            );
+
+            assertEquals(1, createForCustomer.invoke(repository, 6, "Alice"));
+
+            Method listOrders = repository.getClass().getMethod("listOrders");
+
+            List<?> orders = (List<?>) listOrders.invoke(repository);
+
+            assertEquals(4, orders.size());
+
+            assertEquals(10L, component(orders.get(0), "id"));
+            assertEquals(20L, component(orders.get(1), "id"));
+            assertEquals(30L, component(orders.get(2), "id"));
+            assertEquals(201L, component(orders.get(3), "id"));
+
+            assertEquals(1L, component(orders.get(3), "customerId"));
+            assertEquals(6, component(orders.get(3), "quantity"));
+        }
+    }
+
+    /**
      * Covers a returning insert: the database-generated serial values and the
      * target-table order of {@code RETURNING *} are read through the generated
      * typed result record.
