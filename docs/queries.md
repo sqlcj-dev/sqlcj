@@ -483,13 +483,17 @@ LIMIT $1 OFFSET $2;
 
 ## Writes
 
-A write targets exactly one table of its entry's schema.
+A write targets exactly one table of its entry's schema, whose rows it changes.
+An `UPDATE` and a `DELETE` may read further sources of that schema to select
+those rows, as
+[Added sources in `UPDATE` and `DELETE`](#added-sources-in-update-and-delete)
+states.
 
 | Statement | Accepted shape |
 | --- | --- |
 | `INSERT` | an explicit column list and a row source — `VALUES` rows or a `SELECT` — writing one value per written column by position, each a placeholder or an expression that binds none, with an optional `ON CONFLICT` clause |
-| `UPDATE` | `SET` assignments that each assign one direct column a placeholder or an expression that binds none, with an optional `WHERE` using the read predicate forms |
-| `DELETE` | one target table with an optional `WHERE` using the read predicate forms |
+| `UPDATE` | `SET` assignments that each assign one direct column a placeholder or an expression that binds none, with an optional `FROM` clause of added sources and an optional `WHERE` using the read predicate forms |
+| `DELETE` | one target table, with an optional `USING` clause of added sources and an optional `WHERE` using the read predicate forms |
 
 ```sql
 -- name: CreateAuthor :one
@@ -557,6 +561,66 @@ the array column itself must exist in the written table and the subscript
 reaches the database as written. An uncast placeholder written there is rejected
 as an unanalyzed placeholder location, in an `UPDATE` or `DO UPDATE` assignment,
 in a `VALUES` value, and in an item of an insert's `SELECT` alike.
+
+### Added sources in `UPDATE` and `DELETE`
+
+An `UPDATE` may select the rows it writes through an `UPDATE ... FROM` clause,
+and a `DELETE` through a `DELETE ... USING` clause. The write still targets one
+table, whose rows it changes, while the added sources only decide which of its
+rows it writes and what the write may read:
+
+```sql
+-- name: SetRoyaltyAmountsByCountry :exec
+UPDATE royalties r
+SET amount = :amount
+FROM authors a
+WHERE a.id = r.author_id
+  AND a.country = :country;
+
+-- name: DeleteAuthorRoyalties :many
+DELETE
+FROM royalties r
+    USING authors a
+WHERE a.id = r.author_id
+  AND a.name = :name
+RETURNING r.id, a.name;
+```
+
+`SetRoyaltyAmountsByCountry` generates
+`setRoyaltyAmountsByCountry(BigDecimal amount, String country)`, whose second
+parameter is typed and named from `authors.country`, and
+`DeleteAuthorRoyalties` returns one record of the deleted royalty's `id` and
+its author's `name`.
+
+- An `UPDATE ... FROM` clause takes one source followed by inner or left joins,
+  by the join rules [Sources](#sources) states, or by further comma-separated
+  sources. A comma-separated list is accepted here, unlike in a `SELECT`,
+  because it is PostgreSQL's own form of the clause.
+- A `DELETE ... USING` clause takes a comma-separated list of sources, and no
+  join: JSqlParser does not read a join there, so `USING a JOIN b` fails to
+  parse.
+- Each added source is a table of the entry's schema, a `WITH` clause of the
+  write in scope, or an aliased subquery, resolved exactly as a read's source
+  is, so a `LATERAL` source, a doubly parenthesized source, and a subquery
+  without an alias keep their diagnostics.
+- A join condition inside `FROM` sees only the sources of the comma-separated
+  item it joins onto, up to and including its own joined source, because
+  PostgreSQL binds a `JOIN` more tightly than a comma. The target is never one
+  of them, so a condition that names it is rejected as
+  `Unknown source qualifier in query: <name>`, as PostgreSQL also rejects it.
+  Its placeholders are typed by the `WHERE` predicate rules.
+- The `WHERE` predicate reads the target and every added source as one level,
+  with the write's `WITH` clauses in scope of its predicate subqueries, so a
+  placeholder compared with a column of an added source is typed and named from
+  that column. `SET` assignments keep reading the target's columns alone.
+- The exposed names of the target and of every added source must differ, as the
+  sources of a read must, so a repeated name is rejected as
+  `Duplicate source name in query: <name>`.
+- Every column read from a left-joined source is nullable, in `RETURNING` as in
+  a read's projection.
+- Placeholders bind in the textual order of the query, across the `SET`
+  assignments, the added sources and their join conditions, and the `WHERE`
+  predicate.
 
 ### Values that bind no placeholder
 
@@ -696,34 +760,57 @@ collation or an operator class.
 A supported `INSERT`, `UPDATE`, or `DELETE` declared `:one`, `:optional`, or
 `:many` may end with a `RETURNING` clause that lists either:
 
-- direct columns of the target table, in the order they are declared, or
-- a bare `*`, which expands in the target table's schema column order.
+- direct columns of the write's sources — the target and, on a joined write,
+  every source its `FROM` or `USING` clause adds — in the order they are
+  declared, or
+- a wildcard of the target, which expands in the target table's schema column
+  order: a bare `*` on a single-table write, and `<target>.*` on any write,
+  written with the name the target exposes, which is its alias when the write
+  declares one.
 
 A returned column may carry an alias, written as `id AS user_id` or `id user_id`,
 which names its result component exactly as a `SELECT` item's alias does, while
-its type and nullability still come from the schema column.
+its type comes from the schema column and its nullability from that column and
+its source, so a column of a left-joined source is nullable.
 
 A returning write produces the same generated record, positional row mapper, and
 cardinality behavior as a read, so a database-generated `SERIAL` or `BIGSERIAL`
-value is read back with its declared type. A clause that is exactly `*` returns
-the target table's shared `<TableName>Row` record, while a `RETURNING` column
-list keeps the query's own `<QueryName>Result` record.
+value is read back with its declared type. A clause that is exactly a wildcard
+of the target returns the target table's shared `<TableName>Row` record, on a
+joined and on a single-table write alike, while a `RETURNING` column list, a
+wildcard written beside another item included, keeps the query's own
+`<QueryName>Result` record.
 
-An aliased `*`, a qualified `table.*`, an unknown column, and `RETURNING` on
-`:exec` are rejected, and a computed `RETURNING` item, with or without an alias,
-is rejected as
+An unknown column and `RETURNING` on `:exec` are rejected, and a computed
+`RETURNING` item, with or without an alias, is rejected as
 `Unsupported RETURNING item <expression>; return columns of the target table or *`,
 naming the expression as the query writes it, on one line. A cast does not make
 such an item supported, because a `RETURNING` clause returns columns of the
-target table. A reference written with an array subscript or slice, such as
+write's sources. A reference written with an array subscript or slice, such as
 `RETURNING labels[1]` or `RETURNING labels[1:2] AS pair`, is not a direct
-column of the target table either, so it is rejected as a computed item, with or
-without an alias.
+column either, so it is rejected as a computed item, with or without an alias.
+
+A wildcard returns the complete row of the target alone, so:
+
+- an aliased wildcard, bare or qualified, is rejected as
+  `RETURNING <wildcard> must not be aliased.`, and a modified one, such as
+  `RETURNING * EXCEPT (id)`, as `RETURNING <wildcard> must not be modified.`;
+- a wildcard whose qualifier names no source of the write, the `old` and `new`
+  row aliases of a write included, is rejected as
+  `Unknown source qualifier in query: <name>`;
+- a wildcard of an added source is rejected as
+  `RETURNING <name>.* is not supported; return the columns of <name> by name.`;
+- a bare `*` on a joined write, which PostgreSQL returns the columns of every
+  source for, is rejected as
+  `RETURNING * is not supported with UPDATE ... FROM or DELETE ... USING; write
+  RETURNING <target>.* for the target's row.`
 
 A returning insert accepts every accepted row source — several `VALUES` rows, a
-parenthesized row source, and a `SELECT` — while `UPDATE ... FROM` and
-`DELETE ... USING` are rejected in every write. An accepted `ON CONFLICT`
-clause is analyzed the same way with and without `RETURNING`.
+parenthesized row source, and a `SELECT` — and a returning `UPDATE` and
+`DELETE` accept the added sources
+[Added sources in `UPDATE` and `DELETE`](#added-sources-in-update-and-delete)
+states. An accepted `ON CONFLICT` clause is analyzed the same way with and
+without `RETURNING`.
 
 A write may declare `WITH` clauses of its own, with or without `RETURNING`.
 Each body is analyzed by the rules [Sources](#sources) states, so its
@@ -892,9 +979,10 @@ a query of an entry reads or binds.
   of the query name, as in `get_author` and `GetAuthor` to `getAuthor`.
 - A `:one`, `:optional`, or `:many` query that returns one complete table row — a
   single-source `SELECT *` or `SELECT <source>.*`, or a write whose `RETURNING`
-  clause is exactly `*` — returns the `<TableName>Row` record. That record is a
-  top-level `public record` in `java.package`, generated once per table into its
-  own file and shared by every repository of the package that returns that row.
+  clause is exactly a wildcard of its target — returns the `<TableName>Row`
+  record. That record is a top-level `public record` in `java.package`,
+  generated once per table into its own file and shared by every repository of
+  the package that returns that row.
   Each repository keeps its own private `RowMapper` field for the row, generated
   after the constructor in the order its queries first use it.
 - Every other `:one`, `:optional`, or `:many` query generates a nested `public record` named
@@ -1190,15 +1278,18 @@ query name, and its header line.
   unqualified conflict-predicate column that both the inserted table and
   `EXCLUDED` carry, or a predicate column qualified with a name its own
   predicate does not read, such as `EXCLUDED` in a conflict-target predicate.
-- An aliased `*`, a computed, qualified-wildcard, or unknown `RETURNING` item,
-  and `RETURNING` on `:exec`; a computed item is rejected as
+- An aliased or modified `RETURNING` wildcard, a wildcard of a source other
+  than the write target, a bare `*` on a joined write, and a computed or
+  unknown `RETURNING` item, and `RETURNING` on `:exec`; each is rejected as
   [`RETURNING`](#returning) states.
-- The shapes that read or write more than the one analyzed table, on an
-  `:exec` and on a returning write alike: an `UPDATE ... FROM` or joined
-  `UPDATE`, rejected as
-  `UPDATE ... FROM and joined updates are not supported.`; and a
-  `DELETE ... USING` or joined `DELETE`, rejected as
-  `DELETE ... USING and joined deletes are not supported.`
+- The write shapes that change rows of more than the one analyzed table, on an
+  `:exec` and on a returning write alike: an `UPDATE` that names several
+  tables before `SET`, written with a comma or with a join, rejected as
+  `UPDATE of several tables is not supported; write the other sources in
+  UPDATE ... FROM.`; and a joined `DELETE`, such as
+  `DELETE a FROM a JOIN b`, rejected as
+  `A joined DELETE is not supported; write the other sources in
+  DELETE ... USING.`
 - Any annotation other than `:one`, `:optional`, `:many`, and `:exec`.
 
 An unexpected failure of schema parsing, query analysis, or generation is not a
@@ -1539,6 +1630,39 @@ Writes and `RETURNING`:
   `QueryAnalyzerTest.shouldAnalyzeCommonTableExpressionOfAWriteWithoutReturning`
   cover the `WITH` clause of a returning and of an `:exec` write, whose body
   types its own placeholders while the returned columns stay the target's.
+- `QueryAnalyzerTest.shouldTypeUpdateWhereParameterFromAnAddedSourceColumn`,
+  `QueryAnalyzerTest.shouldTypeDeleteWhereParameterFromAUsingSourceColumn`,
+  `QueryAnalyzerTest.shouldTypeJoinConditionParameterOfAnUpdateFromClause`,
+  `QueryAnalyzerTest.shouldResolveCommaSeparatedUpdateFromSources`,
+  `QueryAnalyzerTest.shouldResolveSubquerySourceOfAnUpdateFromClause`,
+  `QueryAnalyzerTest.shouldResolveCommonTableExpressionSourceOfADeleteUsingClause`,
+  `QueryAnalyzerTest.shouldRejectAnUpdateFromJoinConditionOutsideItsJoinGroup`,
+  `QueryAnalyzerTest.shouldResolveNullabilityOfJoinedWriteReturningColumns`,
+  `QueryAnalyzerTest.shouldResolveRowTableForATargetWildcardOfAWrite`,
+  `QueryAnalyzerTest.shouldNotResolveRowTableForATargetWildcardBesideAnotherColumn`,
+  `QueryAnalyzerTest.shouldRejectAnUnsupportedJoinedWriteReturningWildcard`,
+  `QueryAnalyzerTest.shouldRejectAnUnknownReturningWildcardQualifier`,
+  `QueryAnalyzerTest.shouldRejectARepeatedJoinedWriteSourceName`,
+  `QueryAnalyzerTest.shouldBindJoinedUpdateParametersInTextualOrder`, and
+  `QueryAnalyzerTest.shouldShareOneNamedParameterAcrossAJoinedUpdate` cover
+  `UPDATE ... FROM` and `DELETE ... USING`: a `WHERE` placeholder typed from a
+  column of an added source, a join condition's own placeholders, a
+  comma-separated list, a subquery and a common table expression as sources
+  with their bodies' placeholders typed, a join condition that names the
+  target or an earlier comma-separated source rejected as an unknown
+  qualifier, the nullability of a returned column of a left-joined source, the
+  target's shared row returned by `RETURNING <target>.*` on a joined and on a
+  single-table write, the query-specific result of a wildcard beside another
+  column, the bare `*`, other-source wildcard, aliased wildcard, unknown
+  qualifier, and repeated source-name rejections, and the textual binding
+  order across `SET`, the added sources, and `WHERE`, with indexed and named
+  placeholders, while the executable SQL stays the query's own.
+  `SqlcjCompilerIntegrationTest.shouldGenerateCompilableJavaForJoinedWrites`
+  compiles the generated sources of a joined update, a left-joined update, and
+  a `USING` delete, and
+  `PostgresIntegrationTest.shouldExecuteGeneratedJoinedWritesAgainstPostgres`
+  executes a joined update returning the target's shared row and a `USING`
+  delete returning a column of each source against PostgreSQL 16.
 - `QueryAnalyzerTest.shouldAnalyzeInsertWithSeveralValuesRows`,
   `QueryAnalyzerTest.shouldAnalyzeIndexedInsertWithSeveralValuesRows`,
   `QueryAnalyzerTest.shouldAnalyzeInsertSelectWithoutFrom`,
@@ -1663,8 +1787,8 @@ Unsupported queries and internal errors:
   subquery alias, a subquery source without an alias, a `WITH RECURSIVE`
   clause, a data-modifying `WITH` body, a set operation as an insert's row
   source, an insert whose `SELECT` writes fewer values than its column list,
-  and an `:exec` `UPDATE ... FROM`, comma-joined `UPDATE`,
-  `DELETE ... USING`, and joined `DELETE`, while
+  a comma-joined and a join-joined multi-table `UPDATE`, a joined `DELETE`,
+  and a bare `RETURNING *` on a joined update, while
   `QueryAnalyzerTest.shouldRejectUnsupportedCountProjectionForm`,
   `QueryAnalyzerTest.shouldRejectUnsupportedJoinModifier`,
   `QueryAnalyzerTest.shouldRejectUnsupportedReturningItem`,
@@ -1836,8 +1960,7 @@ Reference service:
   covers the whole located diagnostic line, and the absence of generated
   output, of every entry of the reference service's unsupported query
   catalogue: the two set operations, the `RIGHT`, `FULL`, `USING`, `NATURAL`,
-  `CROSS`, comma, and `LATERAL` joins, an `UPDATE ... FROM`, a
-  `DELETE ... USING`, an uncast
+  `CROSS`, comma, and `LATERAL` joins, an uncast
   `lower(:email)`, and a placeholder beside a subscripted column, and
   `ReferenceServiceIntegrationTest.shouldCatalogueExactlyTheUnsupportedQueryFiles`
   covers that the catalogue directory holds exactly those queries.

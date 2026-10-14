@@ -4618,10 +4618,8 @@ class QueryAnalyzerTest {
             "INSERT INTO users (id) VALUES ($1) RETURNING id + 1 AS x"
                 + "|Unsupported RETURNING item id + 1;"
                 + " return columns of the target table or *",
-            "INSERT INTO users (id) VALUES ($1) RETURNING users.*"
-                + "|Only an unqualified RETURNING * is supported.",
             "INSERT INTO users (id) VALUES ($1) RETURNING users.* AS x"
-                + "|Only an unqualified RETURNING * is supported.",
+                + "|RETURNING users.* must not be aliased.",
             "DELETE FROM users WHERE id = $1 RETURNING count(id)"
                 + "|Unsupported RETURNING item count(id);"
                 + " return columns of the target table or *",
@@ -4664,10 +4662,16 @@ class QueryAnalyzerTest {
     @CsvSource(
         delimiter = '|',
         value = {
-            "UPDATE users SET name = $2 FROM profiles WHERE users.id = $1 RETURNING id"
-                + "|UPDATE ... FROM and joined updates are not supported.",
-            "DELETE FROM users USING profiles WHERE users.id = $1 RETURNING id"
-                + "|DELETE ... USING and joined deletes are not supported."
+            "UPDATE users, profiles SET name = $2 WHERE users.id = $1 RETURNING id"
+                + "|UPDATE of several tables is not supported;"
+                + " write the other sources in UPDATE ... FROM.",
+            "UPDATE users u JOIN profiles p ON p.user_id = u.id SET name = $2 RETURNING u.id"
+                + "|UPDATE of several tables is not supported;"
+                + " write the other sources in UPDATE ... FROM.",
+            "DELETE users FROM users JOIN profiles ON profiles.user_id = users.id"
+                + " WHERE users.id = $1 RETURNING id"
+                + "|A joined DELETE is not supported;"
+                + " write the other sources in DELETE ... USING."
         }
     )
     void shouldRejectExcludedReturningWriteForm(String sql, String message) {
@@ -8271,5 +8275,541 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A source an {@code UPDATE ... FROM} clause adds is in scope of the
+     * update's {@code WHERE}, so a placeholder compared with one of its columns
+     * is typed and named from that column.
+     */
+    @Test
+    void shouldTypeUpdateWhereParameterFromAnAddedSourceColumn() {
+        String sql = """
+            UPDATE users u
+            SET name = :name
+            FROM profiles p
+            WHERE p.user_id = u.id
+              AND p.nickname = :nickname
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("RenameProfiledUsers", QueryType.EXEC, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals("users", model.table());
+        assertTrue(model.columns().isEmpty());
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "name", ColumnType.VARCHAR),
+                new QueryParameter(2, "nickname", ColumnType.VARCHAR)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A source a {@code DELETE ... USING} clause adds is in scope of the
+     * delete's {@code WHERE} and of its {@code RETURNING} clause, and the
+     * executable SQL keeps the clause as the query writes it.
+     */
+    @Test
+    void shouldTypeDeleteWhereParameterFromAUsingSourceColumn() {
+        String sql = """
+            DELETE FROM users u
+            USING profiles p
+            WHERE p.user_id = u.id
+              AND p.nickname = :nickname
+            RETURNING u.id, p.nickname
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("DeleteProfiledUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals("users", model.table());
+        assertNull(model.rowTable());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("nickname", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "nickname", ColumnType.VARCHAR)),
+            model.parameters()
+        );
+
+        assertEquals(
+            """
+                DELETE FROM users u
+                USING profiles p
+                WHERE p.user_id = u.id
+                  AND p.nickname = ?
+                RETURNING u.id, p.nickname
+                """,
+            model.executableSql()
+        );
+    }
+
+    /**
+     * A join inside an {@code UPDATE ... FROM} clause types its own
+     * {@code ON} placeholders from the columns of the joined sources, and the
+     * joined source is in scope of the update's {@code WHERE}.
+     */
+    @Test
+    void shouldTypeJoinConditionParameterOfAnUpdateFromClause() {
+        String sql = """
+            UPDATE users u
+            SET name = $1
+            FROM profiles p
+            JOIN orders o ON o.user_id = p.user_id
+                AND o.total = $2
+            WHERE u.id = p.user_id
+              AND u.id = $3
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("RenameOrderingUsers", QueryType.EXEC, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "name", ColumnType.VARCHAR),
+                new QueryParameter(2, "total", ColumnType.DECIMAL),
+                new QueryParameter(3, "id", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2, 3), model.bindingParameterIndexes());
+    }
+
+    /**
+     * An {@code UPDATE ... FROM} clause may write its sources as a
+     * comma-separated list, which is PostgreSQL's own form of the clause, and
+     * each of them is in scope of the update's {@code WHERE}.
+     */
+    @Test
+    void shouldResolveCommaSeparatedUpdateFromSources() {
+        String sql = """
+            UPDATE users u
+            SET name = :name
+            FROM profiles p, orders o
+            WHERE p.user_id = u.id
+              AND o.user_id = u.id
+              AND o.total = :total
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("RenameOrderingUsers", QueryType.EXEC, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "name", ColumnType.VARCHAR),
+                new QueryParameter(2, "total", ColumnType.DECIMAL)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A subquery source of an {@code UPDATE ... FROM} clause is a derived
+     * source whose columns are its body's result columns, which the update's
+     * {@code WHERE} and {@code RETURNING} read, while the body types its own
+     * placeholders from its own columns.
+     */
+    @Test
+    void shouldResolveSubquerySourceOfAnUpdateFromClause() {
+        String sql = """
+            UPDATE users u
+            SET name = recent.nickname
+            FROM (SELECT p.user_id, p.nickname
+                  FROM profiles p
+                  WHERE p.nickname = :nickname) recent
+            WHERE u.id = recent.user_id
+            RETURNING u.id, recent.nickname
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("RenameUsersFromProfiles", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertNull(model.rowTable());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("nickname", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "nickname", ColumnType.VARCHAR)),
+            model.parameters()
+        );
+
+        assertEquals(
+            """
+                UPDATE users u
+                SET name = recent.nickname
+                FROM (SELECT p.user_id, p.nickname
+                      FROM profiles p
+                      WHERE p.nickname = ?) recent
+                WHERE u.id = recent.user_id
+                RETURNING u.id, recent.nickname
+                """,
+            model.executableSql()
+        );
+    }
+
+    /**
+     * A {@code USING} source that names a common table expression of the delete
+     * reads that expression, so its columns are the body's own columns and the
+     * body types its placeholders from them.
+     */
+    @Test
+    void shouldResolveCommonTableExpressionSourceOfADeleteUsingClause() {
+        String sql = """
+            WITH top_orders AS (SELECT user_id, total
+                                FROM orders
+                                WHERE total = :total)
+            DELETE FROM users u
+            USING top_orders
+            WHERE top_orders.user_id = u.id
+              AND u.id = :id
+            RETURNING u.id, top_orders.total
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("DeleteTopOrderUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("total", ColumnType.DECIMAL, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "total", ColumnType.DECIMAL),
+                new QueryParameter(2, "id", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A join condition inside an {@code UPDATE ... FROM} clause sees only the
+     * sources of the comma-separated item it joins onto, up to its own joined
+     * source, as PostgreSQL scopes it, so neither the target nor an earlier
+     * comma-separated source is a known qualifier there.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        value = {
+            "UPDATE users u SET name = $1 FROM profiles p JOIN orders o ON o.user_id = u.id"
+                + " WHERE u.id = p.user_id|u",
+            "UPDATE users u SET name = $1 FROM profiles p, orders o"
+                + " JOIN users x ON x.id = p.user_id WHERE u.id = o.user_id|p"
+        }
+    )
+    void shouldRejectAnUpdateFromJoinConditionOutsideItsJoinGroup(String sql, String qualifier) {
+        Query query = new Query("RenameUsers", QueryType.EXEC, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
+        );
+
+        assertEquals(
+            "Unknown source qualifier in query: " + qualifier,
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A returned column of a joined write takes the nullability of its schema
+     * column, and every column of a left-joined source is nullable, because an
+     * unmatched row reads it as {@code NULL}.
+     */
+    @Test
+    void shouldResolveNullabilityOfJoinedWriteReturningColumns() {
+        String sql = """
+            UPDATE users u
+            SET name = :name
+            FROM profiles p
+            LEFT JOIN orders o ON o.user_id = p.user_id
+            WHERE p.user_id = u.id
+            RETURNING u.id, u.name, o.id AS order_id, o.total
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("RenameProfiledUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true),
+                new QueryColumn("order_id", ColumnType.BIGINT, true),
+                new QueryColumn("total", ColumnType.DECIMAL, true)
+            ),
+            model.columns()
+        );
+    }
+
+    /**
+     * {@code RETURNING <target>.*} returns the complete row of the write
+     * target, so it carries the target table's shared row identity on a joined
+     * and on a single-table insert, update, and delete alike.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "INSERT INTO users AS u (id, name) VALUES ($1, $2) RETURNING u.*",
+            "UPDATE users u SET name = $1 WHERE u.id = $2 RETURNING u.*",
+            "DELETE FROM users u WHERE u.id = $1 RETURNING u.*",
+            "UPDATE users u SET name = $1 FROM profiles p WHERE p.user_id = u.id RETURNING u.*",
+            "DELETE FROM users u USING profiles p WHERE p.user_id = u.id RETURNING u.*"
+        }
+    )
+    void shouldResolveRowTableForATargetWildcardOfAWrite(String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("WriteUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals("users", model.rowTable());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+    }
+
+    /**
+     * A target wildcard written beside another returned column returns that
+     * target's columns in their own positions, which is a result specific to
+     * the query rather than the target's shared row.
+     */
+    @Test
+    void shouldNotResolveRowTableForATargetWildcardBesideAnotherColumn() {
+        String sql = """
+            UPDATE users u
+            SET name = :name
+            FROM profiles p
+            WHERE p.user_id = u.id
+            RETURNING u.*, p.nickname
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("RenameProfiledUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertNull(model.rowTable());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true),
+                new QueryColumn("nickname", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+    }
+
+    /**
+     * The only complete row a joined write returns is its target's, so a bare
+     * {@code *} and a wildcard of another source are rejected naming what to
+     * write instead, and a wildcard carries no alias.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        value = {
+            "UPDATE users u SET name = $1 FROM profiles p WHERE p.user_id = u.id RETURNING *"
+                + "|RETURNING * is not supported with UPDATE ... FROM or DELETE ... USING;"
+                + " write RETURNING u.* for the target's row.",
+            "DELETE FROM users USING profiles p WHERE p.user_id = users.id RETURNING *"
+                + "|RETURNING * is not supported with UPDATE ... FROM or DELETE ... USING;"
+                + " write RETURNING users.* for the target's row.",
+            "UPDATE users u SET name = $1 FROM profiles p WHERE p.user_id = u.id RETURNING p.*"
+                + "|RETURNING p.* is not supported; return the columns of p by name.",
+            "DELETE FROM users u USING profiles p WHERE p.user_id = u.id RETURNING p.*"
+                + "|RETURNING p.* is not supported; return the columns of p by name.",
+            "UPDATE users u SET name = $1 FROM profiles p WHERE p.user_id = u.id RETURNING u.* AS x"
+                + "|RETURNING u.* must not be aliased."
+        }
+    )
+    void shouldRejectAnUnsupportedJoinedWriteReturningWildcard(String sql, String message) {
+        Query query = new Query("WriteUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
+        );
+
+        assertEquals(message, exception.getMessage());
+    }
+
+    /**
+     * A returned wildcard names one of the write's sources, so an unknown
+     * qualifier, which the {@code old} and {@code new} row aliases of
+     * PostgreSQL 18 are among them, is rejected as any other unknown source
+     * qualifier is.
+     */
+    @Test
+    void shouldRejectAnUnknownReturningWildcardQualifier() {
+        String sql = "UPDATE users u SET name = $1 FROM profiles p"
+            + " WHERE p.user_id = u.id RETURNING old.*";
+
+        Query query = new Query("RenameUsers", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
+        );
+
+        assertEquals(
+            "Unknown source qualifier in query: old",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * The sources of a joined write expose distinct names, the target's name
+     * included, because a repeated name would make every reference to it
+     * ambiguous.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        value = {
+            "UPDATE users u SET name = $1 FROM profiles u WHERE u.user_id = $2|u",
+            "DELETE FROM users u USING profiles p, orders p WHERE p.user_id = u.id|p"
+        }
+    )
+    void shouldRejectARepeatedJoinedWriteSourceName(String sql, String name) {
+        Query query = new Query("WriteUsers", QueryType.EXEC, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        IllegalArgumentException exception = assertThrows(
+            IllegalArgumentException.class,
+            () -> analyzer.analyze(query, parsedSql, joinSchema)
+        );
+
+        assertEquals(
+            "Duplicate source name in query: " + name,
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * The placeholders of a joined write bind in the textual order of the
+     * query, across its {@code SET} assignments, its {@code FROM} sources, and
+     * its {@code WHERE} predicate, whatever their indexes are.
+     */
+    @Test
+    void shouldBindJoinedUpdateParametersInTextualOrder() {
+        String sql = """
+            UPDATE users u
+            SET name = $2
+            FROM (SELECT user_id
+                  FROM profiles
+                  WHERE nickname = $3) recent
+            WHERE u.id = recent.user_id
+              AND u.id = $1
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("RenameRecentUsers", QueryType.EXEC, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "id", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR),
+                new QueryParameter(3, "nickname", ColumnType.VARCHAR)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(2, 3, 1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * One named placeholder written in a joined write's {@code SET} clause and
+     * in its {@code WHERE} predicate is one parameter, bound at each of its
+     * textual positions, beside the parameter a join condition types.
+     */
+    @Test
+    void shouldShareOneNamedParameterAcrossAJoinedUpdate() {
+        String sql = """
+            UPDATE users u
+            SET name = :nickname
+            FROM profiles p
+            JOIN orders o ON o.user_id = p.user_id
+                AND o.total = :total
+            WHERE p.nickname = :nickname
+              AND u.id = :id
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("RenameOrderingUsers", QueryType.EXEC, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "nickname", ColumnType.VARCHAR),
+                new QueryParameter(2, "total", ColumnType.DECIMAL),
+                new QueryParameter(3, "id", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2, 1, 3), model.bindingParameterIndexes());
     }
 }
