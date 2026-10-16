@@ -16,6 +16,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -36,7 +37,9 @@ import java.util.stream.Collectors;
  *
  * <p>A query that returns one complete table row is named after that table
  * instead of after itself, so every such query of one group shares one row
- * record and one row mapper.
+ * record and one row mapper. A result that embeds one table's row holds that
+ * same record as one component, named after the source's exposed name, and
+ * reads it inside its own mapper rather than through a mapper field.
  *
  * <p>Two queries of one group that would generate the same method are rejected
  * instead of being disambiguated, because a repository method is a name the
@@ -153,6 +156,15 @@ final class JavaNames {
     }
 
     /**
+     * The Java type generated for one table's shared row record, which is the
+     * upper camel form of its table name followed by {@code Row}, as in
+     * {@code tasks} to {@code TasksRow}.
+     */
+    static String rowTypeName(String tableName) {
+        return upperCamelCase(tableName, null) + ROW_SUFFIX;
+    }
+
+    /**
      * The constants generated for the labels of one enum type, in label order.
      * A constant is the label's words, upper-cased and joined with {@code _},
      * so {@code in progress} and {@code in-progress} both become
@@ -234,67 +246,118 @@ final class JavaNames {
     /**
      * The resolved Java identifiers of one shared row record.
      *
-     * @param tableName  the schema's declared name of the table the row belongs
-     *                   to
-     * @param queryIndex the group-relative index of the query that first
-     *                   returned this row, whose analyzed columns are the row's
-     *                   columns
+     * @param tableName     the schema's declared name of the table the row
+     *                      belongs to
+     * @param mapperName    the row mapper field of this repository, and
+     *                      {@code null} for a row no query of the group returns
+     *                      whole, which is read inside another result's mapper
+     * @param columns       the analyzed columns of the row, in schema order
+     * @param returnedWhole whether one query of the group returns this row as
+     *                      its whole result
      */
     record RowNames(
         String tableName,
         String typeName,
         String mapperName,
+        List<QueryColumn> columns,
         List<String> componentNames,
-        int queryIndex
+        boolean returnedWhole
     ) {
     }
 
     /**
-     * Resolves one row record per table whose complete row the group returns,
-     * keyed by the schema table name and ordered by first use.
+     * Resolves one row record per table whose complete row the group returns or
+     * embeds, keyed by the schema table name and ordered by first use, which is
+     * query order and then component order.
      */
     private static Map<String, RowNames> resolveRows(QueryGroupModel group, List<String> methodNames) {
-        Set<String> queryRowMapperNames = queryRowMapperNames(group, methodNames);
-        Set<String> usedRowMapperNames = new HashSet<>();
-        Map<String, GeneratedRowType> rowTypesByPortabilityKey = new HashMap<>();
-        Map<String, RowNames> rowsByTable = new LinkedHashMap<>();
+        RowResolution resolution = new RowResolution(
+            new LinkedHashMap<>(),
+            new HashMap<>(),
+            wholeRowTables(group),
+            queryRowMapperNames(group, methodNames),
+            new HashSet<>()
+        );
 
-        for (int index = 0; index < group.queries().size(); index++) {
-            QueryModel query = group.queries().get(index);
-            String table = query.rowTable();
+        for (QueryModel query : group.queries()) {
+            if (query.rowTable() != null) {
+                resolution.add(query.rowTable(), query.columns(), query.name());
 
-            if (table == null || rowsByTable.containsKey(table)) {
                 continue;
             }
 
-            String typeName = upperCamelCase(table, query.name()) + ROW_SUFFIX;
+            for (QueryColumn column : query.columns()) {
+                if (column.row()) {
+                    resolution.add(column.rowTable(), column.rowColumns(), query.name());
+                }
+            }
+        }
+
+        return resolution.rowsByTable();
+    }
+
+    /** The tables whose complete row one query of the group returns. */
+    private static Set<String> wholeRowTables(QueryGroupModel group) {
+        return group.queries().stream()
+            .map(QueryModel::rowTable)
+            .filter(Objects::nonNull)
+            .collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    /**
+     * The state of resolving one group's row records: the rows resolved so far,
+     * the row types recorded for portability, the tables the group returns
+     * whole, and the row mapper names a mapper field yields to and has used.
+     */
+    private record RowResolution(
+        Map<String, RowNames> rowsByTable,
+        Map<String, GeneratedRowType> rowTypesByPortabilityKey,
+        Set<String> wholeRowTables,
+        Set<String> queryRowMapperNames,
+        Set<String> usedRowMapperNames
+    ) {
+
+        /**
+         * Resolves the row record of one table from its first use, which is
+         * where its columns and its component names come from. A row no query
+         * returns whole generates no mapper field, so it takes no mapper name.
+         */
+        private void add(String table, List<QueryColumn> columns, String queryName) {
+            if (rowsByTable.containsKey(table)) {
+                return;
+            }
+
+            String typeName = upperCamelCase(table, queryName) + ROW_SUFFIX;
 
             rejectRowTypeNameEqualIgnoringCase(rowTypesByPortabilityKey, table, typeName);
+
+            boolean returnedWhole = wholeRowTables.contains(table);
 
             rowsByTable.put(
                 table,
                 new RowNames(
                     table,
                     typeName,
-                    resolveName(
-                        decapitalize(typeName) + MAPPER_SUFFIX,
-                        false,
-                        queryRowMapperNames,
-                        usedRowMapperNames
-                    ),
+                    returnedWhole
+                        ? resolveName(
+                            decapitalize(typeName) + MAPPER_SUFFIX,
+                            false,
+                            queryRowMapperNames,
+                            usedRowMapperNames
+                        )
+                        : null,
+                    columns,
                     resolveNames(
-                        query.columns().stream()
+                        columns.stream()
                             .map(QueryColumn::name)
                             .toList(),
                         RESERVED_MEMBER_NAMES,
-                        query.name()
+                        queryName
                     ),
-                    index
+                    returnedWhole
                 )
             );
         }
-
-        return rowsByTable;
     }
 
     /**
@@ -427,6 +490,7 @@ final class JavaNames {
 
         rows.stream()
             .map(RowNames::mapperName)
+            .filter(Objects::nonNull)
             .forEach(reserved::add);
 
         return reserved;

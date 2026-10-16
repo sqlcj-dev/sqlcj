@@ -109,7 +109,7 @@ public final class JavaCodeGenerator implements CodeGenerator {
                     group.name(),
                     row.tableName(),
                     row.typeName(),
-                    group.queries().get(row.queryIndex()).columns(),
+                    row.columns(),
                     row.componentNames()
                 )
             );
@@ -225,11 +225,11 @@ public final class JavaCodeGenerator implements CodeGenerator {
 
     /**
      * Records the enum types one group uses, in the order its columns and
-     * parameters first name them.
+     * parameters first name them, an embedded row's own columns included.
      */
     private void recordEnums(QueryGroupModel group) {
         for (QueryModel query : group.queries()) {
-            for (QueryColumn column : query.columns()) {
+            for (QueryColumn column : readColumns(query.columns())) {
                 if (column.type() == ColumnType.ENUM) {
                     recordEnum(group, column.enumType());
                 }
@@ -591,7 +591,7 @@ public final class JavaCodeGenerator implements CodeGenerator {
         }
 
         for (QueryModel query : group.queries()) {
-            query.columns().stream()
+            readColumns(query.columns()).stream()
                 .map(QueryColumn::type)
                 .map(this::resolveImport)
                 .filter(Objects::nonNull)
@@ -607,6 +607,27 @@ public final class JavaCodeGenerator implements CodeGenerator {
         return imports.stream()
             .map(type -> "import " + type + ";")
             .collect(Collectors.joining("\n"));
+    }
+
+    /**
+     * The columns one result reads from the result set, in read order, which
+     * are the own columns of an embedded row in place of the component that
+     * holds it.
+     */
+    private List<QueryColumn> readColumns(List<QueryColumn> columns) {
+        List<QueryColumn> read = new ArrayList<>();
+
+        for (QueryColumn column : columns) {
+            if (column.row()) {
+                read.addAll(column.rowColumns());
+
+                continue;
+            }
+
+            read.add(column);
+        }
+
+        return read;
     }
 
     private boolean hasResult(QueryModel query) {
@@ -681,13 +702,15 @@ public final class JavaCodeGenerator implements CodeGenerator {
         members.add(generateConstructor(names));
 
         for (JavaNames.RowNames row : names.rows()) {
-            members.add(
-                generateRowMapper(
-                    row.typeName(),
-                    row.mapperName(),
-                    group.queries().get(row.queryIndex()).columns()
-                )
-            );
+            if (row.returnedWhole()) {
+                members.add(
+                    generateRowMapper(
+                        row.typeName(),
+                        row.mapperName(),
+                        row.columns()
+                    )
+                );
+            }
         }
 
         for (int index = 0; index < group.queries().size(); index++) {
@@ -780,12 +803,18 @@ public final class JavaCodeGenerator implements CodeGenerator {
             .collect(Collectors.joining(",\n"));
     }
 
+    /**
+     * Generates one record component, whose type is the package's row record
+     * for a component holding one table's complete row, by its simple name,
+     * because that record belongs to the generated package.
+     */
     private String generateResultComponent(QueryColumn column, String name) {
+        String type = column.row()
+            ? JavaNames.rowTypeName(column.rowTable())
+            : javaType(column.type(), column.enumType(), column.array());
+
         return "%s %s"
-            .formatted(
-                javaType(column.type(), column.enumType(), column.array()),
-                name
-            )
+            .formatted(type, name)
             .indent(4)
             .stripTrailing();
     }
@@ -1140,17 +1169,46 @@ public final class JavaCodeGenerator implements CodeGenerator {
 
     /**
      * Reads each result column by its one-based projection position so that
-     * identically named columns from different sources stay distinct.
+     * identically named columns from different sources stay distinct. A
+     * component holding one table's complete row reads that table's columns at
+     * the consecutive positions the wildcard selected them at, so the read
+     * order stays the selected-column order.
      */
     private String generateResultMappings(List<QueryColumn> columns) {
-        return IntStream.range(0, columns.size())
-            .mapToObj(
-                index -> generateResultMapping(
-                    columns.get(index),
-                    index + 1
-                )
-            )
+        List<String> mappings = new ArrayList<>(columns.size());
+        int position = 1;
+
+        for (QueryColumn column : columns) {
+            if (column.row()) {
+                mappings.add(generateRowMapping(column, position));
+                position += column.rowColumns().size();
+
+                continue;
+            }
+
+            mappings.add(generateResultMapping(column, position));
+            position++;
+        }
+
+        return String.join(",\n", mappings);
+    }
+
+    /**
+     * Builds one embedded row inline from the positions its own columns were
+     * selected at, so that the result's mapper reads every column of the result
+     * in one pass.
+     */
+    private String generateRowMapping(QueryColumn column, int firstPosition) {
+        List<QueryColumn> columns = column.rowColumns();
+
+        String components = IntStream.range(0, columns.size())
+            .mapToObj(index -> generateResultMapping(columns.get(index), firstPosition + index))
             .collect(Collectors.joining(",\n"));
+
+        return "new %s(\n%s\n)"
+            .formatted(JavaNames.rowTypeName(column.rowTable()), components)
+            .indent(8)
+            .stripTrailing();
     }
 
     /**

@@ -1697,6 +1697,125 @@ class SqlcjCompilerIntegrationTest {
         }
     }
 
+    /**
+     * One entry that embeds a table's row in a joined result and another that
+     * returns that table's row whole share the single row record the package
+     * generates for it, so the embedded component and the whole-row method have
+     * one type.
+     */
+    @Test
+    void shouldGenerateOneSharedRowRecordForAnEmbeddedAndAWholeRowEntry() throws Exception {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path authorQueries = tempDir.resolve("author-queries.sql");
+        Path libraryQueries = tempDir.resolve("library-queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE authors
+                (
+                    id   BIGINT NOT NULL,
+                    name VARCHAR(255)
+                );
+
+                CREATE TABLE books
+                (
+                    id        BIGINT NOT NULL,
+                    author_id BIGINT NOT NULL,
+                    title     VARCHAR(255)
+                );
+                """
+        );
+
+        Files.writeString(
+            authorQueries,
+            """
+                -- name: ListBooksWithAuthors :many
+                SELECT b.*, a.*
+                FROM books b
+                JOIN authors a ON a.id = b.author_id;
+                """
+        );
+
+        Files.writeString(
+            libraryQueries,
+            """
+                -- name: GetAuthor :one
+                SELECT *
+                FROM authors
+                WHERE id = $1;
+                """
+        );
+
+        new SqlcjCompiler().compile(
+            authorAndLibraryConfig(
+                schemaFile,
+                authorQueries,
+                schemaFile,
+                libraryQueries,
+                generatedDirectory
+            )
+        );
+
+        Path packageDirectory = generatedDirectory.resolve("dev/example/generated");
+
+        try (Stream<Path> files = Files.list(packageDirectory)) {
+            assertEquals(
+                List.of(
+                    "AuthorRepository.java",
+                    "AuthorsRow.java",
+                    "BooksRow.java",
+                    "LibraryRepository.java"
+                ),
+                files.map(path -> path.getFileName().toString()).sorted().toList()
+            );
+        }
+
+        String authorRepository = Files.readString(
+            packageDirectory.resolve("AuthorRepository.java")
+        );
+
+        assertEquals(
+            List.of("BooksRow b", "AuthorsRow a"),
+            recordComponents(authorRepository, "ListBooksWithAuthorsResult")
+        );
+
+        assertFalse(authorRepository.contains("RowMapper<AuthorsRow>"));
+        assertFalse(authorRepository.contains("RowMapper<BooksRow>"));
+
+        assertTrue(
+            Files.readString(packageDirectory.resolve("LibraryRepository.java"))
+                .contains("private static final RowMapper<AuthorsRow> authorsRowMapper =")
+        );
+
+        Path classesDirectory = tempDir.resolve("classes");
+
+        assertCompiles(generatedDirectory, classesDirectory);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> row = Class.forName("dev.example.generated.AuthorsRow", true, classLoader);
+
+            Class<?> result = Class.forName(
+                "dev.example.generated.AuthorRepository$ListBooksWithAuthorsResult",
+                true,
+                classLoader
+            );
+
+            assertEquals(
+                row,
+                result.getRecordComponents()[1].getType()
+            );
+
+            assertEquals(
+                row,
+                Class.forName("dev.example.generated.LibraryRepository", true, classLoader)
+                    .getMethod("getAuthor", Long.class)
+                    .getReturnType()
+            );
+        }
+    }
+
     /** A row record no entry returns any more is deleted on regeneration. */
     @Test
     void shouldDeleteTheStaleRowRecordOfARemovedFullRowQuery() throws IOException {

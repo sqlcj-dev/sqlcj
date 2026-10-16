@@ -284,7 +284,13 @@ The rules are applied as follows:
   the table `authors` generates `AuthorsRow`. Row names are normalized, never
   singularized. A row record is a top-level type of `java.package`, generated
   once per table into its own file and shared by every repository of the package
-  that returns that row,
+  that returns or embeds that row,
+- a result component that holds one table's complete row is named after the name
+  its query source exposes, which is the source's alias or its table name as
+  written, by the same rules every other component follows, so
+  `SELECT u.*, p.* FROM users u JOIN profiles p ON p.user_id = u.id` generates
+  the components `u` and `p` and `SELECT users.*, COUNT(*) AS users FROM users`
+  generates `users1` and `users2`,
 - an enum type is the upper camel form of its PostgreSQL name, so
   `stage_setting` generates `StageSetting`. It is a top-level type of
   `java.package`, generated once per enum type into its own file, and only for
@@ -297,7 +303,9 @@ The rules are applied as follows:
   `getAuthor`,
 - a row-mapper field is the method name followed by `RowMapper`, and the mapper
   of a row record is the lower camel form of the row type followed by `Mapper`,
-  so `AuthorsRow` generates `authorsRowMapper`,
+  so `AuthorsRow` generates `authorsRowMapper`. A repository generates that
+  field only for a row one of its queries returns whole, because an embedded row
+  is built inside the mapper of the result that holds it,
 - record components and method parameters are the lower camel form of the column
   name or projection alias, so `created_at` generates `createdAt`.
 
@@ -333,7 +341,8 @@ and `profileId` instead of two disambiguated `id` components.
 The generated row mapper reads each result column by its one-based position in
 the selected-column list, so renaming a component never changes which column it
 reads, and identically named columns selected from different query sources stay
-distinct.
+distinct. A component holding one table's complete row reads that table's
+columns at the consecutive positions its wildcard selected them at.
 
 ### Repository method collisions
 
@@ -373,10 +382,10 @@ sqlcj: Invalid query group 'Stage' in /home/dev/project/sql/queries.sql: Enum ty
 
 ### Row record collisions
 
-Two entries of one package that return the complete row of one table generate
-one row record, so they must define that table alike: the analyzed row columns
-must have the same names, types, and nullability, in the same order. Otherwise
-the run ends, naming the entry that defined the table first:
+Two entries of one package that return or embed the complete row of one table
+generate one row record, so they must define that table alike: the analyzed row
+columns must have the same names, types, and nullability, in the same order.
+Otherwise the run ends, naming the entry that defined the table first:
 
 ```text
 sqlcj: Invalid query group 'Library' in /home/dev/project/sql/library.sql: Table 'authors' differs from its definition in query group 'Author', which generates the same row type AuthorsRow

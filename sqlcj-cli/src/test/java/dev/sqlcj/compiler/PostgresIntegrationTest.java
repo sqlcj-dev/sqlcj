@@ -3796,6 +3796,76 @@ class PostgresIntegrationTest {
     }
 
     /**
+     * Covers embedded rows end to end: a joined read whose projection is a
+     * wildcard of each source returns one component per source, each an
+     * instance of the package's shared row record for that table and read from
+     * the positions its wildcard selected, so the embedded customer equals the
+     * row a whole-row read of the same customer returns.
+     */
+    @Test
+    void shouldExecuteGeneratedJoinedWildcardReadIntoSharedRowTypesAgainstPostgres() throws Exception {
+        execute(CONSTRAINT_SCHEMA);
+
+        Path classesDirectory = generateAndCompile(
+            CONSTRAINT_SCHEMA,
+            """
+                -- name: GetCustomerOrder :one
+                SELECT c.*, o.*
+                FROM customers c
+                JOIN customer_orders o ON o.customer_id = c.id
+                WHERE o.id = $1;
+
+                -- name: GetCustomer :one
+                SELECT *
+                FROM customers
+                WHERE id = $1;
+                """
+        );
+
+        execute("INSERT INTO customers (id, name) VALUES (1, 'Alice')");
+        execute("INSERT INTO customer_orders (id, customer_id, quantity) VALUES (10, 1, 3)");
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Object result = repository
+                .getClass()
+                .getMethod("getCustomerOrder", Long.class)
+                .invoke(repository, 10L);
+
+            assertEquals(List.of("c", "o"), recordComponentNames(result));
+
+            Object customer = component(result, "c");
+            Object order = component(result, "o");
+
+            Object wholeCustomer = repository
+                .getClass()
+                .getMethod("getCustomer", Long.class)
+                .invoke(repository, 1L);
+
+            assertEquals("CustomersRow", customer.getClass().getSimpleName());
+            assertEquals("CustomerOrdersRow", order.getClass().getSimpleName());
+            assertEquals(wholeCustomer.getClass(), customer.getClass());
+            assertEquals(wholeCustomer, customer);
+
+            assertEquals(List.of("id", "name"), recordComponentNames(customer));
+
+            assertEquals(
+                List.of("id", "customerId", "quantity", "status", "createdAt"),
+                recordComponentNames(order)
+            );
+
+            assertEquals(1L, component(customer, "id"));
+            assertEquals("Alice", component(customer, "name"));
+            assertEquals(10L, component(order, "id"));
+            assertEquals(1L, component(order, "customerId"));
+            assertEquals(3, component(order, "quantity"));
+            assertEquals("new", component(order, "status"));
+            assertNotNull(component(order, "createdAt"));
+        }
+    }
+
+    /**
      * Covers a returning delete: every deleted row is returned to the
      * {@code :many} result, and a delete that matches no row returns an empty
      * list. PostgreSQL does not guarantee the returned row order, so the rows

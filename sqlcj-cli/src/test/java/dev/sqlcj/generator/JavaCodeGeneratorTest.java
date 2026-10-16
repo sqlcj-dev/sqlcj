@@ -2452,6 +2452,221 @@ class JavaCodeGeneratorTest {
     }
 
     /**
+     * A result that embeds the row of each joined source holds one component
+     * per row, typed by the package's row record and read inline from the
+     * consecutive positions its columns were selected at. Neither row is the
+     * whole result of a query here, so the repository generates no mapper field
+     * for either of them.
+     */
+    @Test
+    void shouldGenerateResultRecordEmbeddingTheRowOfEachJoinedSource() throws IOException {
+        QueryModel query = new QueryModel(
+            "ListUserProfiles",
+            QueryType.MANY,
+            "users",
+            """
+                SELECT u.*, p.*
+                FROM users u
+                JOIN profiles p ON p.user_id = u.id
+                """,
+            List.of(),
+            List.of(usersRowColumn("u"), profilesRowColumn("p")),
+            List.of(),
+            null
+        );
+
+        GeneratedFile file = generate(query);
+
+        String source = file.content();
+
+        assertEquals(
+            List.of("UsersRow u", "ProfilesRow p"),
+            recordComponents(source, "ListUserProfilesResult")
+        );
+
+        assertTrue(
+            source.contains(
+                """
+                    private static final RowMapper<ListUserProfilesResult> listUserProfilesRowMapper =
+                            resultSet -> new ListUserProfilesResult(
+                            new UsersRow(
+                                    resultSet.getObject(1, Long.class),
+                                    resultSet.getObject(2, String.class)
+                            ),
+                            new ProfilesRow(
+                                    resultSet.getObject(3, Long.class),
+                                    resultSet.getObject(4, Long.class),
+                                    resultSet.getObject(5, String.class)
+                            )
+                    );
+                    """
+                    .indent(4)
+            ),
+            source
+        );
+
+        assertFalse(source.contains("RowMapper<UsersRow>"));
+        assertFalse(source.contains("RowMapper<ProfilesRow>"));
+
+        List<GeneratedFile> rows = codeGenerator.generateRows();
+
+        assertEquals(
+            List.of(
+                Path.of("generated", "UsersRow.java"),
+                Path.of("generated", "ProfilesRow.java")
+            ),
+            rows.stream().map(GeneratedFile::path).toList()
+        );
+
+        assertCompilesWithRows(file);
+    }
+
+    /**
+     * An embedded row's own columns reach the generated package: the row record
+     * and the Java enum of its enum column are generated although no query
+     * returns that row whole, and the repository imports the JDK types the
+     * inline read names.
+     */
+    @Test
+    void shouldGenerateRowRecordAndEnumOnlyForAnEmbeddedRow() throws IOException {
+        QueryModel query = new QueryModel(
+            "ListStageOwners",
+            QueryType.MANY,
+            "stages",
+            "SELECT s.*, COUNT(*) AS owners FROM stages s GROUP BY s.id, s.setting, s.opened_at",
+            List.of(),
+            List.of(
+                QueryColumn.row(
+                    "s",
+                    "stages",
+                    List.of(
+                        new QueryColumn("id", ColumnType.BIGINT, false),
+                        new QueryColumn("setting", ColumnType.ENUM, true, "stage_setting"),
+                        new QueryColumn("opened_at", ColumnType.TIMESTAMP, true)
+                    )
+                ),
+                new QueryColumn("owners", ColumnType.BIGINT, false)
+            ),
+            List.of(),
+            null
+        );
+
+        GeneratedFile repository = codeGenerator.generate(
+            new QueryGroupModel(
+                GROUP,
+                List.of(query),
+                List.of(new EnumType("stage_setting", List.of("indoor", "outdoor")))
+            )
+        );
+
+        String source = repository.content();
+
+        assertEquals(
+            List.of("StagesRow s", "Long owners"),
+            recordComponents(source, "ListStageOwnersResult")
+        );
+
+        assertTrue(source.contains("import java.time.LocalDateTime;"));
+        assertTrue(source.contains("StageSetting.fromLabel(resultSet.getString(2))"));
+        assertTrue(source.contains("resultSet.getObject(3, LocalDateTime.class)"));
+        assertTrue(source.contains("resultSet.getObject(4, Long.class)"));
+
+        assertFalse(source.contains("RowMapper<StagesRow>"));
+
+        List<GeneratedFile> rows = codeGenerator.generateRows();
+        List<GeneratedFile> enums = codeGenerator.generateEnums();
+
+        assertEquals(
+            List.of(Path.of("generated", "StagesRow.java")),
+            rows.stream().map(GeneratedFile::path).toList()
+        );
+
+        assertEquals(
+            List.of(Path.of("generated", "StageSetting.java")),
+            enums.stream().map(GeneratedFile::path).toList()
+        );
+
+        assertTrue(rows.get(0).content().contains("StageSetting setting"));
+
+        assertCompiles(repository, rows.get(0), enums.get(0));
+    }
+
+    /**
+     * An embedded row's component is named after its source's exposed name by
+     * the same rules every other component follows, so a count aliased like the
+     * source disambiguates both components in selected order.
+     */
+    @Test
+    void shouldDisambiguateAnEmbeddedRowComponentFromAColumnOfTheSameName() throws IOException {
+        QueryModel query = new QueryModel(
+            "CountUsers",
+            QueryType.MANY,
+            "users",
+            "SELECT users.*, COUNT(*) AS users FROM users GROUP BY users.id, users.name",
+            List.of(),
+            List.of(
+                usersRowColumn("users"),
+                new QueryColumn("users", ColumnType.BIGINT, false)
+            ),
+            List.of(),
+            null
+        );
+
+        GeneratedFile file = generate(query);
+
+        assertEquals(
+            List.of("UsersRow users1", "Long users2"),
+            recordComponents(file.content(), "CountUsersResult")
+        );
+
+        assertCompilesWithRows(file);
+    }
+
+    /** The embedded row of the {@code users} table under one exposed name. */
+    private QueryColumn usersRowColumn(String name) {
+        return QueryColumn.row(
+            name,
+            "users",
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true)
+            )
+        );
+    }
+
+    /** The embedded row of the {@code profiles} table under one exposed name. */
+    private QueryColumn profilesRowColumn(String name) {
+        return QueryColumn.row(
+            name,
+            "profiles",
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("user_id", ColumnType.BIGINT, false),
+                new QueryColumn("nickname", ColumnType.VARCHAR, true)
+            )
+        );
+    }
+
+    /** The components of one generated record, in declared order. */
+    private List<String> recordComponents(String source, String recordName) {
+        int start = source.indexOf("public record " + recordName + "(");
+
+        assertTrue(start >= 0, source);
+
+        return source.substring(start, source.indexOf(") {", start))
+            .lines()
+            .skip(1)
+            .map(String::strip)
+            .filter(component -> !component.isEmpty())
+            .map(
+                component -> component.endsWith(",")
+                    ? component.substring(0, component.length() - 1)
+                    : component
+            )
+            .toList();
+    }
+
+    /**
      * Two groups of one package that return the full row of one table share the
      * single row record the package generates for it.
      */

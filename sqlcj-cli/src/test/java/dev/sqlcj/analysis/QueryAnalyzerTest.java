@@ -2315,6 +2315,11 @@ class QueryAnalyzerTest {
         );
     }
 
+    /**
+     * A bare wildcard embeds the row of every source that is not left-joined
+     * and expands a left-joined source into its own nullable columns, each in
+     * its written position.
+     */
     @Test
     void shouldExpandAllColumnsOfLeftJoinedSourceAsNullable() {
         String sql = """
@@ -2331,8 +2336,14 @@ class QueryAnalyzerTest {
 
         assertEquals(
             List.of(
-                new QueryColumn("id", ColumnType.BIGINT, false),
-                new QueryColumn("name", ColumnType.VARCHAR, true),
+                QueryColumn.row(
+                    "u",
+                    "users",
+                    List.of(
+                        new QueryColumn("id", ColumnType.BIGINT, false),
+                        new QueryColumn("name", ColumnType.VARCHAR, true)
+                    )
+                ),
                 new QueryColumn("id", ColumnType.BIGINT, true),
                 new QueryColumn("user_id", ColumnType.BIGINT, true),
                 new QueryColumn("nickname", ColumnType.VARCHAR, true)
@@ -2445,6 +2456,10 @@ class QueryAnalyzerTest {
         assertEquals(List.of(1), model.bindingParameterIndexes());
     }
 
+    /**
+     * A bare wildcard over joined sources embeds one row of each source's
+     * table, in source order, named after the name each source exposes.
+     */
     @Test
     void shouldExpandAllColumnsAcrossJoinedSourcesInOrder() {
         String sql = """
@@ -2459,18 +2474,69 @@ class QueryAnalyzerTest {
             joinSchema
         );
 
+        assertNull(model.rowTable());
+
         assertEquals(
-            List.of(
-                new QueryColumn("id", ColumnType.BIGINT, false),
-                new QueryColumn("name", ColumnType.VARCHAR, true),
-                new QueryColumn("id", ColumnType.BIGINT, false),
-                new QueryColumn("user_id", ColumnType.BIGINT, false),
-                new QueryColumn("nickname", ColumnType.VARCHAR, true)
-            ),
+            List.of(usersRow("u"), profilesRow("p")),
             model.columns()
         );
     }
 
+    /**
+     * Each qualified wildcard of a joined read embeds the row of its own
+     * source's table, in its written position.
+     */
+    @Test
+    void shouldEmbedTheRowOfEachQualifiedWildcardOfAJoinedRead() {
+        String sql = """
+            SELECT u.*, p.*
+            FROM users u
+            JOIN profiles p ON p.user_id = u.id
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUserProfiles", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertNull(model.rowTable());
+
+        assertEquals(
+            List.of(usersRow("u"), profilesRow("p")),
+            model.columns()
+        );
+    }
+
+    /**
+     * One table read under two aliases embeds that one table's row twice, each
+     * component named after its own alias.
+     */
+    @Test
+    void shouldEmbedOneTableRowUnderEachOfItsAliases() {
+        String sql = """
+            SELECT u.*, parent.*
+            FROM users u
+            JOIN users parent ON parent.id = u.id
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUserParents", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(usersRow("u"), usersRow("parent")),
+            model.columns()
+        );
+    }
+
+    /**
+     * A wildcard embeds its source's row in its written position while every
+     * other item stays a flat component of the selected order, a column and an
+     * aliased count included.
+     */
     @Test
     void shouldExpandQualifiedAllColumnsForOneSource() {
         String sql = """
@@ -2487,12 +2553,94 @@ class QueryAnalyzerTest {
 
         assertEquals(
             List.of(
-                new QueryColumn("id", ColumnType.BIGINT, false),
-                new QueryColumn("user_id", ColumnType.BIGINT, false),
-                new QueryColumn("nickname", ColumnType.VARCHAR, true),
+                profilesRow("p"),
                 new QueryColumn("name", ColumnType.VARCHAR, true)
             ),
             model.columns()
+        );
+    }
+
+    @Test
+    void shouldEmbedTheRowOfAWildcardBesideAScalarCount() {
+        String sql = """
+            SELECT u.*, COUNT(*) AS profiles
+            FROM users u
+            JOIN profiles p ON p.user_id = u.id
+            GROUP BY u.id, u.name
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("CountUserProfiles", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertNull(model.rowTable());
+
+        assertEquals(
+            List.of(
+                usersRow("u"),
+                new QueryColumn("profiles", ColumnType.BIGINT, false)
+            ),
+            model.columns()
+        );
+    }
+
+    /**
+     * A derived source has no row record, so its wildcard stays its own
+     * columns, and the wildcard of its body expands there as it does in any
+     * analyzed {@code SELECT}.
+     */
+    @Test
+    void shouldExpandTheWildcardOfADerivedSourceAsItsOwnColumns() {
+        String sql = """
+            WITH recent AS (SELECT * FROM orders)
+            SELECT recent.*, u.name
+            FROM users u
+            JOIN recent ON recent.user_id = u.id
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListRecentOrders", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertNull(model.rowTable());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("user_id", ColumnType.BIGINT, false),
+                new QueryColumn("total", ColumnType.DECIMAL, true),
+                new QueryColumn("name", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+    }
+
+    /** The embedded row of the {@code users} table under one exposed name. */
+    private QueryColumn usersRow(String name) {
+        return QueryColumn.row(
+            name,
+            "users",
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true)
+            )
+        );
+    }
+
+    /** The embedded row of the {@code profiles} table under one exposed name. */
+    private QueryColumn profilesRow(String name) {
+        return QueryColumn.row(
+            name,
+            "profiles",
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("user_id", ColumnType.BIGINT, false),
+                new QueryColumn("nickname", ColumnType.VARCHAR, true)
+            )
         );
     }
 
@@ -2563,11 +2711,15 @@ class QueryAnalyzerTest {
         assertNull(model.rowTable());
     }
 
+    /**
+     * A bare wildcard of a joined read covers every source, so it returns a
+     * result of its own rather than one table's shared row.
+     */
     @ParameterizedTest
     @ValueSource(
         strings = {
             "SELECT * FROM users u JOIN profiles p ON p.user_id = u.id",
-            "SELECT u.* FROM users u JOIN profiles p ON p.user_id = u.id"
+            "SELECT * FROM users u LEFT JOIN profiles p ON p.user_id = u.id"
         }
     )
     void shouldNotResolveRowTableForJoinedWildcard(String sql) {
@@ -2578,6 +2730,95 @@ class QueryAnalyzerTest {
         );
 
         assertNull(model.rowTable());
+    }
+
+    /**
+     * A lone wildcard of one joined source covers exactly that source, so it
+     * returns that table's shared row, in the schema's own spelling and with
+     * the row's own columns.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "SELECT u.* FROM users u JOIN profiles p ON p.user_id = u.id",
+            "SELECT users.* FROM users JOIN profiles p ON p.user_id = users.id"
+        }
+    )
+    void shouldResolveRowTableForALoneJoinedWildcard(String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("ListUserProfiles", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals("users", model.rowTable());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("name", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+    }
+
+    /**
+     * A lone wildcard of a left-joined source may read no row, so it stays that
+     * source's own nullable columns.
+     */
+    @Test
+    void shouldNotResolveRowTableForALoneLeftJoinedWildcard() {
+        String sql = "SELECT p.* FROM users u LEFT JOIN profiles p ON p.user_id = u.id";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListProfiles", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertNull(model.rowTable());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, true),
+                new QueryColumn("user_id", ColumnType.BIGINT, true),
+                new QueryColumn("nickname", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+    }
+
+    /**
+     * A single-source wildcard written beside another item embeds that table's
+     * row in its own position instead of returning the row itself.
+     */
+    @Test
+    void shouldEmbedTheRowOfASingleSourceWildcardBesideAnotherItem() {
+        String sql = "SELECT *, id FROM users";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUsers", QueryType.MANY, sql),
+            parser.parse(sql),
+            schema
+        );
+
+        assertNull(model.rowTable());
+
+        assertEquals(
+            List.of(
+                QueryColumn.row(
+                    "users",
+                    "users",
+                    List.of(
+                        new QueryColumn("id", ColumnType.BIGINT, false),
+                        new QueryColumn("name", ColumnType.VARCHAR, true),
+                        new QueryColumn("active", ColumnType.BOOLEAN, true)
+                    )
+                ),
+                new QueryColumn("id", ColumnType.BIGINT, false)
+            ),
+            model.columns()
+        );
     }
 
     @Test
@@ -8623,9 +8864,9 @@ class QueryAnalyzerTest {
     }
 
     /**
-     * A target wildcard written beside another returned column returns that
-     * target's columns in their own positions, which is a result specific to
-     * the query rather than the target's shared row.
+     * A target wildcard written beside another returned column embeds the
+     * target's row in its own position, which is a result specific to the query
+     * rather than the target's shared row.
      */
     @Test
     void shouldNotResolveRowTableForATargetWildcardBesideAnotherColumn() {
@@ -8647,9 +8888,34 @@ class QueryAnalyzerTest {
 
         assertEquals(
             List.of(
-                new QueryColumn("id", ColumnType.BIGINT, false),
-                new QueryColumn("name", ColumnType.VARCHAR, true),
+                usersRow("u"),
                 new QueryColumn("nickname", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+    }
+
+    /**
+     * A bare target wildcard of a single-table write written beside another
+     * returned column embeds the target's row the same way, named after the
+     * name the write exposes for its target.
+     */
+    @Test
+    void shouldEmbedTheTargetRowOfABareReturningWildcardBesideAnotherColumn() {
+        String sql = "UPDATE users SET name = :name WHERE id = :id RETURNING *, id";
+
+        QueryModel model = analyzer.analyze(
+            new Query("RenameUser", QueryType.ONE, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertNull(model.rowTable());
+
+        assertEquals(
+            List.of(
+                usersRow("users"),
+                new QueryColumn("id", ColumnType.BIGINT, false)
             ),
             model.columns()
         );
