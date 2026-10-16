@@ -344,13 +344,30 @@ public final class QueryAnalyzer {
 
     /**
      * The analyzed facts of one {@code SELECT}: the name the query writes for
-     * its first source, its ordered sources, and its result columns in
-     * selected order, which are the columns a derived source exposes.
+     * its first source, its ordered sources, and its projection in selected
+     * order.
      */
     private record AnalyzedSelect(
         String table,
         List<Source> sources,
-        List<dev.sqlcj.schema.Column> columns
+        ResolvedProjection projection
+    ) {
+
+        /** The columns this {@code SELECT} exposes as a derived source. */
+        private List<dev.sqlcj.schema.Column> columns() {
+            return projection.columns();
+        }
+    }
+
+    /**
+     * One analyzed projection in selected order: the columns it expands to,
+     * which are the columns a derived source exposes, and the result components
+     * of a top-level read, where a wildcard of a schema table that is not
+     * left-joined is one embedded row.
+     */
+    private record ResolvedProjection(
+        List<dev.sqlcj.schema.Column> columns,
+        List<QueryColumn> resultColumns
     ) {
     }
 
@@ -588,13 +605,17 @@ public final class QueryAnalyzer {
             analyzeCommonTableExpressions(selects, analysis, List.of())
         );
 
+        String rowTable = resolveSelectRowTable(plainSelect, analyzed.sources());
+
         return toQueryModel(
             query,
             parsedSql,
             analyzed.table(),
-            toQueryColumns(analyzed.columns()),
+            rowTable == null
+                ? analyzed.projection().resultColumns()
+                : toQueryColumns(analyzed.columns()),
             analysis.placeholders(),
-            resolveSelectRowTable(plainSelect, analyzed.sources())
+            rowTable
         );
     }
 
@@ -677,14 +698,14 @@ public final class QueryAnalyzer {
 
         Scope scope = Scope.of(sources, commonTableExpressions);
 
-        List<dev.sqlcj.schema.Column> columns = resolveColumns(plainSelect, analysis, scope);
+        ResolvedProjection projection = resolveProjection(plainSelect, analysis, scope);
 
         resolveBindingParameters(plainSelect, scope, analysis);
 
         return new AnalyzedSelect(
             declaredSourceName(plainSelect.getFromItem(), sources.get(0)),
             sources,
-            columns
+            projection
         );
     }
 
@@ -1045,8 +1066,12 @@ public final class QueryAnalyzer {
 
     /**
      * Resolves the returned columns in declared order against the write's
-     * sources, the target first, expanding a wildcard of the target in schema
-     * column order.
+     * sources, the target first.
+     *
+     * <p>A clause that is exactly a wildcard of the target returns that table's
+     * complete row, so it resolves to the row's own columns. A wildcard written
+     * beside another item is one embedded row of the target in its own
+     * position.
      */
     private List<QueryColumn> resolveReturningColumns(
         ReturningClause returningClause,
@@ -1061,6 +1086,8 @@ public final class QueryAnalyzer {
             );
         }
 
+        boolean wholeRow = resolveReturningRowTable(returningClause, sources) != null;
+
         List<QueryColumn> columns = new ArrayList<>();
 
         for (SelectItem<?> returningItem : returningClause) {
@@ -1068,7 +1095,8 @@ public final class QueryAnalyzer {
                 resolveReturningItem(
                     returningItem.getExpression(),
                     returningItem.getAlias(),
-                    sources
+                    sources,
+                    !wholeRow
                 )
             );
         }
@@ -1121,10 +1149,11 @@ public final class QueryAnalyzer {
     private List<QueryColumn> resolveReturningItem(
         Expression expression,
         Alias alias,
-        List<Source> sources
+        List<Source> sources,
+        boolean embedRow
     ) {
         if (expression instanceof AllColumns allColumns) {
-            return resolveReturningWildcard(allColumns, alias, sources);
+            return resolveReturningWildcard(allColumns, alias, sources, embedRow);
         }
 
         net.sf.jsqlparser.schema.Column returnedColumn = directColumn(expression);
@@ -1156,6 +1185,10 @@ public final class QueryAnalyzer {
      * returnable by name, and a bare {@code *} on a joined write would return
      * every source's columns, so each is rejected naming what to write instead.
      *
+     * <p>A wildcard written beside another returned item is one embedded row of
+     * the target, named after the name the target exposes, and a clause that is
+     * exactly the wildcard resolves to the row's own columns.
+     *
      * <p>An alias names one result component and a modifier changes which
      * columns the wildcard returns, so neither is supported on a bare or a
      * qualified wildcard.
@@ -1163,7 +1196,8 @@ public final class QueryAnalyzer {
     private List<QueryColumn> resolveReturningWildcard(
         AllColumns allColumns,
         Alias alias,
-        List<Source> sources
+        List<Source> sources,
+        boolean embedRow
     ) {
         String written = writtenReturningWildcard(allColumns);
 
@@ -1188,7 +1222,7 @@ public final class QueryAnalyzer {
                 );
             }
 
-            return toQueryColumns(resolveAllColumns(target));
+            return returningWildcardColumns(target, embedRow);
         }
 
         Source source = findSource(sources, returningQualifier(qualified));
@@ -1199,7 +1233,20 @@ public final class QueryAnalyzer {
             );
         }
 
-        return toQueryColumns(resolveAllColumns(target));
+        return returningWildcardColumns(target, embedRow);
+    }
+
+    /**
+     * The returned components of one wildcard of the write target, which are
+     * one embedded row of the target beside another returned item and the
+     * target row's own columns when the clause is exactly the wildcard.
+     */
+    private List<QueryColumn> returningWildcardColumns(Source target, boolean embedRow) {
+        List<QueryColumn> columns = toQueryColumns(resolveAllColumns(target));
+
+        return embedRow
+            ? List.of(QueryColumn.row(target.name(), target.rowTable(), columns))
+            : columns;
     }
 
     /**
@@ -3332,8 +3379,13 @@ public final class QueryAnalyzer {
      *
      * <p>A subscripted reference projects an element rather than the column, so
      * it is rejected as any other computed item is, and a cast states its type.
+     *
+     * <p>Beside the expanded columns, which are the columns a derived source
+     * exposes, the projection carries the result components of a top-level
+     * read, where a wildcard of a schema table that is not left-joined is one
+     * embedded row rather than that table's own columns.
      */
-    private List<dev.sqlcj.schema.Column> resolveColumns(
+    private ResolvedProjection resolveProjection(
         PlainSelect plainSelect,
         Analysis analysis,
         Scope scope
@@ -3341,17 +3393,18 @@ public final class QueryAnalyzer {
         List<Source> sources = scope.sources();
 
         List<dev.sqlcj.schema.Column> columns = new ArrayList<>();
+        List<QueryColumn> resultColumns = new ArrayList<>();
 
         for (SelectItem<?> selectItem : plainSelect.getSelectItems()) {
             Expression expression = selectItem.getExpression();
 
             if (expression instanceof AllTableColumns allTableColumns) {
-                columns.addAll(
-                    resolveAllColumns(
-                        findSource(
-                            sources,
-                            allTableColumns.getTable().getUnquotedName()
-                        )
+                addWildcardColumns(
+                    columns,
+                    resultColumns,
+                    findSource(
+                        sources,
+                        allTableColumns.getTable().getUnquotedName()
                     )
                 );
 
@@ -3360,55 +3413,106 @@ public final class QueryAnalyzer {
 
             if (expression instanceof AllColumns) {
                 for (Source source : sources) {
-                    columns.addAll(resolveAllColumns(source));
+                    addWildcardColumns(columns, resultColumns, source);
                 }
 
                 continue;
             }
 
-            net.sf.jsqlparser.schema.Column selectedColumn = directColumn(expression);
+            dev.sqlcj.schema.Column column = resolveColumnItem(selectItem, analysis, scope);
 
-            if (selectedColumn != null) {
-                ResolvedColumn resolved = resolveColumn(selectedColumn, scope);
-                dev.sqlcj.schema.Column schemaColumn = resolved.column();
+            columns.add(column);
+            resultColumns.add(toQueryColumn(column));
+        }
 
-                columns.add(
-                    new dev.sqlcj.schema.Column(
-                        selectedColumnName(selectItem.getAlias(), schemaColumn),
-                        requireSupportedType(schemaColumn),
-                        schemaColumn.nullable() || resolved.source().leftJoined(),
-                        null,
-                        schemaColumn.enumType(),
-                        schemaColumn.array(),
-                        schemaColumn.blankPadded()
-                    )
-                );
+        return new ResolvedProjection(columns, resultColumns);
+    }
 
-                continue;
-            }
+    /**
+     * Adds one wildcard of one source to the expanded columns and to the result
+     * components: the source's columns in schema order, and one embedded row of
+     * the source's table in its own position.
+     *
+     * <p>A derived source has no row record, and a left-joined source's row may
+     * be absent, so each contributes its expanded columns as result components
+     * too.
+     */
+    private void addWildcardColumns(
+        List<dev.sqlcj.schema.Column> columns,
+        List<QueryColumn> resultColumns,
+        Source source
+    ) {
+        List<dev.sqlcj.schema.Column> sourceColumns = resolveAllColumns(source);
 
-            if (expression instanceof Function function && isScalarCount(function)) {
-                columns.add(scalarCountColumn(selectItem.getAlias()));
+        columns.addAll(sourceColumns);
 
-                continue;
-            }
+        if (embedsRow(source)) {
+            resultColumns.add(
+                QueryColumn.row(
+                    source.name(),
+                    source.rowTable(),
+                    toQueryColumns(sourceColumns)
+                )
+            );
 
-            if (expression instanceof CastExpression cast && cast.getColDataType() != null) {
-                columns.add(castColumn(cast, selectItem.getAlias(), analysis.schema()));
+            return;
+        }
 
-                continue;
-            }
+        resultColumns.addAll(toQueryColumns(sourceColumns));
+    }
 
-            if (expression instanceof JdbcParameter || expression instanceof JdbcNamedParameter) {
-                throw untypedPlaceholder(occurrenceOf(analysis.parsedSql(), expression));
-            }
+    /**
+     * Reports whether a wildcard of one source selects the complete row of a
+     * table the package generates a row record for, which a derived source has
+     * none of and a left-joined source may contribute no row for.
+     */
+    private boolean embedsRow(Source source) {
+        return !source.derived() && !source.leftJoined();
+    }
 
-            throw new UnsupportedOperationException(
-                COMPUTED_PROJECTION_REJECTION.formatted(written(expression))
+    /**
+     * Resolves one projection item that is not a wildcard into its single
+     * column.
+     */
+    private dev.sqlcj.schema.Column resolveColumnItem(
+        SelectItem<?> selectItem,
+        Analysis analysis,
+        Scope scope
+    ) {
+        Expression expression = selectItem.getExpression();
+
+        net.sf.jsqlparser.schema.Column selectedColumn = directColumn(expression);
+
+        if (selectedColumn != null) {
+            ResolvedColumn resolved = resolveColumn(selectedColumn, scope);
+            dev.sqlcj.schema.Column schemaColumn = resolved.column();
+
+            return new dev.sqlcj.schema.Column(
+                selectedColumnName(selectItem.getAlias(), schemaColumn),
+                requireSupportedType(schemaColumn),
+                schemaColumn.nullable() || resolved.source().leftJoined(),
+                null,
+                schemaColumn.enumType(),
+                schemaColumn.array(),
+                schemaColumn.blankPadded()
             );
         }
 
-        return columns;
+        if (expression instanceof Function function && isScalarCount(function)) {
+            return scalarCountColumn(selectItem.getAlias());
+        }
+
+        if (expression instanceof CastExpression cast && cast.getColDataType() != null) {
+            return castColumn(cast, selectItem.getAlias(), analysis.schema());
+        }
+
+        if (expression instanceof JdbcParameter || expression instanceof JdbcNamedParameter) {
+            throw untypedPlaceholder(occurrenceOf(analysis.parsedSql(), expression));
+        }
+
+        throw new UnsupportedOperationException(
+            COMPUTED_PROJECTION_REJECTION.formatted(written(expression))
+        );
     }
 
     /**
@@ -3494,24 +3598,46 @@ public final class QueryAnalyzer {
     }
 
     /**
-     * Reports the table whose complete row a read returns, which is the single
-     * query source when the projection is exactly {@code *} or
-     * {@code qualifier.*}, and {@code null} for every other projection. The
-     * name is the schema's own spelling of the table, so a query-side alias or
-     * spelling never splits one row identity.
+     * Reports the table whose complete row a read returns, which is the table
+     * of the one source a lone wildcard covers: {@code *} over a single source,
+     * and {@code qualifier.*} beside any number of other sources. Every other
+     * projection returns a result of its own, so it reports {@code null}.
+     *
+     * <p>The name is the schema's own spelling of the table, so a query-side
+     * alias or spelling never splits one row identity.
      *
      * <p>A derived source names no table, so a read over one returns a result
-     * specific to its own query even when the source is named like a table.
+     * specific to its own query even when the source is named like a table, and
+     * a left-joined source's row may be absent, so a wildcard of one is read as
+     * its own columns.
      */
     private String resolveSelectRowTable(PlainSelect plainSelect, List<Source> sources) {
         List<SelectItem<?>> selectItems = plainSelect.getSelectItems();
 
-        if (sources.size() != 1 || selectItems.size() != 1) {
+        if (selectItems.size() != 1) {
             return null;
         }
 
-        return selectItems.get(0).getExpression() instanceof AllColumns
-            ? sources.get(0).rowTable()
+        Expression expression = selectItems.get(0).getExpression();
+
+        if (expression instanceof AllTableColumns allTableColumns) {
+            return wildcardRowTable(
+                findSource(sources, allTableColumns.getTable().getUnquotedName())
+            );
+        }
+
+        return expression instanceof AllColumns && sources.size() == 1
+            ? wildcardRowTable(sources.get(0))
+            : null;
+    }
+
+    /**
+     * The table whose complete row a wildcard of one source returns, and
+     * {@code null} for a source whose wildcard is read as its own columns.
+     */
+    private String wildcardRowTable(Source source) {
+        return embedsRow(source)
+            ? source.rowTable()
             : null;
     }
 
@@ -3521,16 +3647,19 @@ public final class QueryAnalyzer {
      */
     private List<QueryColumn> toQueryColumns(List<dev.sqlcj.schema.Column> columns) {
         return columns.stream()
-            .map(
-                column -> new QueryColumn(
-                    column.name(),
-                    column.type(),
-                    column.nullable(),
-                    column.enumType(),
-                    column.array()
-                )
-            )
+            .map(this::toQueryColumn)
             .toList();
+    }
+
+    /** The analyzed result column of one selected column. */
+    private QueryColumn toQueryColumn(dev.sqlcj.schema.Column column) {
+        return new QueryColumn(
+            column.name(),
+            column.type(),
+            column.nullable(),
+            column.enumType(),
+            column.array()
+        );
     }
 
     /**
