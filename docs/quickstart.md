@@ -546,7 +546,7 @@ If a query is invalid, `sqlcj generate` prints one diagnostic naming the source,
 the query, and the line, and exits with status `1`:
 
 ```text
-sqlcj: Invalid query 'CountAuthorBios' in /home/dev/my-app/sql/queries.sql at line 57: Unsupported SELECT expression: Function
+sqlcj: Invalid query 'ListAuthorNames' in /home/dev/my-app/sql/queries.sql at line 57: Cannot infer the type of lower(name) in SELECT; state it with a cast and an alias, such as SUM(amount)::numeric AS total
 ```
 
 Every configured source is compiled before any file is written, so a diagnostic

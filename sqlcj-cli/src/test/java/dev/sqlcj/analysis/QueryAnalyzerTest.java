@@ -132,6 +132,44 @@ class QueryAnalyzerTest {
     );
 
     /**
+     * A schema whose {@code users} table carries one column of every kind a
+     * projected aggregate reads: each scalar type {@code SUM} and {@code AVG}
+     * are defined for, the orderable text, temporal, enum, array, and
+     * blank-padded columns {@code MIN} and {@code MAX} take, each scalar type
+     * they are not defined for, and the {@code tags} column the parser
+     * recorded without a mapped type.
+     */
+    private static final Schema aggregateSchema = new Schema(
+        List.of(
+            new Table(
+                "users",
+                List.of(
+                    new Column("id", ColumnType.BIGINT, false),
+                    new Column("score", ColumnType.SMALLINT, true),
+                    new Column("visits", ColumnType.INTEGER, false),
+                    new Column("balance", ColumnType.DECIMAL, true),
+                    new Column("ratio", ColumnType.REAL, true),
+                    new Column("weight", ColumnType.DOUBLE_PRECISION, true),
+                    new Column("name", ColumnType.VARCHAR, true),
+                    new Column("bio", ColumnType.TEXT, true),
+                    new Column("created_at", ColumnType.TIMESTAMP, true),
+                    new Column("code", ColumnType.VARCHAR, true, null, null, false, true),
+                    new Column("role", ColumnType.ENUM, true, null, "user_role"),
+                    new Column("labels", ColumnType.VARCHAR, true, null, null, true),
+                    new Column("active", ColumnType.BOOLEAN, true),
+                    new Column("external_id", ColumnType.UUID, true),
+                    new Column("avatar", ColumnType.BYTEA, true),
+                    new Column("payload", ColumnType.JSON, true),
+                    new Column("document", ColumnType.JSONB, true),
+                    new Column("tags", null, true, "JSONB[]")
+                ),
+                List.of()
+            )
+        ),
+        List.of(new EnumType("user_role", List.of("admin", "member")))
+    );
+
+    /**
      * A schema whose {@code tags} column the parser recorded without a mapped
      * type, beside the supported columns of the same table.
      */
@@ -1650,6 +1688,267 @@ class QueryAnalyzerTest {
     }
 
     /**
+     * An aliased {@code COUNT} of one argument is a non-null {@code BIGINT}
+     * however the argument is written: with {@code DISTINCT} or {@code ALL}, as
+     * a qualified wildcard, as a column of a type sqlcj does not map, and as an
+     * expression that reaches the database as written.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "SELECT COUNT(id) AS n FROM users",
+            "SELECT COUNT(DISTINCT id) AS n FROM users",
+            "SELECT COUNT(ALL id) AS n FROM users",
+            "SELECT count(u.*) AS n FROM users u",
+            "SELECT COUNT(DISTINCT u.*) AS n FROM users u",
+            "SELECT COUNT(tags) AS n FROM users",
+            "SELECT COUNT(lower(name)) AS n FROM users",
+            "SELECT COUNT(1) AS n FROM users"
+        }
+    )
+    void shouldTypeCountOfOneArgumentAsANonNullBigint(String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("CountUsers", QueryType.ONE, sql),
+            parser.parse(sql),
+            aggregateSchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("n", ColumnType.BIGINT, false)),
+            model.columns()
+        );
+
+        assertTrue(model.parameters().isEmpty());
+        assertNull(model.rowTable());
+    }
+
+    /**
+     * A {@code COUNT} of a left-joined column is non-null too, because a group
+     * whose join found no match counts {@code 0} rows rather than none.
+     */
+    @Test
+    void shouldTypeCountOfALeftJoinedColumnAsNonNull() {
+        String sql = """
+            SELECT u.id, COUNT(o.id) AS orders
+            FROM users u
+                     LEFT JOIN orders o ON o.user_id = u.id
+            GROUP BY u.id
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("CountUserOrders", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("orders", ColumnType.BIGINT, false)
+            ),
+            model.columns()
+        );
+    }
+
+    /**
+     * An aliased {@code MIN} or {@code MAX} is a nullable column of its own
+     * column's type, because it reads {@code NULL} over no row, whether the
+     * column is numeric, textual, temporal, or blank padded.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        value = {
+            "SELECT MIN(id) AS n FROM users|BIGINT",
+            "SELECT MAX(score) AS n FROM users|SMALLINT",
+            "SELECT MIN(visits) AS n FROM users|INTEGER",
+            "SELECT MAX(balance) AS n FROM users|DECIMAL",
+            "SELECT MIN(ratio) AS n FROM users|REAL",
+            "SELECT MAX(weight) AS n FROM users|DOUBLE_PRECISION",
+            "SELECT max(name) AS n FROM users|VARCHAR",
+            "SELECT MIN(bio) AS n FROM users|TEXT",
+            "SELECT MAX(created_at) AS n FROM users|TIMESTAMP",
+            "SELECT MIN(code) AS n FROM users|VARCHAR",
+            "SELECT MAX(DISTINCT name) AS n FROM users|VARCHAR",
+            "SELECT MIN(u.created_at) AS n FROM users u|TIMESTAMP"
+        }
+    )
+    void shouldTypeExtremumAggregateFromItsColumn(String sql, ColumnType type) {
+        QueryModel model = analyzer.analyze(
+            new Query("ReadUserExtremum", QueryType.ONE, sql),
+            parser.parse(sql),
+            aggregateSchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("n", type, true)),
+            model.columns()
+        );
+
+        assertNull(model.rowTable());
+    }
+
+    /** A {@code MIN} or {@code MAX} of an enum column keeps its enum type. */
+    @Test
+    void shouldTypeExtremumAggregateOfAnEnumColumn() {
+        String sql = "SELECT MAX(role) AS n FROM users";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ReadUserExtremum", QueryType.ONE, sql),
+            parser.parse(sql),
+            aggregateSchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("n", ColumnType.ENUM, true, "user_role")),
+            model.columns()
+        );
+    }
+
+    /**
+     * A {@code MIN} or {@code MAX} of an array column is an array of the
+     * column's element type, because PostgreSQL orders arrays.
+     */
+    @Test
+    void shouldTypeExtremumAggregateOfAnArrayColumn() {
+        String sql = "SELECT MIN(labels) AS n FROM users";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ReadUserExtremum", QueryType.ONE, sql),
+            parser.parse(sql),
+            aggregateSchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("n", ColumnType.VARCHAR, true, null, true)),
+            model.columns()
+        );
+    }
+
+    /**
+     * An aliased {@code SUM} or {@code AVG} is a nullable column of the type
+     * PostgreSQL 16 defines for its column's scalar type, which widens an
+     * integral sum and makes every average exact or floating. It is nullable
+     * even over a {@code NOT NULL} column, because it reads {@code NULL} over
+     * no row.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        value = {
+            "SELECT SUM(score) AS n FROM users|BIGINT",
+            "SELECT SUM(visits) AS n FROM users|BIGINT",
+            "SELECT SUM(id) AS n FROM users|DECIMAL",
+            "SELECT sum(balance) AS n FROM users|DECIMAL",
+            "SELECT SUM(ratio) AS n FROM users|REAL",
+            "SELECT SUM(weight) AS n FROM users|DOUBLE_PRECISION",
+            "SELECT AVG(score) AS n FROM users|DECIMAL",
+            "SELECT AVG(visits) AS n FROM users|DECIMAL",
+            "SELECT AVG(id) AS n FROM users|DECIMAL",
+            "SELECT avg(balance) AS n FROM users|DECIMAL",
+            "SELECT AVG(DISTINCT ratio) AS n FROM users|DOUBLE_PRECISION",
+            "SELECT AVG(weight) AS n FROM users|DOUBLE_PRECISION"
+        }
+    )
+    void shouldTypeSumAndAverageByTheirColumnType(String sql, ColumnType type) {
+        QueryModel model = analyzer.analyze(
+            new Query("ReadUserTotal", QueryType.ONE, sql),
+            parser.parse(sql),
+            aggregateSchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("n", type, true)),
+            model.columns()
+        );
+
+        assertNull(model.rowTable());
+    }
+
+    /**
+     * A derived source exposes an aggregate as a column of its own, so the
+     * outer query of a common table expression and of a subquery source reads
+     * its type, its nullability, and the blank-padded spelling a {@code MIN}
+     * carries, without restating a cast.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            """
+                WITH stats AS (SELECT COUNT(id) AS visits, MIN(code) AS first_code
+                               FROM users)
+                SELECT stats.visits, stats.first_code
+                FROM stats
+                WHERE stats.first_code = $1
+                """,
+            """
+                SELECT stats.visits, stats.first_code
+                FROM (SELECT COUNT(id) AS visits, MIN(code) AS first_code
+                      FROM users) stats
+                WHERE stats.first_code = $1
+                """
+        }
+    )
+    void shouldReadAnAggregateColumnThroughADerivedSource(String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("ListUserStats", QueryType.MANY, sql),
+            parser.parse(sql),
+            aggregateSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("visits", ColumnType.BIGINT, false),
+                new QueryColumn("first_code", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "first_code", ColumnType.VARCHAR, null, false, true)
+            ),
+            model.parameters()
+        );
+    }
+
+    /**
+     * An aggregate names no result column of its own, so a missing alias is
+     * rejected naming the aggregate as the query writes it, in upper and in
+     * lower case.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "SELECT COUNT(id) FROM users"
+                + "|COUNT(id) requires a result alias, such as COUNT(id) AS total.",
+            "SELECT count(DISTINCT id) FROM users"
+                + "|count(DISTINCT id) requires a result alias,"
+                + " such as count(DISTINCT id) AS total.",
+            "SELECT MAX(created_at) FROM users"
+                + "|MAX(created_at) requires a result alias,"
+                + " such as MAX(created_at) AS total.",
+            "SELECT sum(balance) FROM users"
+                + "|sum(balance) requires a result alias, such as sum(balance) AS total.",
+            "SELECT AVG(score) FROM users"
+                + "|AVG(score) requires a result alias, such as AVG(score) AS total."
+        }
+    )
+    void shouldRejectAnAggregateWithoutAResultAlias(String sql, String message) {
+        Query query = new Query("ReadUserTotal", QueryType.ONE, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, aggregateSchema)
+        );
+
+        assertEquals(message, exception.getMessage());
+    }
+
+    /**
      * An aliased cast projection is a nullable result column of the cast type,
      * in either cast spelling and with or without {@code AS}. Its operand is
      * not analyzed and reaches the database as written.
@@ -1809,6 +2108,16 @@ class QueryAnalyzerTest {
         assertEquals(List.of(1, 2), model.bindingParameterIndexes());
     }
 
+    /**
+     * An aggregate form this subset types no result of keeps the
+     * computed-projection rejection: a {@code *} written with {@code DISTINCT}
+     * or {@code ALL}, which PostgreSQL's grammar admits no such {@code *} for,
+     * a column type PostgreSQL defines the aggregate for none of, a
+     * subscripted argument, a qualified name, two arguments, another function,
+     * and the {@code FILTER} and {@code OVER} forms. A column of a type sqlcj
+     * does not map keeps the unsupported-type rejection instead, and a
+     * {@code COUNT(*)} without an alias keeps its own.
+     */
     @ParameterizedTest
     @CsvSource(
         delimiter = '|',
@@ -1818,20 +2127,44 @@ class QueryAnalyzerTest {
                 + "|COUNT(*) requires a result alias, such as COUNT(*) AS total.",
             "SELECT name, COUNT(*) FROM users GROUP BY name"
                 + "|COUNT(*) requires a result alias, such as COUNT(*) AS total.",
-            "SELECT COUNT(id) AS n FROM users"
-                + "|Cannot infer the type of COUNT(id) in SELECT;"
+            "SELECT COUNT(DISTINCT *) AS n FROM users"
+                + "|Cannot infer the type of COUNT(DISTINCT *) in SELECT;"
                 + " state it with a cast and an alias,"
                 + " such as SUM(amount)::numeric AS total",
-            "SELECT COUNT(DISTINCT id) AS n FROM users"
-                + "|Cannot infer the type of COUNT(DISTINCT id) in SELECT;"
+            "SELECT COUNT(ALL *) AS n FROM users"
+                + "|Cannot infer the type of COUNT(ALL *) in SELECT;"
                 + " state it with a cast and an alias,"
                 + " such as SUM(amount)::numeric AS total",
-            "SELECT COUNT(u.*) AS n FROM users u"
-                + "|Cannot infer the type of COUNT(u.*) in SELECT;"
+            "SELECT MAX(active) AS n FROM users"
+                + "|Cannot infer the type of MAX(active) in SELECT;"
+                + " state it with a cast and an alias,"
+                + " such as SUM(amount)::numeric AS total",
+            "SELECT MIN(external_id) AS n FROM users"
+                + "|Cannot infer the type of MIN(external_id) in SELECT;"
+                + " state it with a cast and an alias,"
+                + " such as SUM(amount)::numeric AS total",
+            "SELECT SUM(bio) AS n FROM users"
+                + "|Cannot infer the type of SUM(bio) in SELECT;"
+                + " state it with a cast and an alias,"
+                + " such as SUM(amount)::numeric AS total",
+            "SELECT SUM(labels) AS n FROM users"
+                + "|Cannot infer the type of SUM(labels) in SELECT;"
+                + " state it with a cast and an alias,"
+                + " such as SUM(amount)::numeric AS total",
+            "SELECT MIN(labels[1]) AS n FROM users"
+                + "|Cannot infer the type of MIN(labels[1]) in SELECT;"
+                + " state it with a cast and an alias,"
+                + " such as SUM(amount)::numeric AS total",
+            "SELECT MAX(id, name) AS n FROM users"
+                + "|Cannot infer the type of MAX(id, name) in SELECT;"
                 + " state it with a cast and an alias,"
                 + " such as SUM(amount)::numeric AS total",
             "SELECT pg_catalog.count(*) AS n FROM users"
                 + "|Cannot infer the type of pg_catalog.count(*) in SELECT;"
+                + " state it with a cast and an alias,"
+                + " such as SUM(amount)::numeric AS total",
+            "SELECT pg_catalog.max(id) AS n FROM users"
+                + "|Cannot infer the type of pg_catalog.max(id) in SELECT;"
                 + " state it with a cast and an alias,"
                 + " such as SUM(amount)::numeric AS total",
             "SELECT lower(name) AS n FROM users"
@@ -1845,16 +2178,18 @@ class QueryAnalyzerTest {
             "SELECT COUNT(*) OVER () AS n FROM users"
                 + "|Cannot infer the type of COUNT(*) OVER () in SELECT;"
                 + " state it with a cast and an alias,"
-                + " such as SUM(amount)::numeric AS total"
+                + " such as SUM(amount)::numeric AS total",
+            "SELECT MAX(tags) AS n FROM users"
+                + "|Column 'tags' has unsupported type JSONB[]"
         }
     )
-    void shouldRejectUnsupportedCountProjectionForm(String sql, String message) {
+    void shouldRejectUnsupportedAggregateProjectionForm(String sql, String message) {
         Query query = new Query("CountUsers", QueryType.ONE, sql);
         ParsedSql parsedSql = parser.parse(sql);
 
         UnsupportedOperationException exception = assertThrows(
             UnsupportedOperationException.class,
-            () -> analyzer.analyze(query, parsedSql, schema)
+            () -> analyzer.analyze(query, parsedSql, aggregateSchema)
         );
 
         assertEquals(message, exception.getMessage());

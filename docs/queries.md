@@ -205,9 +205,9 @@ configuration entry.
   stays the selected-column order.
 - An unqualified column must be found in exactly one source; an ambiguous or
   unknown column is rejected.
-- A result expression that is not a direct column, a wildcard, the scalar count
-  below, or the cast projection below — such as another function call, an
-  arithmetic expression, or a literal — is rejected as
+- A result expression that is not a direct column, a wildcard, one of the
+  aggregates below, or the cast projection below — such as another function
+  call, an arithmetic expression, or a literal — is rejected as
   `Cannot infer the type of <expression> in SELECT; state it with a cast and an
   alias, such as SUM(amount)::numeric AS total`, naming the expression as the
   query writes it, on one line.
@@ -217,7 +217,8 @@ configuration entry.
   sqlcj itself resolves an alias only in the projection; every other clause
   reaches the database as written.
 
-A read may count its matching rows with an aliased `COUNT(*)`:
+A read may aggregate its matching rows with an aliased `COUNT`, `MIN`, `MAX`,
+`SUM`, or `AVG`, none of which needs a cast:
 
 ```sql
 -- name: CountAuthors :one
@@ -229,25 +230,70 @@ SELECT country, COUNT(*) AS total
 FROM authors
 GROUP BY country
 ORDER BY country;
+
+-- name: SummarizeRoyaltiesByAuthor :many
+SELECT r.author_id,
+       COUNT(r.id)              AS payments,
+       COUNT(DISTINCT r.period) AS periods,
+       MIN(r.paid_at)           AS first_paid_at,
+       MAX(r.paid_at)           AS last_paid_at,
+       SUM(r.amount)            AS total,
+       AVG(r.amount)            AS average
+FROM royalties r
+GROUP BY r.author_id;
 ```
 
+- The aggregate name is case insensitive and must be written unqualified, with
+  exactly one argument. `DISTINCT` or `ALL` may stand before the argument,
+  except before `*`: `COUNT(DISTINCT *)` and `COUNT(ALL *)` are rejected,
+  because PostgreSQL's grammar admits `*` alone.
 - The alias is required and may be written with or without `AS`, so both
   `COUNT(*) AS total` and `COUNT(*) total` generate the result record
-  `CountAuthorsResult` with the single component `total`.
-- The component is a non-null `Long`: the count is typed `BIGINT` because
-  `count(*)` returns `bigint`, and it is never null because a count is `0` when
-  no row matches.
-- The count is one result column in its own position, so it may stand beside
-  direct columns, a wildcard, a cast projection, or another count, in either
-  order. `GROUP BY` itself is not analyzed and reaches the database as written,
-  so PostgreSQL rather than sqlcj checks that the grouping is valid.
-- The count is accepted over any supported source, predicate, ordering, and
-  pagination shape, and under any annotation.
-- `COUNT(*)` without an alias is rejected with
+  `CountAuthorsResult` with the single component `total`. A missing alias is
+  rejected with `<aggregate> requires a result alias, such as <aggregate> AS
+  total.`, naming the aggregate as the query writes it, which for `COUNT(*)` is
   `COUNT(*) requires a result alias, such as COUNT(*) AS total.`
-- Every other count is still an unsupported result expression, including
-  `COUNT(column)`, `COUNT(DISTINCT column)`, `COUNT(t.*)`, a qualified
-  `pg_catalog.count(*)`, and the `FILTER` and `OVER` forms.
+- A `COUNT` is a non-null `Long` whatever it counts, because `count` returns
+  `bigint` and counts `0` rows rather than none, so `COUNT(*)`,
+  `COUNT(column)`, `COUNT(DISTINCT column)`, `COUNT(<source>.*)`, and
+  `COUNT(lower(name))` each generate a non-null `Long` component, a count of a
+  left-joined column included. A counted column, and the qualifier of
+  `COUNT(<source>.*)`, must be found in the query's sources as any other
+  reference is, but the column's type is never read, so a column of a type
+  sqlcj does not map may be counted. Every other argument reaches the database
+  as written, as the operand of a cast projection does.
+- `MIN`, `MAX`, `SUM`, and `AVG` take one column written without a subscript,
+  and each is nullable, because each reads `NULL` over no row, over a
+  `NOT NULL` column included.
+- `MIN` and `MAX` take their column's own type, its enum type, its array
+  spelling, and its blank-padded spelling included. PostgreSQL 16 defines
+  neither for a scalar `BOOLEAN`, `UUID`, `BYTEA`, `JSON`, or `JSONB` column,
+  so a `MIN` or `MAX` of one is rejected.
+- `SUM` and `AVG` take one scalar numeric column and generate the type
+  PostgreSQL 16 defines for it:
+
+| Column type | `SUM` | `AVG` |
+| --- | --- | --- |
+| `SMALLINT`, `INTEGER` | `BIGINT`, a `Long` | `DECIMAL`, a `BigDecimal` |
+| `BIGINT`, `DECIMAL` | `DECIMAL`, a `BigDecimal` | `DECIMAL`, a `BigDecimal` |
+| `REAL` | `REAL`, a `Float` | `DOUBLE PRECISION`, a `Double` |
+| `DOUBLE PRECISION` | `DOUBLE PRECISION`, a `Double` | `DOUBLE PRECISION`, a `Double` |
+
+- A column of a type sqlcj does not map is rejected as
+  `Column '<name>' has unsupported type <type>` when a `MIN`, `MAX`, `SUM`, or
+  `AVG` reads it, because each takes its type from the column.
+- An aggregate is one result column in its own position, so it may stand beside
+  direct columns, a wildcard, a cast projection, or another aggregate, in any
+  order, and a derived source exposes an aggregate of its own `SELECT` as a
+  column the outer query reads by name. `GROUP BY` itself is not analyzed and
+  reaches the database as written, so PostgreSQL rather than sqlcj checks that
+  the grouping is valid.
+- An aggregate is accepted over any supported source, predicate, ordering, and
+  pagination shape, and under any annotation.
+- Every other aggregate is still an unsupported result expression, including a
+  qualified `pg_catalog.count(*)` or `pg_catalog.max(id)`, an aggregate of two
+  arguments, a subscripted argument such as `MIN(labels[1])`, a `SUM` or `AVG`
+  of a non-numeric or array column, and the `FILTER` and `OVER` forms.
 
 A read may also project a computed value by stating its type in a cast:
 
@@ -1250,14 +1296,17 @@ query name, and its header line.
   form, such as a `VALUES` body of a `WITH` item, with the statement
   diagnostic.
 - A result expression that is not a direct column, a wildcard, an aliased
-  `COUNT(*)`, or an aliased cast, including another function call, another
-  aggregate, and a literal. A `COUNT(*)` without an alias, a cast projection
-  without an alias, and a cast projection whose type sqlcj does not map each
-  fail with their own diagnostic, while `COUNT(column)`,
-  `COUNT(DISTINCT column)`, `COUNT(t.*)`, `pg_catalog.count(*)`,
-  `lower(name) AS n`, `name || 'x' AS n`, and the `FILTER` and `OVER` forms are
-  rejected as `Cannot infer the type of COUNT(*) OVER () in SELECT; state it
-  with a cast and an alias, such as SUM(amount)::numeric AS total`.
+  `COUNT`, `MIN`, `MAX`, `SUM`, or `AVG` of one argument, or an aliased cast,
+  including another function call and a literal. An aggregate without an
+  alias, a cast projection without an alias, a cast projection whose type
+  sqlcj does not map, and a `MIN`, `MAX`, `SUM`, or `AVG` of a column whose
+  type sqlcj does not map each fail with their own diagnostic, while
+  `COUNT(DISTINCT *)`, `COUNT(ALL *)`, `pg_catalog.count(*)`,
+  `pg_catalog.max(id)`, `MAX(id, name)`, `MIN(labels[1])`, `MAX(active)`,
+  `MIN(external_id)`, `SUM(bio)`, `SUM(labels)`, `lower(name) AS n`,
+  `name || 'x' AS n`, and the `FILTER` and `OVER` forms are rejected as
+  `Cannot infer the type of COUNT(*) OVER () in SELECT; state it with a cast
+  and an alias, such as SUM(amount)::numeric AS total`.
 - A `FROM` or `JOIN` source outside the subset: a `LATERAL` source, a doubly
   parenthesized source, a subquery source without an alias, a column list on a
   `WITH` name or on a subquery alias, and a derived source two of whose columns
@@ -1600,17 +1649,35 @@ Reads:
   `QueryAnalyzerTest.shouldResolveScalarCountBesidePredicateParameter`,
   `QueryAnalyzerTest.shouldResolveScalarCountBesideDirectColumn`,
   `QueryAnalyzerTest.shouldResolveScalarCountBeforeDirectColumn`,
-  `QueryAnalyzerTest.shouldResolveGroupedCountBesidePredicateParameter`, and
-  `QueryAnalyzerTest.shouldRejectUnsupportedCountProjectionForm` cover the
-  aliased `COUNT(*)` alone and beside a grouped column in either position, its
-  focused diagnostic, and the count and function forms that stay rejected, and
+  `QueryAnalyzerTest.shouldResolveGroupedCountBesidePredicateParameter` cover
+  the aliased `COUNT(*)` alone and beside a grouped column in either position,
+  `QueryAnalyzerTest.shouldTypeCountOfOneArgumentAsANonNullBigint`,
+  `QueryAnalyzerTest.shouldTypeCountOfALeftJoinedColumnAsNonNull`,
+  `QueryAnalyzerTest.shouldTypeExtremumAggregateFromItsColumn`,
+  `QueryAnalyzerTest.shouldTypeExtremumAggregateOfAnEnumColumn`,
+  `QueryAnalyzerTest.shouldTypeExtremumAggregateOfAnArrayColumn`,
+  `QueryAnalyzerTest.shouldTypeSumAndAverageByTheirColumnType`,
+  `QueryAnalyzerTest.shouldReadAnAggregateColumnThroughADerivedSource`,
+  `QueryAnalyzerTest.shouldRejectAnAggregateWithoutAResultAlias`, and
+  `QueryAnalyzerTest.shouldRejectUnsupportedAggregateProjectionForm` cover a
+  count of a column, a `DISTINCT`, an `ALL`, a qualified wildcard, an unmapped
+  column, and an expression argument, a count of a left-joined column, every
+  `MIN` and `MAX` input including an enum, an array, and a blank-padded
+  column, every `SUM` and `AVG` mapping, an aggregate read through a `WITH`
+  body and through a subquery source, the missing-alias diagnostic in upper
+  and lower case, and the aggregate forms that stay rejected, and
   `PostgresIntegrationTest.shouldExecuteGeneratedScalarCountAgainstPostgres`
   compiles a `:one` count into a result record with one `Long` component and
   executes it against PostgreSQL 16 for a matching and a non-matching pattern,
   while
   `PostgresIntegrationTest.shouldExecuteGeneratedGroupedCountAgainstPostgres`
   executes a `:many` grouped count whose result record carries the grouped
-  `Boolean` column and the `Long` count in projection order.
+  `Boolean` column and the `Long` count in projection order, and
+  `PostgresIntegrationTest.shouldExecuteGeneratedAggregatesAgainstPostgres`
+  executes an uncast `COUNT`, `COUNT(DISTINCT ...)`, `MIN`, `MAX`, `SUM`, and
+  `AVG` read into its `Long`, `LocalDateTime`, and `BigDecimal` components and
+  reads the counts as `0` and every other component as `null` over no matching
+  row.
 - `QueryAnalyzerTest.shouldResolveCastProjectionColumnFromItsAlias`,
   `QueryAnalyzerTest.shouldResolveEnumCastProjectionColumn`,
   `QueryAnalyzerTest.shouldResolveArrayCastProjectionColumn`,
@@ -1905,7 +1972,7 @@ Unsupported queries and internal errors:
   source, an insert whose `SELECT` writes fewer values than its column list,
   a comma-joined and a join-joined multi-table `UPDATE`, a joined `DELETE`,
   and a bare `RETURNING *` on a joined update, while
-  `QueryAnalyzerTest.shouldRejectUnsupportedCountProjectionForm`,
+  `QueryAnalyzerTest.shouldRejectUnsupportedAggregateProjectionForm`,
   `QueryAnalyzerTest.shouldRejectUnsupportedJoinModifier`,
   `QueryAnalyzerTest.shouldRejectUnsupportedReturningItem`,
   `QueryAnalyzerTest.shouldRejectExcludedReturningWriteForm`,
