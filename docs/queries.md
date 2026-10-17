@@ -513,6 +513,10 @@ ORDER BY
   because nothing states its type. sqlcj never pastes a column name or a
   direction into the SQL, so an ordering column chosen at run time stays
   outside the subset.
+- An `ORDER BY` after the last branch of a set operation orders that whole
+  result, which PostgreSQL restricts to an output column or a position, so a
+  column reference there is checked as
+  [Set operations](#set-operations) states.
 
 ### Pagination
 
@@ -555,6 +559,108 @@ LIMIT $1 OFFSET $2;
   parameter named after its own placeholder rather than after a pagination
   clause, so `LIMIT LEAST($1::int, 100)` and `FETCH FIRST $1::int ROWS ONLY`
   each generate `param1`.
+
+### Set operations
+
+A read may combine the rows of several `SELECT`s with `UNION`, `INTERSECT`, or
+`EXCEPT`, each written with or without `ALL`:
+
+```sql
+-- name: ListContactNames :many
+SELECT name AS label
+FROM users
+UNION
+SELECT nickname
+FROM profiles
+ORDER BY label
+LIMIT $1;
+```
+
+- The set operation must be the query itself, written directly or inside
+  parentheses. A `WITH` body, a subquery source, a predicate subquery, and the
+  row source of an `INSERT` are each analyzed as a single `SELECT`, so a set
+  operation there is still rejected as
+  [Rejected](#rejected) states.
+- Each branch is analyzed exactly like a top-level `SELECT`: it is classified
+  inside its own parentheses, so a parenthesized branch may hold a set
+  operation of its own, which is the grouping the parentheses write, or a
+  `SELECT` with a `WITH` list of its own; its sources resolve and its joins
+  follow the join rules; and its `ON`, `WHERE`, `LIMIT`, and `OFFSET`
+  placeholders are typed by those clause rules, so `WHERE id = $1` in a branch
+  needs no cast.
+- A `WITH` clause written before the set operation belongs to the whole list,
+  so every branch reads it.
+- Every branch must select the same number of columns, which a wildcard counts
+  as the columns it expands to. Otherwise the query is rejected as
+  `Every branch of a set operation must select the same number of columns; the
+  first selects 2 and branch 2 selects 1.`
+- The result takes the **leftmost branch's column names**, so only that branch
+  must name every component of its own projection: a cast or an aggregate of
+  any other branch may be written without an alias, as in
+  `SELECT name AS label FROM users UNION SELECT 'unknown'::text FROM profiles`.
+- Each column's type is the type PostgreSQL resolves the branches' types to
+  wherever sqlcj states it exactly:
+
+  | Branch types | Result type |
+  | --- | --- |
+  | one identical type, its enum type, its array spelling, and its blank-padded spelling included | that type |
+  | two scalar numeric types | the wider of `smallint`, `integer`, `bigint`, `numeric`, `real`, `double precision` |
+  | two scalar `date`, `timestamp`, or `timestamptz` | the wider, in that order |
+  | two scalar character types, blank-padded or not | the first branch's type, as PostgreSQL resolves them |
+
+  Every other pair is rejected as `Set operation column total has types bigint
+  and varchar; cast it to one type in every branch, such as total::bigint`, so
+  a mixed pair is written with a cast in every branch. A literal and a `NULL`
+  need the cast every projection needs.
+- A column is nullable by its operators, with `INTERSECT` binding more tightly
+  than `UNION` and `EXCEPT` as it does in PostgreSQL: consecutive `INTERSECT`
+  branches are one group, which is nullable only when every branch in it is,
+  and the groups then fold left to right, where a `UNION` column is nullable
+  when either side's is and an `EXCEPT` column takes its left side's
+  nullability.
+- `MINUS`, which PostgreSQL does not have, is rejected as
+  `MINUS is not supported; write EXCEPT.`
+- A set operation whose every branch returns one table's complete row returns
+  that table's shared `<TableName>Row` record. Any other returns this query's
+  own result record of flat columns, and a wildcard written beside another item
+  contributes the columns it expands to rather than an embedded row, because a
+  set operation's column belongs to no one source.
+- An `ORDER BY` after the last branch orders the whole result, so a column
+  reference there must be unqualified and name a result column, compared
+  ignoring case. Any other item, a position such as `ORDER BY 1` included,
+  reaches the database as written, as an ordering item of a plain read does. A
+  column that names no result column is rejected as
+  `ORDER BY name must name a result column of the set operation, such as
+  ORDER BY label.`
+- A `LIMIT` and an `OFFSET` after the last branch page the whole result and are
+  typed by the [pagination](#pagination) rules. PostgreSQL applies them to the
+  whole result whether or not an `ORDER BY` is written between them and the
+  last branch.
+- A set operation written in parentheses as a branch states those same clauses
+  about its own result, so the two rules above hold for every set operation,
+  nested or top-level: its `ORDER BY` must name one of that nested list's own
+  result columns, and its `LIMIT` and `OFFSET` are typed by the pagination
+  rules, as in:
+
+  ```sql
+  -- name: ListIds :many
+  SELECT id FROM users WHERE name = $1
+  UNION
+  (SELECT id FROM profiles
+   UNION
+   SELECT user_id FROM profiles
+   ORDER BY id
+   LIMIT $2 OFFSET $3);
+  ```
+
+  A `LIMIT` or `OFFSET` written after a closing parenthesis that wraps a whole
+  query, as in `(SELECT id FROM users UNION SELECT id FROM profiles) LIMIT $1`,
+  is not the query's own pagination clause, so an uncast placeholder there is
+  rejected as an unanalyzed placeholder location, exactly as it is in
+  `(SELECT id FROM users) LIMIT $1`.
+- A placeholder repeated across branches is one parameter whose occurrences
+  must agree in type, and every parameter binds in the textual order of the
+  statement, branch by branch.
 
 ## Writes
 
@@ -1287,14 +1393,19 @@ query name, and its header line.
   `Only SELECT, INSERT, UPDATE, and DELETE statements are supported.` before the
   annotation is checked. A parenthesized `SELECT` is the query it encloses, at
   any depth, so it is analyzed as that query.
-- A set operation, `UNION`, `UNION ALL`, `INTERSECT`, or `EXCEPT`, written
-  directly or inside parentheses, rejected as
+- A set operation written where this subset analyzes none: a `WITH` body, a
+  subquery source, a predicate subquery, and the row source of an `INSERT` are
+  each classified inside their own parentheses as a single `SELECT`, so a set
+  operation there is rejected as
   `UNION, INTERSECT, and EXCEPT are not supported; write one query per SELECT.`
-  A `WITH` body, a subquery source, a predicate subquery, and the row source of
-  an `INSERT` are classified inside their own parentheses the same way, so a
-  set operation there is rejected with that diagnostic and another statement
-  form, such as a `VALUES` body of a `WITH` item, with the statement
-  diagnostic.
+  and another statement form, such as a `VALUES` body of a `WITH` item, with
+  the statement diagnostic. A top-level set operation, written directly or
+  inside parentheses, is analyzed as
+  [Set operations](#set-operations) states.
+- A set operation whose branches select different numbers of columns, whose
+  column types resolve to no single type, whose `ORDER BY` names no result
+  column, or which is written with `MINUS`, each with the diagnostic
+  [Set operations](#set-operations) states.
 - A result expression that is not a direct column, a wildcard, an aliased
   `COUNT`, `MIN`, `MAX`, `SUM`, or `AVG` of one argument, or an aliased cast,
   including another function call and a literal. An aggregate without an
@@ -1306,7 +1417,9 @@ query name, and its header line.
   `MIN(external_id)`, `SUM(bio)`, `SUM(labels)`, `lower(name) AS n`,
   `name || 'x' AS n`, and the `FILTER` and `OVER` forms are rejected as
   `Cannot infer the type of COUNT(*) OVER () in SELECT; state it with a cast
-  and an alias, such as SUM(amount)::numeric AS total`.
+  and an alias, such as SUM(amount)::numeric AS total`. A branch of a set
+  operation other than the leftmost names no result column, so an aggregate and
+  a cast there may omit the alias each requires elsewhere.
 - A `FROM` or `JOIN` source outside the subset: a `LATERAL` source, a doubly
   parenthesized source, a subquery source without an alias, a column list on a
   `WITH` name or on a subquery alias, and a derived source two of whose columns
@@ -1795,6 +1908,57 @@ Reads:
   `QueryAnalyzerTest.shouldNotResolveRowTableForJoinedWildcard`, and
   `QueryAnalyzerTest.shouldNotResolveRowTableForExecWrite` cover which reads
   return one complete table row.
+- `QueryAnalyzerTest.shouldAnalyzeEachSetOperator`,
+  `QueryAnalyzerTest.shouldGroupIntersectBranchesBeforeTheOtherOperators`,
+  `QueryAnalyzerTest.shouldResolveSetOperationColumnTypeAcrossBranches`,
+  `QueryAnalyzerTest.shouldResolveOneSetOperationColumnTypeToItself`,
+  `QueryAnalyzerTest.shouldRejectUnresolvableSetOperationColumnType`,
+  `QueryAnalyzerTest.shouldRejectDifferentSetOperationColumnCounts`,
+  `QueryAnalyzerTest.shouldRejectMinus`,
+  `QueryAnalyzerTest.shouldAcceptAnUnaliasedCastOrAggregateOutsideTheLeftmostBranch`,
+  `QueryAnalyzerTest.shouldRequireAResultAliasInTheLeftmostBranch`,
+  `QueryAnalyzerTest.shouldReturnTheSharedRowRecordWhenEveryBranchReturnsOneTablesRow`,
+  `QueryAnalyzerTest.shouldReturnFlatColumnsWhenABranchReturnsItsOwnResult`,
+  `QueryAnalyzerTest.shouldResolveTheExpandedColumnsOfAWildcardBesideAnotherItem`,
+  `QueryAnalyzerTest.shouldBindSetOperationParametersInTextualOrder`,
+  `QueryAnalyzerTest.shouldShareOneNamedParameterAcrossSetOperationBranches`,
+  `QueryAnalyzerTest.shouldAcceptASetOperationOrderingOfItsResultColumns`,
+  `QueryAnalyzerTest.shouldRejectASetOperationOrderingOutsideItsResultColumns`,
+  `QueryAnalyzerTest.shouldAnalyzeACommonTableExpressionBeforeASetOperation`,
+  `QueryAnalyzerTest.shouldAnalyzeAParenthesizedSetOperationBranch`,
+  `QueryAnalyzerTest.shouldResolveTheOwnClausesOfANestedSetOperationBranch`,
+  `QueryAnalyzerTest.shouldRejectANestedSetOperationOrderingOutsideItsResultColumns`,
+  and
+  `QueryAnalyzerTest.shouldRejectASetOperationWithoutResultQueryType` cover the
+  set operations: each operator with and without `ALL`, the nullability of its
+  own operator and of `INTERSECT` grouped before `UNION` and `EXCEPT`, every
+  widening rule in both branch orders, one identical enum and array type, every
+  type and column-count rejection with its spelled types, `MINUS`, the
+  unaliased cast and aggregate of a later branch beside the alias the leftmost
+  branch still requires, the shared row record of whole-row branches and the
+  flat columns of every other result, the textual binding order across branches
+  and the trailing page, the orderings named by column, by position, and by an
+  unknown or qualified reference, the `WITH` clause every branch reads, a
+  parenthesized and a nested branch, the ordering and the paging a nested
+  branch carries itself, and the result annotation such a read requires, while
+  `QueryAnalyzerTest.shouldRejectExcludedDerivedSourceForm`,
+  `QueryAnalyzerTest.shouldRejectASetOperationInsideAPredicateSubquery`, and
+  `QueryAnalyzerTest.shouldRejectASetOperationAsAnInsertRowSource` keep the
+  rejection of a set operation in a `WITH` body, a subquery source, a predicate
+  subquery, and an `INSERT` row source;
+  `SqlcjCompilerIntegrationTest.shouldGenerateCompilableJavaForSetOperations`
+  compiles a repository over an ordered and paged `UNION`, an `EXCEPT ALL` of a
+  parenthesized `INTERSECT`, and a `UNION` of whole-row branches that returns
+  the shared row record;
+  `PostgresIntegrationTest.shouldExecuteGeneratedSetOperationsAgainstPostgres`
+  executes `UNION`, `UNION ALL`, `INTERSECT`, `EXCEPT`, and a trailing `LIMIT`
+  against PostgreSQL 16, and
+  `PostgresIntegrationTest.shouldResolveSetOperationColumnTypesAsPostgresDoes`
+  confirms every widening rule and both character orders against the column
+  type PostgreSQL 16 itself reports for the same query; and
+  `ReferenceServiceIntegrationTest.shouldExecuteTheGeneratedSetOperationQueries`
+  executes the reference service's `UNION` and `UNION ALL` title reads against
+  its migrated database.
 
 Writes and `RETURNING`:
 

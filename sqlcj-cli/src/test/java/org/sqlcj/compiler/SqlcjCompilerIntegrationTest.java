@@ -1285,6 +1285,92 @@ class SqlcjCompilerIntegrationTest {
         );
     }
 
+    /**
+     * A top-level set operation generates compilable Java: its result record
+     * takes the leftmost branch's column names and the types its branches
+     * resolve to, its trailing {@code LIMIT} is one method parameter, a
+     * parenthesized branch states its own grouping, and a set operation whose
+     * every branch returns one table's complete row returns the shared row
+     * record of that table.
+     */
+    @Test
+    void shouldGenerateCompilableJavaForSetOperations() throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+        Path classesDirectory = tempDir.resolve("classes");
+
+        Files.writeString(schemaFile, JOIN_SCHEMA);
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: ListNames :many
+                SELECT name AS label
+                FROM users
+                UNION
+                SELECT nickname
+                FROM profiles
+                ORDER BY label
+                LIMIT $1;
+
+                -- name: ListUnorderedUsers :many
+                SELECT id AS value
+                FROM users
+                EXCEPT ALL
+                (SELECT user_id FROM orders INTERSECT SELECT user_id FROM orders);
+
+                -- name: ListNicknamedProfiles :many
+                SELECT *
+                FROM profiles
+                UNION
+                SELECT *
+                FROM profiles
+                WHERE nickname = $1;
+                """
+        );
+
+        new SqlcjCompiler().compile(
+            usersConfig(schemaFile, queriesFile, generatedDirectory)
+        );
+
+        String source = Files.readString(
+            generatedDirectory.resolve("generated/UsersRepository.java")
+        );
+
+        assertTrue(
+            source.contains("public List<ListNamesResult> listNames(Integer limit)"),
+            source
+        );
+
+        assertEquals(List.of("String label"), recordComponents(source, "ListNamesResult"));
+
+        assertTrue(
+            source.contains("public List<ListUnorderedUsersResult> listUnorderedUsers()"),
+            source
+        );
+
+        assertEquals(
+            List.of("Long value"),
+            recordComponents(source, "ListUnorderedUsersResult")
+        );
+
+        assertTrue(
+            source.contains("public List<ProfilesRow> listNicknamedProfiles(String nickname)"),
+            source
+        );
+
+        assertTrue(
+            Files.readString(generatedDirectory.resolve("generated/ProfilesRow.java"))
+                .contains("public record ProfilesRow("),
+            "a set operation of whole-row branches returns the shared row record"
+        );
+
+        assertCompiles(generatedDirectory, classesDirectory);
+
+        assertTrue(Files.exists(classesDirectory.resolve("generated/UsersRepository.class")));
+    }
+
     @Test
     void shouldCompileConfiguredEntriesWithConfiguredPackage() throws IOException {
         Path usersSchema = tempDir.resolve("users-schema.sql");
@@ -2573,9 +2659,10 @@ class SqlcjCompilerIntegrationTest {
     }
 
     /**
-     * Every statement kind, set operation, projection, {@code RETURNING} item,
-     * join kind, and source outside the supported subset is reported as one
-     * located line in SQL terms, before any file is written.
+     * Every statement kind, projection, {@code RETURNING} item, join kind, and
+     * source outside the supported subset, a set operation in a location this
+     * subset analyzes none in included, is reported as one located line in SQL
+     * terms, before any file is written.
      */
     @ParameterizedTest
     @MethodSource("rejectedQueries")
@@ -2605,10 +2692,6 @@ class SqlcjCompilerIntegrationTest {
         String statement = "Only SELECT, INSERT, UPDATE, and DELETE statements are supported.";
 
         return Stream.of(
-            Arguments.of(":many", "SELECT id FROM users UNION SELECT id FROM users", setOperation),
-            Arguments.of(":many", "SELECT id FROM users UNION ALL SELECT id FROM users", setOperation),
-            Arguments.of(":many", "SELECT id FROM users INTERSECT SELECT id FROM users", setOperation),
-            Arguments.of(":many", "(SELECT id FROM users UNION SELECT id FROM users)", setOperation),
             Arguments.of(":exec", "VALUES (1)", statement),
             Arguments.of(":many", "TABLE users", statement),
             Arguments.of(
