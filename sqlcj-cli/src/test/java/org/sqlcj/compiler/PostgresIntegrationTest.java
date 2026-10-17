@@ -3573,6 +3573,91 @@ class PostgresIntegrationTest {
     }
 
     /**
+     * Covers a column list on a {@code WITH} name end to end: a list that
+     * renames the grouped column and names an unaliased {@code count(*)} is
+     * read through the renamed name where the clause is joined to a table, and
+     * a list shorter than its body renames the leading column alone while the
+     * column past it keeps the name its body states, both generated, compiled,
+     * and executed against PostgreSQL.
+     */
+    @Test
+    void shouldExecuteGeneratedWithColumnListsAgainstPostgres() throws Exception {
+        execute(CONSTRAINT_SCHEMA);
+
+        Path classesDirectory = generateAndCompile(
+            CONSTRAINT_SCHEMA,
+            """
+                -- name: ListCustomerOrderCounts :many
+                WITH counts (buyer_id, placed) AS (SELECT customer_id, count(*)
+                                                   FROM customer_orders
+                                                   GROUP BY customer_id)
+                SELECT c.name, counts.placed
+                FROM customers c
+                JOIN counts ON counts.buyer_id = c.id
+                ORDER BY c.name;
+
+                -- name: ListCustomerOrderQuantities :many
+                WITH recent (order_id) AS (SELECT id, quantity
+                                           FROM customer_orders
+                                           WHERE customer_id = :customerId)
+                SELECT recent.order_id, recent.quantity
+                FROM recent
+                ORDER BY recent.order_id;
+                """
+        );
+
+        execute("INSERT INTO customers (id, name) VALUES (1, 'Alice'), (2, 'Bob')");
+
+        execute(
+            """
+                INSERT INTO customer_orders (id, customer_id, quantity)
+                VALUES (10, 1, 3), (20, 1, 4), (30, 2, 1)
+                """
+        );
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method counts = repository.getClass().getMethod("listCustomerOrderCounts");
+
+            List<?> reports = (List<?>) counts.invoke(repository);
+
+            assertEquals(2, reports.size());
+
+            assertEquals(
+                List.of("name", "placed"),
+                recordComponentNames(reports.get(0))
+            );
+
+            assertEquals("Alice", component(reports.get(0), "name"));
+            assertEquals(2L, component(reports.get(0), "placed"));
+
+            assertEquals("Bob", component(reports.get(1), "name"));
+            assertEquals(1L, component(reports.get(1), "placed"));
+
+            Method quantities = repository.getClass().getMethod(
+                "listCustomerOrderQuantities",
+                Long.class
+            );
+
+            List<?> orders = (List<?>) quantities.invoke(repository, 1L);
+
+            assertEquals(2, orders.size());
+
+            assertEquals(
+                List.of("orderId", "quantity"),
+                recordComponentNames(orders.get(0))
+            );
+
+            assertEquals(10L, component(orders.get(0), "orderId"));
+            assertEquals(3, component(orders.get(0), "quantity"));
+
+            assertEquals(20L, component(orders.get(1), "orderId"));
+            assertEquals(4, component(orders.get(1), "quantity"));
+        }
+    }
+
+    /**
      * Covers the set operators end to end: a {@code UNION} of two text columns
      * returns each distinct value once, a {@code UNION ALL} returns one row per
      * selected value, an {@code INTERSECT} returns the values both branches

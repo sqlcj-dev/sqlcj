@@ -8325,6 +8325,167 @@ class QueryAnalyzerTest {
     }
 
     /**
+     * A column list on a {@code WITH} name renames its body's columns by
+     * position, so the source exposes the listed names while each column keeps
+     * the type and the nullability its body states, and an uncast placeholder
+     * compared with a renamed column is typed and named from it.
+     */
+    @Test
+    void shouldRenameCommonTableExpressionColumnsByItsColumnList() {
+        String sql = """
+            WITH c (uid, amount) AS (SELECT user_id, total
+                                     FROM orders)
+            SELECT c.uid, c.amount
+            FROM c
+            WHERE c.amount = $1
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListOrderAmounts", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals("c", model.table());
+        assertNull(model.rowTable());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("uid", ColumnType.BIGINT, false),
+                new QueryColumn("amount", ColumnType.DECIMAL, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "amount", ColumnType.DECIMAL)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A column list shorter than its body's projection renames the leading
+     * columns alone, so a wildcard over the source reads the renamed column
+     * followed by the names the body itself states.
+     */
+    @Test
+    void shouldRenameOnlyTheLeadingColumnsOfAShorterColumnList() {
+        String sql = """
+            WITH c (uid) AS (SELECT user_id, total
+                             FROM orders)
+            SELECT *
+            FROM c
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListOrderAmounts", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("uid", ColumnType.BIGINT, false),
+                new QueryColumn("total", ColumnType.DECIMAL, true)
+            ),
+            model.columns()
+        );
+    }
+
+    /**
+     * A position a column list names takes its name from the list, so an
+     * aggregate and a cast written there need no alias of their own and are
+     * read under the listed name.
+     */
+    @Test
+    void shouldNameAnUnaliasedAggregateAndCastFromTheColumnList() {
+        String sql = """
+            WITH c (uid, placed, amount) AS (SELECT user_id, COUNT(*), total::numeric
+                                             FROM orders
+                                             GROUP BY user_id, total)
+            SELECT *
+            FROM c
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListOrderCounts", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("uid", ColumnType.BIGINT, false),
+                new QueryColumn("placed", ColumnType.BIGINT, false),
+                new QueryColumn("amount", ColumnType.DECIMAL, true)
+            ),
+            model.columns()
+        );
+    }
+
+    /**
+     * The distinct-name rule of a derived source reads the renamed columns, so
+     * a column list resolves a name its body repeats.
+     */
+    @Test
+    void shouldResolveARepeatedBodyColumnNameWithAColumnList() {
+        String sql = """
+            WITH pairs (user_id, profile_id) AS (SELECT u.id, p.id
+                                                 FROM users u
+                                                 JOIN profiles p ON p.user_id = u.id)
+            SELECT *
+            FROM pairs
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListUserProfiles", QueryType.MANY, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("user_id", ColumnType.BIGINT, false),
+                new QueryColumn("profile_id", ColumnType.BIGINT, false)
+            ),
+            model.columns()
+        );
+    }
+
+    /**
+     * A {@code WITH} item of a write is renamed by its own column list too, so
+     * a predicate subquery of that write reads the clause's columns under the
+     * listed names.
+     */
+    @Test
+    void shouldRenameColumnsOfAWriteCommonTableExpressionByItsColumnList() {
+        String sql = """
+            WITH recent (uid) AS (SELECT user_id
+                                  FROM orders
+                                  WHERE total = $1)
+            DELETE FROM users
+            WHERE id IN (SELECT uid FROM recent)
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("DeleteRecentUsers", QueryType.EXEC, sql),
+            parser.parse(sql),
+            joinSchema
+        );
+
+        assertEquals("users", model.table());
+
+        assertEquals(
+            List.of(new QueryParameter(1, "total", ColumnType.DECIMAL)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
+    }
+
+    /**
      * A subquery source that is not {@code LATERAL} sees no source of the query
      * around it, as PostgreSQL scopes it, so a reference to one is an unknown
      * qualifier.
@@ -8346,12 +8507,16 @@ class QueryAnalyzerTest {
 
     /**
      * The derived-source forms outside this subset are rejected with their own
-     * diagnostic: a recursive and a data-modifying {@code WITH} item, a
-     * subquery source without an alias, a column list on a {@code WITH} name or
-     * on a subquery alias, a body that states no supported query at all, which
-     * is classified inside its own parentheses, a {@code LATERAL} source, which
-     * is classified first, a doubly parenthesized source, which states a source
-     * kind of its own, and a derived source whose columns repeat a name.
+     * diagnostic: a recursive and a data-modifying {@code WITH} item, with or
+     * without a column list, which is read after the recursive rejection, a
+     * subquery source without an alias, a column list on a subquery alias, a
+     * body that states no supported query at all, which is classified inside
+     * its own parentheses, a {@code LATERAL} source, which is classified first,
+     * a doubly parenthesized source, which states a source kind of its own, a
+     * column list on a {@code WITH} name that names more columns than its body
+     * returns, an aggregate past such a list, which the list names no column
+     * of, and a derived source whose columns repeat a name, whether its body or
+     * its column list states that name.
      */
     @ParameterizedTest
     @CsvSource(
@@ -8359,6 +8524,8 @@ class QueryAnalyzerTest {
         quoteCharacter = '"',
         value = {
             "MANY|WITH RECURSIVE recent AS (SELECT id FROM users) SELECT id FROM recent"
+                + "|WITH RECURSIVE is not supported.",
+            "MANY|WITH RECURSIVE recent (n) AS (SELECT id FROM users) SELECT n FROM recent"
                 + "|WITH RECURSIVE is not supported.",
             "MANY|WITH moved AS (UPDATE users SET name = $1 WHERE id = $2 RETURNING id)"
                 + " SELECT id FROM moved"
@@ -8374,9 +8541,6 @@ class QueryAnalyzerTest {
                 + " run it as a query of its own.",
             "MANY|WITH rows AS (VALUES (1)) SELECT * FROM rows"
                 + "|Only SELECT, INSERT, UPDATE, and DELETE statements are supported.",
-            "MANY|WITH recent (n) AS (SELECT id FROM users) SELECT n FROM recent"
-                + "|A column list on recent is not supported;"
-                + " alias the columns in its SELECT instead.",
             "MANY|SELECT s.n FROM (SELECT id FROM users) AS s(n)"
                 + "|A column list on s is not supported; alias the columns in its SELECT instead.",
             "MANY|SELECT id FROM (SELECT id FROM users)"
@@ -8387,9 +8551,18 @@ class QueryAnalyzerTest {
                 + "|LATERAL is not supported.",
             "MANY|SELECT s.id FROM ((SELECT id FROM users)) s"
                 + "|Only table sources are supported.",
+            "MANY|WITH recent (a, b, c) AS (SELECT id, total FROM orders) SELECT * FROM recent"
+                + "|The column list of recent names 3 columns,"
+                + " but its SELECT returns only 2.",
+            "MANY|WITH recent (uid) AS (SELECT user_id, COUNT(*) FROM orders GROUP BY user_id)"
+                + " SELECT * FROM recent"
+                + "|COUNT(*) requires a result alias, such as COUNT(*) AS total.",
             "MANY|WITH pairs AS (SELECT u.id, p.id FROM users u JOIN profiles p"
                 + " ON p.user_id = u.id) SELECT * FROM pairs"
                 + "|Derived source pairs has more than one column named id;"
+                + " give each a distinct alias.",
+            "MANY|WITH c (name) AS (SELECT id, name FROM users) SELECT * FROM c"
+                + "|Derived source c has more than one column named name;"
                 + " give each a distinct alias.",
             "MANY|SELECT s.id FROM (SELECT id, name AS ID FROM users) s"
                 + "|Derived source s has more than one column named ID;"

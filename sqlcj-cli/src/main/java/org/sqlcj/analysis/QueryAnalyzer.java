@@ -229,12 +229,19 @@ public final class QueryAnalyzer {
         A subquery in FROM requires an alias, such as (SELECT ...) AS recent.""";
 
     /**
-     * The rejection of a column list on a derived source, written on a
-     * {@code WITH} name or on a subquery alias, which renames the columns of
-     * its {@code SELECT} by position.
+     * The rejection of a column list on a subquery alias, which renames the
+     * columns of the subquery's {@code SELECT} by position.
      */
     private static final String DERIVED_SOURCE_COLUMN_LIST_REJECTION = """
         A column list on %s is not supported; alias the columns in its SELECT instead.""";
+
+    /**
+     * The rejection of a column list that names more columns than its
+     * {@code SELECT} returns, so the names past the last returned column rename
+     * no column at all.
+     */
+    private static final String DERIVED_SOURCE_COLUMN_LIST_COUNT_REJECTION = """
+        The column list of %s names %d columns, but its SELECT returns only %d.""";
 
     /**
      * The rejection of a derived source two of whose columns expose one name,
@@ -749,7 +756,8 @@ public final class QueryAnalyzer {
                 plainSelect,
                 analysis,
                 analyzeCommonTableExpressions(selects, analysis, List.of()),
-                true
+                true,
+                0
             ),
             analysis.placeholders()
         );
@@ -776,7 +784,8 @@ public final class QueryAnalyzer {
             setOperation,
             analysis,
             analyzeCommonTableExpressions(selects, analysis, List.of()),
-            true
+            true,
+            0
         );
 
         return toReadQueryModel(query, parsedSql, analyzed, analysis.placeholders());
@@ -818,11 +827,16 @@ public final class QueryAnalyzer {
      * <p>A set operation is analyzed as a top-level one is, so the columns a
      * {@code WITH} body or a subquery source exposes are the columns the set
      * operation rules resolve from its branches.
+     *
+     * <p>{@code listedColumns} is the number of leading columns a column list
+     * on the derived source renames, which are the positions the body itself
+     * need not name, and {@code 0} where the derived source writes no list.
      */
     private AnalyzedSelect analyzeNestedSelect(
         Select select,
         Analysis analysis,
-        List<Source> commonTableExpressions
+        List<Source> commonTableExpressions,
+        int listedColumns
     ) {
         List<Select> selects = parenthesisLevels(select);
 
@@ -831,7 +845,8 @@ public final class QueryAnalyzer {
                 setOperation,
                 analysis,
                 analyzeCommonTableExpressions(selects, analysis, commonTableExpressions),
-                true
+                true,
+                listedColumns
             );
         }
 
@@ -841,7 +856,8 @@ public final class QueryAnalyzer {
             plainSelect,
             analysis,
             analyzeCommonTableExpressions(selects, analysis, commonTableExpressions),
-            true
+            true,
+            listedColumns
         );
     }
 
@@ -891,13 +907,17 @@ public final class QueryAnalyzer {
      *
      * <p>{@code namesResultColumns} states whether this {@code SELECT} names
      * the result columns, which every read does and which only the leftmost
-     * branch of a set operation does.
+     * branch of a set operation does. {@code listedColumns} is the number of
+     * leading columns a column list on the derived source this {@code SELECT}
+     * is the body of renames, which are the positions this projection need not
+     * name, and {@code 0} elsewhere.
      */
     private AnalyzedSelect analyzePlainSelect(
         PlainSelect plainSelect,
         Analysis analysis,
         List<Source> commonTableExpressions,
-        boolean namesResultColumns
+        boolean namesResultColumns,
+        int listedColumns
     ) {
         List<Source> sources = resolveSources(plainSelect, analysis, commonTableExpressions, null);
 
@@ -907,7 +927,8 @@ public final class QueryAnalyzer {
             plainSelect,
             analysis,
             scope,
-            namesResultColumns
+            namesResultColumns,
+            listedColumns
         );
 
         resolveBindingParameters(plainSelect, scope, analysis);
@@ -927,7 +948,10 @@ public final class QueryAnalyzer {
      *
      * <p>{@code namesResultColumns} states whether this set operation names the
      * result columns, so only the leftmost branch of the leftmost set operation
-     * must name every result component of its own projection.
+     * must name every result component of its own projection. That leftmost
+     * branch is also the naming projection a column list on the derived source
+     * this set operation is the body of renames the leading columns of, so only
+     * it receives {@code listedColumns}.
      *
      * <p>The parser reports a flat list of branches and operators with no
      * precedence grouping, and PostgreSQL binds {@code INTERSECT} more tightly
@@ -949,7 +973,8 @@ public final class QueryAnalyzer {
         SetOperationList setOperation,
         Analysis analysis,
         List<Source> commonTableExpressions,
-        boolean namesResultColumns
+        boolean namesResultColumns,
+        int listedColumns
     ) {
         requireSupportedSetOperators(setOperation);
 
@@ -962,7 +987,8 @@ public final class QueryAnalyzer {
                     branchSelects.get(index),
                     analysis,
                     commonTableExpressions,
-                    namesResultColumns && index == 0
+                    namesResultColumns && index == 0,
+                    index == 0 ? listedColumns : 0
                 )
             );
         }
@@ -989,12 +1015,17 @@ public final class QueryAnalyzer {
      * read rules, and a set operation is analyzed as a set operation of its own.
      * Each parenthesis level of the branch may declare a {@code WITH} list,
      * which is analyzed beside the common table expressions in scope around it.
+     *
+     * <p>{@code listedColumns} is the number of leading columns a column list
+     * renames, which this branch is given only where it is the naming
+     * projection of the renamed derived source.
      */
     private AnalyzedSelect analyzeSetOperationBranch(
         Select branch,
         Analysis analysis,
         List<Source> commonTableExpressions,
-        boolean namesResultColumns
+        boolean namesResultColumns,
+        int listedColumns
     ) {
         List<Select> selects = parenthesisLevels(branch);
 
@@ -1011,7 +1042,8 @@ public final class QueryAnalyzer {
                 plainSelect,
                 analysis,
                 branchCommonTableExpressions,
-                namesResultColumns
+                namesResultColumns,
+                listedColumns
             );
         }
 
@@ -1020,7 +1052,8 @@ public final class QueryAnalyzer {
                 nested,
                 analysis,
                 branchCommonTableExpressions,
-                namesResultColumns
+                namesResultColumns,
+                listedColumns
             );
         }
 
@@ -1543,8 +1576,14 @@ public final class QueryAnalyzer {
 
     /**
      * Analyzes one {@code WITH} item into the derived source it declares, whose
-     * columns are its body's result columns. A recursive item reads itself, and
-     * a data-modifying one writes rows, neither of which this subset models.
+     * columns are its body's result columns, renamed by the item's column list
+     * where it writes one. A recursive item reads itself, and a data-modifying
+     * one writes rows, neither of which this subset models.
+     *
+     * <p>The number of names the list writes is the number of leading columns
+     * the body itself need not name, so it is known before the body is
+     * analyzed, while the renaming itself reads the columns that analysis
+     * resolves.
      */
     private Source analyzeCommonTableExpression(
         WithItem<?> withItem,
@@ -1557,18 +1596,75 @@ public final class QueryAnalyzer {
 
         Select body = requireSelectBody(withItem);
         String name = withItem.getUnquotedAliasName();
+        List<SelectItem<?>> columnList = withItem.getWithItemList();
 
-        if (withItem.getWithItemList() != null) {
-            throw new UnsupportedOperationException(
-                DERIVED_SOURCE_COLUMN_LIST_REJECTION.formatted(name)
-            );
-        }
+        AnalyzedSelect analyzed = analyzeNestedSelect(
+            body,
+            analysis,
+            commonTableExpressions,
+            columnList == null ? 0 : columnList.size()
+        );
 
         return toDerivedSource(
             name,
-            analyzeNestedSelect(body, analysis, commonTableExpressions).columns(),
+            renamedDerivedColumns(name, columnList, analyzed.columns()),
             false
         );
+    }
+
+    /**
+     * The columns of one derived source under the names a column list on it
+     * gives them: each name renames the column of its own position, keeping
+     * that column's type, enum type, array spelling, blank-padded spelling, and
+     * nullability, because the list names columns and states nothing about
+     * them. The columns past a shorter list keep the names their own
+     * {@code SELECT} states, and a list is rejected where it names more columns
+     * than that {@code SELECT} returns at all.
+     *
+     * <p>The renamed columns are the ones the distinct-name rule of a derived
+     * source then reads, so a list may resolve a name its {@code SELECT}
+     * repeats, and may repeat one itself.
+     */
+    private List<org.sqlcj.schema.Column> renamedDerivedColumns(
+        String name,
+        List<SelectItem<?>> columnList,
+        List<org.sqlcj.schema.Column> columns
+    ) {
+        if (columnList == null) {
+            return columns;
+        }
+
+        if (columnList.size() > columns.size()) {
+            throw new UnsupportedOperationException(
+                DERIVED_SOURCE_COLUMN_LIST_COUNT_REJECTION.formatted(
+                    name,
+                    columnList.size(),
+                    columns.size()
+                )
+            );
+        }
+
+        List<org.sqlcj.schema.Column> renamed = new ArrayList<>(columns);
+
+        for (int index = 0; index < columnList.size(); index++) {
+            org.sqlcj.schema.Column column = columns.get(index);
+            Expression listed = columnList.get(index).getExpression();
+
+            renamed.set(
+                index,
+                new org.sqlcj.schema.Column(
+                    ((net.sf.jsqlparser.schema.Column) listed).getUnquotedColumnName(),
+                    column.type(),
+                    column.nullable(),
+                    column.unsupportedType(),
+                    column.enumType(),
+                    column.array(),
+                    column.blankPadded()
+                )
+            );
+        }
+
+        return List.copyOf(renamed);
     }
 
     /**
@@ -2786,7 +2882,8 @@ public final class QueryAnalyzer {
 
         return toDerivedSource(
             name,
-            analyzeNestedSelect(subquery.getSelect(), analysis, commonTableExpressions).columns(),
+            analyzeNestedSelect(subquery.getSelect(), analysis, commonTableExpressions, 0)
+                .columns(),
             leftJoined
         );
     }
@@ -4121,12 +4218,16 @@ public final class QueryAnalyzer {
      * <p>An aggregate and a cast name their column with an alias, which is
      * required only of a projection that names the result columns, so a branch
      * of a set operation other than the leftmost may write either without one.
+     * A column list on the derived source this projection is the body of names
+     * its own {@code listedColumns} leading columns, so neither needs an alias
+     * in one of those positions either.
      */
     private ResolvedProjection resolveProjection(
         PlainSelect plainSelect,
         Analysis analysis,
         Scope scope,
-        boolean namesResultColumns
+        boolean namesResultColumns,
+        int listedColumns
     ) {
         List<Source> sources = scope.sources();
 
@@ -4161,7 +4262,7 @@ public final class QueryAnalyzer {
                 selectItem,
                 analysis,
                 scope,
-                namesResultColumns
+                namesResultColumns && columns.size() >= listedColumns
             );
 
             columns.add(column);
@@ -4234,8 +4335,10 @@ public final class QueryAnalyzer {
      * aliased cast. Every other item is a computed projection, which a cast
      * states the type of.
      *
-     * <p>An aggregate and a cast require their alias only where the projection
-     * names the result columns.
+     * <p>An aggregate and a cast require their alias only where
+     * {@code namesResultColumns} states that this item names its own column,
+     * which a projection that names no result column and a position a column
+     * list renames both state it does not.
      */
     private org.sqlcj.schema.Column resolveColumnItem(
         SelectItem<?> selectItem,

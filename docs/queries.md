@@ -106,13 +106,25 @@ configuration entry.
   `A subquery in FROM requires an alias, such as (SELECT ...) AS recent.`, and
   sees no source of the query around it, as PostgreSQL scopes a subquery that is
   not `LATERAL`.
-- A column list on a `WITH` name or on a subquery alias, such as
-  `WITH recent (n) AS (...)` or `(SELECT ...) AS s(n)`, is rejected as
+- A column list on a `WITH` name, such as `WITH recent (n) AS (...)`, renames
+  the body's result columns by position, on a read and on a write alike: each
+  name renames the column of its own position, which keeps the type, enum type,
+  array, blank-padded spelling, and nullability its `SELECT` states, and the
+  columns past a shorter list keep the names that `SELECT` states. A position
+  the list names takes its name from the list, so an aggregate or a cast written
+  there needs no alias of its own, while every later position still requires
+  one. A list that names more columns than its `SELECT` returns is rejected as
+  `The column list of <name> names <m> columns, but its SELECT returns only
+  <n>.`
+- A column list on a subquery alias, such as `(SELECT ...) AS s(n)`, is
+  rejected as
   `A column list on <name> is not supported; alias the columns in its SELECT
-  instead.`, and a derived source two of whose columns expose one name, compared
-  ignoring case, as
+  instead.`
+- A derived source two of whose columns expose one name, compared ignoring case,
+  is rejected as
   `Derived source <name> has more than one column named <column>; give each a
-  distinct alias.`
+  distinct alias.` The renamed columns are the ones this rule reads, so a column
+  list may resolve a name its `SELECT` repeats, and may repeat one itself.
 - Every `WITH` clause of every statement is analyzed in the order the query
   writes it, whether or not a source reads it, so its placeholders are typed by
   its own clause rules. A clause sees the clauses written before it in its own
@@ -1430,12 +1442,14 @@ query name, and its header line.
   `name || 'x' AS n`, and the `FILTER` and `OVER` forms are rejected as
   `Cannot infer the type of COUNT(*) OVER () in SELECT; state it with a cast
   and an alias, such as SUM(amount)::numeric AS total`. A branch of a set
-  operation other than the leftmost names no result column, so an aggregate and
-  a cast there may omit the alias each requires elsewhere.
+  operation other than the leftmost names no result column, and a position a
+  column list on a `WITH` name renames is named by that list, so an aggregate
+  and a cast in either place may omit the alias each requires elsewhere.
 - A `FROM` or `JOIN` source outside the subset: a `LATERAL` source, a doubly
   parenthesized source, a subquery source without an alias, a column list on a
-  `WITH` name or on a subquery alias, and a derived source two of whose columns
-  expose one name, each with the diagnostic [Sources](#sources) states.
+  subquery alias, a column list on a `WITH` name that names more columns than
+  its body returns, and a derived source two of whose columns expose one name,
+  each with the diagnostic [Sources](#sources) states.
 - A `WITH` clause outside the subset, on a read and on a write alike: a
   `WITH RECURSIVE` clause and a data-modifying body, each with the diagnostic
   [Sources](#sources) states. Both are rejected whether or not a source reads
@@ -1858,6 +1872,10 @@ Reads:
   `QueryAnalyzerTest.shouldBindDerivedSourceParametersInTextualOrder`,
   `QueryAnalyzerTest.shouldAnalyzeACommonTableExpressionReadOnlyInsideAPredicateSubquery`,
   `QueryAnalyzerTest.shouldAcceptMaterializedCommonTableExpression`,
+  `QueryAnalyzerTest.shouldRenameCommonTableExpressionColumnsByItsColumnList`,
+  `QueryAnalyzerTest.shouldRenameOnlyTheLeadingColumnsOfAShorterColumnList`,
+  `QueryAnalyzerTest.shouldNameAnUnaliasedAggregateAndCastFromTheColumnList`,
+  `QueryAnalyzerTest.shouldResolveARepeatedBodyColumnNameWithAColumnList`,
   `QueryAnalyzerTest.shouldRejectAnOuterSourceReferenceInsideASubquerySource`, and
   `QueryAnalyzerTest.shouldRejectExcludedDerivedSourceForm` cover the derived
   sources: a `WITH` source whose placeholder is typed and named from its own
@@ -1868,15 +1886,23 @@ Reads:
   source, the query-specific result of `SELECT *` over one, the textual binding
   order across a `WITH` body, a subquery source, and the outer query, a clause
   read only inside a predicate subquery, the accepted `MATERIALIZED` spellings,
-  the outer source a subquery body does not see, and every rejected
-  derived-source and `WITH` form, including a data-modifying body reported
-  without an internal error;
+  a column list that renames a `WITH` name's columns by position, a shorter one
+  that renames the leading column alone, an unaliased aggregate and cast named
+  by the list, a repeated body name the list resolves, the outer source a
+  subquery body does not see, and every rejected derived-source and `WITH`
+  form, including a list longer than its body, an unaliased aggregate past a
+  list, a repeated name the list itself states, and a data-modifying body
+  reported without an internal error;
   `SqlcjCompilerIntegrationTest.shouldGenerateCompilableJavaForDerivedSources`
   compiles a repository over a left-joined `WITH` report and a paged subquery
   source, and
   `PostgresIntegrationTest.shouldExecuteGeneratedDerivedSourcesAgainstPostgres`
   executes both against PostgreSQL 16, reading the unmatched report row's
-  derived column as `null`.
+  derived column as `null`;
+  `PostgresIntegrationTest.shouldExecuteGeneratedWithColumnListsAgainstPostgres`
+  executes a joined `WITH` clause whose column list renames its grouped column
+  and names an unaliased `count(*)`, and a shorter list whose unrenamed column
+  keeps its body's name.
 - `QueryAnalyzerTest.shouldTypePredicateSubqueryPlaceholderFromItsOwnColumn`,
   `QueryAnalyzerTest.shouldTypePredicateSubqueryPlaceholderOfAJoinCondition`,
   `QueryAnalyzerTest.shouldTypePredicateSubqueryPlaceholderOfAnUpdate`,
@@ -1994,10 +2020,13 @@ Writes and `RETURNING`:
   `QueryAnalyzerTest.shouldRejectUnknownReturningColumn`, and
   `QueryAnalyzerTest.shouldRejectExcludedReturningWriteForm` cover the write
   shapes, and
-  `QueryAnalyzerTest.shouldAnalyzeReturningWriteWithACommonTableExpression` and
-  `QueryAnalyzerTest.shouldAnalyzeCommonTableExpressionOfAWriteWithoutReturning`
+  `QueryAnalyzerTest.shouldAnalyzeReturningWriteWithACommonTableExpression`,
+  `QueryAnalyzerTest.shouldAnalyzeCommonTableExpressionOfAWriteWithoutReturning`,
+  and
+  `QueryAnalyzerTest.shouldRenameColumnsOfAWriteCommonTableExpressionByItsColumnList`
   cover the `WITH` clause of a returning and of an `:exec` write, whose body
-  types its own placeholders while the returned columns stay the target's.
+  types its own placeholders while the returned columns stay the target's, and
+  the column list that renames such a clause's columns.
 - `QueryAnalyzerTest.shouldTypeUpdateWhereParameterFromAnAddedSourceColumn`,
   `QueryAnalyzerTest.shouldTypeDeleteWhereParameterFromAUsingSourceColumn`,
   `QueryAnalyzerTest.shouldTypeJoinConditionParameterOfAnUpdateFromClause`,
