@@ -1197,6 +1197,10 @@ public final class JavaCodeGenerator implements CodeGenerator {
      * Builds one embedded row inline from the positions its own columns were
      * selected at, so that the result's mapper reads every column of the result
      * in one pass.
+     *
+     * <p>A nullable row, which a left-joined source contributes, is {@code null}
+     * when every column of its own range reads SQL {@code NULL}, which
+     * {@code dev.sqlcj.runtime.SqlRow} reports over that range alone.
      */
     private String generateRowMapping(QueryColumn column, int firstPosition) {
         List<QueryColumn> columns = column.rowColumns();
@@ -1205,8 +1209,24 @@ public final class JavaCodeGenerator implements CodeGenerator {
             .mapToObj(index -> generateResultMapping(columns.get(index), firstPosition + index))
             .collect(Collectors.joining(",\n"));
 
-        return "new %s(\n%s\n)"
-            .formatted(JavaNames.rowTypeName(column.rowTable()), components)
+        String construction = "new %s(\n%s\n)"
+            .formatted(JavaNames.rowTypeName(column.rowTable()), components);
+
+        if (!column.nullable()) {
+            return construction
+                .indent(8)
+                .stripTrailing();
+        }
+
+        return """
+            dev.sqlcj.runtime.SqlRow.isNull(resultSet, %d, %d)
+                ? null
+                : %s"""
+            .formatted(
+                firstPosition,
+                firstPosition + columns.size() - 1,
+                construction.indent(4).strip()
+            )
             .indent(8)
             .stripTrailing();
     }

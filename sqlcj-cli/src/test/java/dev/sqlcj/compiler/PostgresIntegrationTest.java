@@ -3866,6 +3866,83 @@ class PostgresIntegrationTest {
     }
 
     /**
+     * Covers the embedded row of a left-joined source end to end: the component
+     * is {@code null} for a customer the join matches no order for, and a
+     * matched order whose every nullable column is {@code NULL} is still a row
+     * of its own, because the two {@code NOT NULL} columns of that range read
+     * values. A lone left-joined wildcard reads the same way as the one
+     * component of a result of its own.
+     */
+    @Test
+    void shouldExecuteGeneratedLeftJoinedWildcardAsAnAbsentRowAgainstPostgres() throws Exception {
+        execute(CONSTRAINT_SCHEMA);
+
+        Path classesDirectory = generateAndCompile(
+            CONSTRAINT_SCHEMA,
+            """
+                -- name: ListCustomerOrderRows :many
+                SELECT c.*, o.*
+                FROM customers c
+                LEFT JOIN customer_orders o ON o.customer_id = c.id
+                ORDER BY c.id;
+
+                -- name: ListOrderRows :many
+                SELECT o.*
+                FROM customers c
+                LEFT JOIN customer_orders o ON o.customer_id = c.id
+                ORDER BY c.id;
+                """
+        );
+
+        execute("INSERT INTO customers (id, name) VALUES (1, 'Alice'), (2, 'Bob')");
+
+        execute(
+            """
+                INSERT INTO customer_orders (id, customer_id, quantity, status, created_at)
+                VALUES (10, 1, 3, NULL, NULL)
+                """
+        );
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            List<?> rows = assertInstanceOf(
+                List.class,
+                repository.getClass().getMethod("listCustomerOrderRows").invoke(repository)
+            );
+
+            assertEquals(2, rows.size());
+
+            assertEquals(List.of("c", "o"), recordComponentNames(rows.get(0)));
+
+            Object matched = component(rows.get(0), "o");
+
+            assertEquals(1L, component(component(rows.get(0), "c"), "id"));
+            assertEquals("CustomerOrdersRow", matched.getClass().getSimpleName());
+            assertEquals(10L, component(matched, "id"));
+            assertEquals(1L, component(matched, "customerId"));
+            assertEquals(3, component(matched, "quantity"));
+            assertNull(component(matched, "status"));
+            assertNull(component(matched, "createdAt"));
+
+            assertEquals(2L, component(component(rows.get(1), "c"), "id"));
+            assertNull(component(rows.get(1), "o"));
+
+            List<?> orderRows = assertInstanceOf(
+                List.class,
+                repository.getClass().getMethod("listOrderRows").invoke(repository)
+            );
+
+            assertEquals(2, orderRows.size());
+
+            assertEquals(List.of("o"), recordComponentNames(orderRows.get(0)));
+
+            assertEquals(matched, component(orderRows.get(0), "o"));
+            assertNull(component(orderRows.get(1), "o"));
+        }
+    }
+
+    /**
      * Covers a returning delete: every deleted row is returned to the
      * {@code :many} result, and a delete that matches no row returns an empty
      * list. PostgreSQL does not guarantee the returned row order, so the rows

@@ -2522,6 +2522,139 @@ class JavaCodeGeneratorTest {
     }
 
     /**
+     * A left-joined source's embedded row is a nullable component, read as
+     * {@code null} when every column of its own range reads SQL {@code NULL},
+     * so the guarded construction covers exactly that range and the row of the
+     * source beside it is built unguarded.
+     */
+    @Test
+    void shouldGenerateGuardedConstructionForALeftJoinedEmbeddedRow() throws IOException {
+        QueryModel query = new QueryModel(
+            "ListUserProfiles",
+            QueryType.MANY,
+            "users",
+            """
+                SELECT u.*, p.*
+                FROM users u
+                LEFT JOIN profiles p ON p.user_id = u.id
+                """,
+            List.of(),
+            List.of(usersRowColumn("u"), leftJoinedProfilesRowColumn("p")),
+            List.of(),
+            null
+        );
+
+        GeneratedFile file = generate(query);
+
+        String source = file.content();
+
+        assertEquals(
+            List.of("UsersRow u", "ProfilesRow p"),
+            recordComponents(source, "ListUserProfilesResult")
+        );
+
+        assertTrue(
+            source.contains(
+                """
+                    private static final RowMapper<ListUserProfilesResult> listUserProfilesRowMapper =
+                            resultSet -> new ListUserProfilesResult(
+                            new UsersRow(
+                                    resultSet.getObject(1, Long.class),
+                                    resultSet.getObject(2, String.class)
+                            ),
+                            dev.sqlcj.runtime.SqlRow.isNull(resultSet, 3, 5)
+                                ? null
+                                : new ProfilesRow(
+                                        resultSet.getObject(3, Long.class),
+                                        resultSet.getObject(4, Long.class),
+                                        resultSet.getObject(5, String.class)
+                                )
+                    );
+                    """
+                    .indent(4)
+            ),
+            source
+        );
+
+        assertFalse(source.contains("RowMapper<ProfilesRow>"));
+
+        List<GeneratedFile> rows = codeGenerator.generateRows();
+
+        assertEquals(
+            List.of(
+                Path.of("generated", "UsersRow.java"),
+                Path.of("generated", "ProfilesRow.java")
+            ),
+            rows.stream().map(GeneratedFile::path).toList()
+        );
+
+        assertTrue(rows.get(1).content().contains("Long userId"), rows.get(1).content());
+
+        assertCompilesWithRows(file);
+    }
+
+    /**
+     * A lone wildcard of a left-joined source returns a result of its own
+     * holding that row as its single nullable component, so the row record is
+     * generated without a mapper field and the guard covers the whole
+     * projection.
+     */
+    @Test
+    void shouldGenerateResultRecordForALoneLeftJoinedWildcard() throws IOException {
+        QueryModel query = new QueryModel(
+            "ListProfiles",
+            QueryType.MANY,
+            "users",
+            """
+                SELECT p.*
+                FROM users u
+                LEFT JOIN profiles p ON p.user_id = u.id
+                """,
+            List.of(),
+            List.of(leftJoinedProfilesRowColumn("p")),
+            List.of(),
+            null
+        );
+
+        GeneratedFile file = generate(query);
+
+        String source = file.content();
+
+        assertEquals(
+            List.of("ProfilesRow p"),
+            recordComponents(source, "ListProfilesResult")
+        );
+
+        assertTrue(
+            source.contains(
+                """
+                    private static final RowMapper<ListProfilesResult> listProfilesRowMapper =
+                            resultSet -> new ListProfilesResult(
+                            dev.sqlcj.runtime.SqlRow.isNull(resultSet, 1, 3)
+                                ? null
+                                : new ProfilesRow(
+                                        resultSet.getObject(1, Long.class),
+                                        resultSet.getObject(2, Long.class),
+                                        resultSet.getObject(3, String.class)
+                                )
+                    );
+                    """
+                    .indent(4)
+            ),
+            source
+        );
+
+        assertFalse(source.contains("RowMapper<ProfilesRow>"));
+
+        assertEquals(
+            List.of(Path.of("generated", "ProfilesRow.java")),
+            codeGenerator.generateRows().stream().map(GeneratedFile::path).toList()
+        );
+
+        assertCompilesWithRows(file);
+    }
+
+    /**
      * An embedded row's own columns reach the generated package: the row record
      * and the Java enum of its enum column are generated although no query
      * returns that row whole, and the repository imports the JDK types the
@@ -2638,6 +2771,24 @@ class JavaCodeGeneratorTest {
     private QueryColumn profilesRowColumn(String name) {
         return QueryColumn.row(
             name,
+            "profiles",
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("user_id", ColumnType.BIGINT, false),
+                new QueryColumn("nickname", ColumnType.VARCHAR, true)
+            )
+        );
+    }
+
+    /**
+     * The embedded row of the {@code profiles} table under one exposed name,
+     * nullable because its source is left-joined, whose own columns keep their
+     * declared nullability.
+     */
+    private QueryColumn leftJoinedProfilesRowColumn(String name) {
+        return QueryColumn.row(
+            name,
+            true,
             "profiles",
             List.of(
                 new QueryColumn("id", ColumnType.BIGINT, false),

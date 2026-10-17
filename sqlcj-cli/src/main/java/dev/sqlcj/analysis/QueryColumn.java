@@ -17,8 +17,9 @@ import java.util.List;
  * @param rowTable   the schema's declared name of the table whose complete row
  *                   this component holds, and {@code null} for a plain column,
  *                   which carries a type of its own instead
- * @param rowColumns the embedded row's own columns, in schema order, and empty
- *                   for a plain column
+ * @param rowColumns the embedded row's own columns, in schema order, each with
+ *                   the nullability the schema declares for it, and empty for a
+ *                   plain column
  */
 public record QueryColumn(
     String name,
@@ -58,7 +59,30 @@ public record QueryColumn(
      * result row.
      */
     public static QueryColumn row(String name, String rowTable, List<QueryColumn> rowColumns) {
-        return new QueryColumn(name, null, false, null, false, rowTable, List.copyOf(rowColumns));
+        return row(name, false, rowTable, rowColumns);
+    }
+
+    /**
+     * The same embedded row, nullable when the source it stands for may
+     * contribute no row, as a left-joined source does when the join finds no
+     * match. The row's own columns keep their declared nullability either way,
+     * so one table's row record is the same record everywhere.
+     */
+    public static QueryColumn row(
+        String name,
+        boolean nullable,
+        String rowTable,
+        List<QueryColumn> rowColumns
+    ) {
+        return new QueryColumn(
+            name,
+            null,
+            nullable,
+            null,
+            false,
+            rowTable,
+            List.copyOf(rowColumns)
+        );
     }
 
     /** Reports whether this component holds one table's complete row. */
