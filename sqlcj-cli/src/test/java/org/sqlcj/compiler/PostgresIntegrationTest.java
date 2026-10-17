@@ -3688,6 +3688,98 @@ class PostgresIntegrationTest {
     }
 
     /**
+     * Covers a set operation in each nested location end to end: a
+     * {@code UNION} as a {@code WITH} body returns each distinct value once
+     * under the leftmost branch's name, a {@code UNION ALL} as a subquery
+     * source is filtered through a placeholder typed from the column its
+     * branches resolve to, and a {@code UNION} inside an {@code IN} predicate
+     * selects the rows either branch returns.
+     */
+    @Test
+    void shouldExecuteGeneratedNestedSetOperationsAgainstPostgres() throws Exception {
+        execute(READING_SCHEMA);
+
+        Path classesDirectory = generateAndCompile(
+            READING_SCHEMA,
+            """
+                -- name: ListCombinedLabels :many
+                WITH combined AS (SELECT label AS value
+                                  FROM readings
+                                  UNION
+                                  SELECT note
+                                  FROM readings)
+                SELECT value
+                FROM combined
+                ORDER BY value;
+
+                -- name: ListLargeValues :many
+                SELECT s.value
+                FROM (SELECT counted AS value
+                      FROM readings
+                      UNION ALL
+                      SELECT total
+                      FROM readings) s
+                WHERE s.value >= $1
+                ORDER BY s.value;
+
+                -- name: ListMatchingIds :many
+                SELECT id
+                FROM readings
+                WHERE id IN (SELECT id FROM readings WHERE label = $1
+                             UNION
+                             SELECT id FROM readings WHERE note = $2)
+                ORDER BY id;
+                """
+        );
+
+        execute(
+            """
+                INSERT INTO readings (id, counted, total, label, note)
+                VALUES (1, 10, 100, 'alpha', 'beta'), (2, 20, 200, 'beta', 'gamma')
+                """
+        );
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            List<?> labels = (List<?>) repository.getClass()
+                .getMethod("listCombinedLabels")
+                .invoke(repository);
+
+            assertEquals(List.of("value"), recordComponentNames(labels.get(0)));
+
+            assertEquals(
+                List.of("alpha", "beta", "gamma"),
+                values(labels),
+                "a UNION WITH body returns each distinct value once"
+            );
+
+            assertEquals(
+                List.of(20L, 100L, 200L),
+                values(
+                    (List<?>) repository.getClass()
+                        .getMethod("listLargeValues", Long.class)
+                        .invoke(repository, 20L)
+                ),
+                "a UNION ALL subquery source is filtered through its resolved column"
+            );
+
+            List<?> matching = (List<?>) repository.getClass()
+                .getMethod("listMatchingIds", String.class, String.class)
+                .invoke(repository, "beta", "beta");
+
+            assertEquals(2, matching.size());
+
+            assertEquals(1L, component(matching.get(0), "id"));
+            assertEquals(
+                2L,
+                component(matching.get(1), "id"),
+                "a UNION in an IN predicate selects the rows either branch returns"
+            );
+        }
+    }
+
+    /**
      * Covers the set operation type rules against PostgreSQL itself: each
      * widening rule and both branch orders of the character types are
      * generated, compiled, and executed, and the Java type of the generated

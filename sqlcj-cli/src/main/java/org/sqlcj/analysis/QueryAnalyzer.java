@@ -104,13 +104,6 @@ public final class QueryAnalyzer {
         Only SELECT, INSERT, UPDATE, and DELETE statements are supported.""";
 
     /**
-     * The rejection of a set operation written in a location this subset
-     * analyzes no set operation in, which joins two queries into one.
-     */
-    private static final String SET_OPERATION_REJECTION = """
-        UNION, INTERSECT, and EXCEPT are not supported; write one query per SELECT.""";
-
-    /**
      * The rejection of {@code MINUS}, which PostgreSQL does not have, naming
      * the operator it spells the same difference with.
      */
@@ -264,6 +257,16 @@ public final class QueryAnalyzer {
      */
     private static final String INSERT_ROW_SOURCE_REJECTION = """
         INSERT requires parenthesized VALUES rows or a SELECT.""";
+
+    /**
+     * The rejection of a set operation written as the row source of an
+     * {@code INSERT}, which states no projection the written columns pair with,
+     * naming the rewrite that reads the same rows and is analyzed: a
+     * {@code SELECT} from the set operation as a subquery source.
+     */
+    private static final String INSERT_SET_OPERATION_REJECTION = """
+        A set operation as the row source of INSERT is not supported; select from it as a \
+        subquery, such as SELECT * FROM (SELECT ... UNION SELECT ...) AS combined.""";
 
     /**
      * The rejection of a {@code VALUES} row or an insert {@code SELECT} that
@@ -811,6 +814,10 @@ public final class QueryAnalyzer {
      * and its sources, result columns, and clause placeholders are resolved as
      * a top-level read's are. Its annotation, its row table, and the query
      * model stay the top-level statement's own facts.
+     *
+     * <p>A set operation is analyzed as a top-level one is, so the columns a
+     * {@code WITH} body or a subquery source exposes are the columns the set
+     * operation rules resolve from its branches.
      */
     private AnalyzedSelect analyzeNestedSelect(
         Select select,
@@ -818,6 +825,15 @@ public final class QueryAnalyzer {
         List<Source> commonTableExpressions
     ) {
         List<Select> selects = parenthesisLevels(select);
+
+        if (selects.get(selects.size() - 1) instanceof SetOperationList setOperation) {
+            return analyzeSetOperation(
+                setOperation,
+                analysis,
+                analyzeCommonTableExpressions(selects, analysis, commonTableExpressions),
+                true
+            );
+        }
 
         PlainSelect plainSelect = requirePlainSelect(selects);
 
@@ -851,22 +867,17 @@ public final class QueryAnalyzer {
 
     /**
      * Requires the query a {@code SELECT} encloses to be a single plain
-     * {@code SELECT}, which is every location outside a top-level read: a
-     * {@code WITH} body, a subquery source, a predicate subquery, and the row
-     * source of an {@code INSERT}. A set operation states no single query there,
-     * and every other query form, such as a {@code VALUES} or {@code TABLE}
-     * statement, states no supported query at all, so each is rejected before
-     * the annotation is checked and before any {@code WITH} body is analyzed.
+     * {@code SELECT}, which every caller classifies a set operation of its own
+     * before. A query form that is neither, such as a {@code VALUES} or
+     * {@code TABLE} statement, states no supported query at all, so it is
+     * rejected before the annotation is checked and before any {@code WITH}
+     * body is analyzed.
      */
     private PlainSelect requirePlainSelect(List<Select> selects) {
         Select enclosed = selects.get(selects.size() - 1);
 
         if (enclosed instanceof PlainSelect plainSelect) {
             return plainSelect;
-        }
-
-        if (enclosed instanceof SetOperationList) {
-            throw new UnsupportedOperationException(SET_OPERATION_REJECTION);
         }
 
         throw new UnsupportedOperationException(UNSUPPORTED_STATEMENT_REJECTION);
@@ -1375,30 +1386,68 @@ public final class QueryAnalyzer {
 
     /**
      * Analyzes one subquery of a predicate, which is the level inside the level
-     * its predicate stands in: it is classified inside its own parentheses as a
-     * top-level read is, its own {@code WITH} list is analyzed beside the common
-     * table expressions in scope around it, and its sources, its join
-     * conditions, and its clause placeholders resolve through its own level and
-     * then each enclosing one.
-     *
-     * <p>Its {@code SELECT} list states no result column of the analyzed query,
-     * because the predicate reads whether a row exists or compares one value,
-     * so a direct column there only resolves, whether or not the schema maps its
-     * type, and every other item reaches the database as written.
+     * its predicate stands in, against the common table expressions in scope
+     * around the predicate.
      */
     private void analyzePredicateSubquery(
         ParenthesedSelect subquery,
         Scope enclosing,
         Analysis analysis
     ) {
-        List<Select> selects = parenthesisLevels(subquery);
+        analyzePredicateQuery(subquery, enclosing.commonTableExpressions(), enclosing, analysis);
+    }
+
+    /**
+     * Analyzes the query of one predicate subquery, which is classified inside
+     * its own parentheses as a top-level read is: its own {@code WITH} list is
+     * analyzed beside the common table expressions in scope around it, and its
+     * sources, its join conditions, and its clause placeholders resolve through
+     * its own level and then each enclosing one.
+     *
+     * <p>Its {@code SELECT} list states no result column of the analyzed query,
+     * because the predicate reads whether a row exists or compares one value,
+     * so a direct column there only resolves, whether or not the schema maps its
+     * type, and every other item reaches the database as written.
+     *
+     * <p>A set operation there states no result column either, so each of its
+     * branches is analyzed by these same rules, against the common table
+     * expressions the list declares and the same enclosing level, while
+     * PostgreSQL checks that the branches pair their columns. Only the
+     * operators and the {@code LIMIT} and {@code OFFSET} paging the list's own
+     * result are resolved here, because no analyzed column reads that result.
+     */
+    private void analyzePredicateQuery(
+        Select select,
+        List<Source> commonTableExpressionsInScope,
+        Scope enclosing,
+        Analysis analysis
+    ) {
+        List<Select> selects = parenthesisLevels(select);
+
+        if (selects.get(selects.size() - 1) instanceof SetOperationList setOperation) {
+            requireSupportedSetOperators(setOperation);
+
+            List<Source> listCommonTableExpressions = analyzeCommonTableExpressions(
+                selects,
+                analysis,
+                commonTableExpressionsInScope
+            );
+
+            for (Select branch : setOperation.getSelects()) {
+                analyzePredicateQuery(branch, listCommonTableExpressions, enclosing, analysis);
+            }
+
+            resolvePaginationParameters(setOperation, analysis.placeholders());
+
+            return;
+        }
 
         PlainSelect plainSelect = requirePlainSelect(selects);
 
         List<Source> commonTableExpressions = analyzeCommonTableExpressions(
             selects,
             analysis,
-            enclosing.commonTableExpressions()
+            commonTableExpressionsInScope
         );
 
         Scope scope = new Scope(
@@ -1993,6 +2042,10 @@ public final class QueryAnalyzer {
      * encloses. A column list with no row source, as in {@code DEFAULT VALUES},
      * states no row of this subset at all.
      *
+     * <p>A set operation pairs its own branches' columns by position, which the
+     * written column list does not take part in, so it is rejected with the
+     * rewrite that reads its rows as a subquery source instead.
+     *
      * <p>Every parenthesis level of the row source may declare a {@code WITH}
      * list of its own, which is analyzed beside the insert's own clauses so its
      * placeholders are typed from its columns. A {@code VALUES} source reads no
@@ -2023,6 +2076,10 @@ public final class QueryAnalyzer {
             resolveInsertValueRows(values, columns, table, analysis.placeholders());
 
             return;
+        }
+
+        if (selects.get(selects.size() - 1) instanceof SetOperationList) {
+            throw new UnsupportedOperationException(INSERT_SET_OPERATION_REJECTION);
         }
 
         PlainSelect plainSelect = requirePlainSelect(selects);

@@ -6620,8 +6620,9 @@ class QueryAnalyzerTest {
 
     /**
      * An insert's row source is classified inside its parentheses as a
-     * top-level read is, so a set operation there keeps the set-operation
-     * diagnostic.
+     * top-level read is, and a set operation there pairs its own branches'
+     * columns rather than the written column list, so it is rejected with the
+     * subquery rewrite that reads the same rows.
      */
     @ParameterizedTest
     @ValueSource(
@@ -6644,9 +6645,41 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(
-            "UNION, INTERSECT, and EXCEPT are not supported; write one query per SELECT.",
+            "A set operation as the row source of INSERT is not supported;"
+                + " select from it as a subquery,"
+                + " such as SELECT * FROM (SELECT ... UNION SELECT ...) AS combined.",
             exception.getMessage()
         );
+    }
+
+    /**
+     * The rewrite the {@code INSERT} diagnostic names is analyzed: the set
+     * operation is a subquery source of the insert's {@code SELECT}, whose
+     * items pair with the written column list, and a placeholder of one branch
+     * is typed by that branch's own {@code WHERE} rules.
+     */
+    @Test
+    void shouldAnalyzeAnInsertSelectFromASetOperationSubquerySource() {
+        String sql = """
+            INSERT INTO memberships (project_id, user_id)
+            SELECT s.project_id, s.user_id
+            FROM (SELECT project_id, user_id FROM invitations WHERE project_id = $1
+                  UNION
+                  SELECT project_id, user_id FROM invitations) s
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("CreateMemberships", QueryType.EXEC, sql),
+            parser.parse(sql),
+            insertSourceSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "project_id", ColumnType.BIGINT)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1), model.bindingParameterIndexes());
     }
 
     /**
@@ -8315,9 +8348,9 @@ class QueryAnalyzerTest {
      * The derived-source forms outside this subset are rejected with their own
      * diagnostic: a recursive and a data-modifying {@code WITH} item, a
      * subquery source without an alias, a column list on a {@code WITH} name or
-     * on a subquery alias, a body that is not a plain {@code SELECT}, which is
-     * classified inside its own parentheses, a {@code LATERAL} source, which is
-     * classified first, a doubly parenthesized source, which states a source
+     * on a subquery alias, a body that states no supported query at all, which
+     * is classified inside its own parentheses, a {@code LATERAL} source, which
+     * is classified first, a doubly parenthesized source, which states a source
      * kind of its own, and a derived source whose columns repeat a name.
      */
     @ParameterizedTest
@@ -8341,11 +8374,6 @@ class QueryAnalyzerTest {
                 + " run it as a query of its own.",
             "MANY|WITH rows AS (VALUES (1)) SELECT * FROM rows"
                 + "|Only SELECT, INSERT, UPDATE, and DELETE statements are supported.",
-            "MANY|WITH combined AS (SELECT id FROM users UNION SELECT id FROM profiles)"
-                + " SELECT id FROM combined"
-                + "|UNION, INTERSECT, and EXCEPT are not supported; write one query per SELECT.",
-            "MANY|SELECT s.id FROM (SELECT id FROM users UNION SELECT id FROM profiles) s"
-                + "|UNION, INTERSECT, and EXCEPT are not supported; write one query per SELECT.",
             "MANY|WITH recent (n) AS (SELECT id FROM users) SELECT n FROM recent"
                 + "|A column list on recent is not supported;"
                 + " alias the columns in its SELECT instead.",
@@ -8876,26 +8904,53 @@ class QueryAnalyzerTest {
 
     /**
      * A predicate subquery is classified inside its own parentheses as a
-     * top-level read is, so a set operation there keeps the set-operation
-     * diagnostic.
+     * top-level read is, and a set operation there states no result column of
+     * the analyzed query, so each of its branches follows the
+     * predicate-subquery rules in every form the predicate rules reach, of a
+     * read and of a write alike: a branch reads an outer column, each branch's
+     * {@code WHERE} types and names its own placeholder, the placeholders bind
+     * in textual order, and the {@code LIMIT} paging the list's result is an
+     * {@code INTEGER}.
      */
-    @Test
-    void shouldRejectASetOperationInsideAPredicateSubquery() {
-        String sql = "SELECT id FROM users"
-            + " WHERE EXISTS (SELECT 1 FROM orders UNION SELECT 1 FROM profiles)";
-
-        Query query = new Query("ListUsers", QueryType.MANY, sql);
-        ParsedSql parsedSql = parser.parse(sql);
-
-        UnsupportedOperationException exception = assertThrows(
-            UnsupportedOperationException.class,
-            () -> analyzer.analyze(query, parsedSql, joinSchema)
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        value = {
+            "MANY|SELECT id FROM users"
+                + " WHERE EXISTS (SELECT 1 FROM profiles"
+                + " WHERE nickname = $1 AND user_id = users.id"
+                + " UNION SELECT 1 FROM orders WHERE total = $2 ORDER BY 1 LIMIT $3)",
+            "MANY|SELECT id FROM users"
+                + " WHERE id IN (SELECT user_id FROM profiles"
+                + " WHERE nickname = $1 AND user_id = users.id"
+                + " UNION SELECT user_id FROM orders WHERE total = $2 ORDER BY 1 LIMIT $3)",
+            "MANY|SELECT id FROM users"
+                + " WHERE id = (SELECT user_id FROM profiles"
+                + " WHERE nickname = $1 AND user_id = users.id"
+                + " INTERSECT SELECT user_id FROM orders WHERE total = $2 ORDER BY 1 LIMIT $3)",
+            "EXEC|DELETE FROM users"
+                + " WHERE id IN (SELECT user_id FROM profiles"
+                + " WHERE nickname = $1 AND user_id = users.id"
+                + " UNION ALL SELECT user_id FROM orders WHERE total = $2 ORDER BY 1 LIMIT $3)"
+        }
+    )
+    void shouldAnalyzeASetOperationInsideAPredicateSubquery(QueryType type, String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("ReadUsers", type, sql),
+            parser.parse(sql),
+            joinSchema
         );
 
         assertEquals(
-            "UNION, INTERSECT, and EXCEPT are not supported; write one query per SELECT.",
-            exception.getMessage()
+            List.of(
+                new QueryParameter(1, "nickname", ColumnType.VARCHAR),
+                new QueryParameter(2, "total", ColumnType.DECIMAL),
+                new QueryParameter(3, "limit", ColumnType.INTEGER)
+            ),
+            model.parameters()
         );
+
+        assertEquals(List.of(1, 2, 3), model.bindingParameterIndexes());
     }
 
     /**
@@ -10272,5 +10327,149 @@ class QueryAnalyzerTest {
             "SELECT queries must be declared as :one, :optional, or :many",
             exception.getMessage()
         );
+    }
+
+    /**
+     * A {@code WITH} body that is a set operation is analyzed as a top-level
+     * one is, so the derived source it declares exposes the leftmost branch's
+     * names, the type the branches resolve to, and the nullability the operator
+     * states. A query reading that source types its own placeholder from one of
+     * those columns, and every placeholder binds in the textual order the query
+     * writes it in, across the branches of the body and the outer query alike.
+     */
+    @Test
+    void shouldAnalyzeASetOperationAsACommonTableExpressionBody() {
+        String sql = """
+            WITH combined AS (SELECT id AS value, score
+                              FROM users
+                              WHERE name = $3
+                              UNION
+                              SELECT parent_id, visits
+                              FROM users
+                              WHERE bio = $2)
+            SELECT value, score
+            FROM combined
+            WHERE value = $1
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListCombined", QueryType.MANY, sql),
+            parser.parse(sql),
+            setOperationSchema
+        );
+
+        assertEquals("combined", model.table());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("value", ColumnType.BIGINT, true),
+                new QueryColumn("score", ColumnType.INTEGER, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "value", ColumnType.BIGINT),
+                new QueryParameter(2, "bio", ColumnType.TEXT),
+                new QueryParameter(3, "name", ColumnType.VARCHAR)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(3, 2, 1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A subquery source that is a set operation declares the same derived
+     * source a {@code WITH} body of that set operation does, under its alias,
+     * so a placeholder compared with one of its columns is typed from the type
+     * the branches resolved to.
+     */
+    @Test
+    void shouldAnalyzeASetOperationAsASubquerySource() {
+        String sql = """
+            SELECT s.value, s.score
+            FROM (SELECT id AS value, score
+                  FROM users
+                  WHERE name = $3
+                  UNION
+                  SELECT parent_id, visits
+                  FROM users
+                  WHERE bio = $2) s
+            WHERE s.score = $1
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListCombined", QueryType.MANY, sql),
+            parser.parse(sql),
+            setOperationSchema
+        );
+
+        assertEquals("s", model.table());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("value", ColumnType.BIGINT, true),
+                new QueryColumn("score", ColumnType.INTEGER, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "score", ColumnType.INTEGER),
+                new QueryParameter(2, "bio", ColumnType.TEXT),
+                new QueryParameter(3, "name", ColumnType.VARCHAR)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(3, 2, 1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A set operation nested in a {@code WITH} body, a subquery source, or a
+     * predicate keeps the rejections of a top-level one: {@code MINUS}, which
+     * PostgreSQL does not have, wherever the set operation stands, and, where
+     * the nested set operation states result columns, branches selecting
+     * different numbers of them and an {@code ORDER BY} naming none of them.
+     * The columns it exposes are checked for distinct names as every derived
+     * source's are.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "MANY|WITH combined AS (SELECT id FROM users UNION SELECT id, name FROM users)"
+                + " SELECT id FROM combined"
+                + "|Every branch of a set operation must select the same number of columns;"
+                + " the first selects 1 and branch 2 selects 2.",
+            "MANY|SELECT s.id FROM (SELECT id FROM users MINUS SELECT parent_id FROM users) s"
+                + "|MINUS is not supported; write EXCEPT.",
+            "MANY|SELECT id FROM users"
+                + " WHERE EXISTS (SELECT 1 FROM profiles MINUS SELECT 1 FROM profiles)"
+                + "|MINUS is not supported; write EXCEPT.",
+            "MANY|SELECT s.id FROM (SELECT id FROM users"
+                + " UNION SELECT parent_id FROM users ORDER BY name) s"
+                + "|ORDER BY name must name a result column of the set operation,"
+                + " such as ORDER BY id.",
+            "MANY|SELECT s.id FROM (SELECT id, parent_id AS ID FROM users"
+                + " UNION SELECT id, parent_id FROM users) s"
+                + "|Derived source s has more than one column named ID;"
+                + " give each a distinct alias."
+        }
+    )
+    void shouldRejectAnExcludedNestedSetOperation(QueryType type, String sql, String message) {
+        Query query = new Query("ReadUsers", type, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, setOperationSchema)
+        );
+
+        assertEquals(message, exception.getMessage());
     }
 }

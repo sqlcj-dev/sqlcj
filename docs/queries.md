@@ -94,9 +94,11 @@ configuration entry.
   like a table, and every column of a left-joined derived source is nullable,
   as it is for a left-joined table.
 - The body of a derived source is analyzed exactly like a top-level `SELECT`:
-  it is classified inside its own parentheses, so a set operation or another
-  statement form there is rejected with that diagnostic; its sources resolve and
-  its joins follow the join rules; its projection follows the projection rules,
+  it is classified inside its own parentheses, so a set operation there is
+  analyzed as [Set operations](#set-operations) states and the source's columns
+  are the ones those rules resolve, while another statement form is rejected
+  with the statement diagnostic; its sources resolve and its joins follow the
+  join rules; its projection follows the projection rules,
   including the rejection of a computed item without a cast and an alias; and
   its `ON`, `WHERE`, `LIMIT`, and `OFFSET` placeholders are typed by those
   clause rules, so `WHERE total = $1` inside a `WITH` body needs no cast.
@@ -434,9 +436,16 @@ accepts `SELECT 1`, a wildcard, and a column whose type sqlcj does not map,
 while a direct column there still names a column of the sources in scope. Its
 own `WITH` list, its sources, its join conditions, and its `WHERE`, `LIMIT`, and
 `OFFSET` clauses follow the rules every analyzed nested `SELECT` follows, which
-[Sources](#sources) states, so a set operation inside it is rejected with the
-set-operation diagnostic, and a `WITH` body or a subquery source declared inside
-it sees no source of the query around it.
+[Sources](#sources) states, and a `WITH` body or a subquery source declared
+inside it sees no source of the query around it.
+
+A set operation inside such a predicate is analyzed branch by branch: each
+branch follows these same predicate rules against the levels around it, so
+`SELECT 1` branches and a correlated `WHERE` are both accepted, `MINUS` is
+rejected, and the `LIMIT` and `OFFSET` paging the list are typed `INTEGER`.
+Because the predicate states no result column of the query, PostgreSQL alone
+checks that the branches pair their columns and that an `ORDER BY` names one of
+them.
 
 A subquery in any other location keeps its unanalyzed handling, in which only a
 cast types a placeholder: `= ANY (SELECT ...)`, `IN ((SELECT ...))`, a bare
@@ -576,11 +585,14 @@ ORDER BY label
 LIMIT $1;
 ```
 
-- The set operation must be the query itself, written directly or inside
-  parentheses. A `WITH` body, a subquery source, a predicate subquery, and the
-  row source of an `INSERT` are each analyzed as a single `SELECT`, so a set
-  operation there is still rejected as
-  [Rejected](#rejected) states.
+- A set operation may be the query itself, written directly or inside
+  parentheses, the body of a `WITH` clause, a subquery source of a read or of an
+  `UPDATE ... FROM` or `DELETE ... USING` clause, or the query of a predicate
+  subquery. A `WITH` body and a subquery source expose the result columns these
+  rules resolve, as [Sources](#sources) states, and a predicate subquery states
+  no result column, so only its branches, its operators, and its own paging are
+  analyzed there, as [Predicates](#predicates) states. The row source of an
+  `INSERT` is rejected as [Rejected](#rejected) states.
 - Each branch is analyzed exactly like a top-level `SELECT`: it is classified
   inside its own parentheses, so a parenthesized branch may hold a set
   operation of its own, which is the grouping the parentheses write, or a
@@ -1393,14 +1405,14 @@ query name, and its header line.
   `Only SELECT, INSERT, UPDATE, and DELETE statements are supported.` before the
   annotation is checked. A parenthesized `SELECT` is the query it encloses, at
   any depth, so it is analyzed as that query.
-- A set operation written where this subset analyzes none: a `WITH` body, a
-  subquery source, a predicate subquery, and the row source of an `INSERT` are
-  each classified inside their own parentheses as a single `SELECT`, so a set
-  operation there is rejected as
-  `UNION, INTERSECT, and EXCEPT are not supported; write one query per SELECT.`
-  and another statement form, such as a `VALUES` body of a `WITH` item, with
-  the statement diagnostic. A top-level set operation, written directly or
-  inside parentheses, is analyzed as
+- A set operation as the row source of an `INSERT`, classified inside its own
+  parentheses, which pairs its own branches' columns rather than the insert's
+  written column list, rejected as
+  `A set operation as the row source of INSERT is not supported; select from it
+  as a subquery, such as SELECT * FROM (SELECT ... UNION SELECT ...) AS
+  combined.` The named rewrite is analyzed, and another statement form of a row
+  source, such as a `VALUES` body of a `WITH` item, keeps the statement
+  diagnostic. Every other location of a set operation is analyzed as
   [Set operations](#set-operations) states.
 - A set operation whose branches select different numbers of columns, whose
   column types resolve to no single type, whose `ORDER BY` names no result
@@ -1883,7 +1895,7 @@ Reads:
   `QueryAnalyzerTest.shouldAcceptPredicateSubquerySelectItems`,
   `QueryAnalyzerTest.shouldAcceptAnUnmappedColumnOfAPredicateSubquerySelectList`,
   `QueryAnalyzerTest.shouldRejectAnUnknownColumnOfAPredicateSubquerySelectList`,
-  `QueryAnalyzerTest.shouldRejectASetOperationInsideAPredicateSubquery`, and
+  `QueryAnalyzerTest.shouldAnalyzeASetOperationInsideAPredicateSubquery`, and
   `QueryAnalyzerTest.shouldResolveAWriteCommonTableExpressionInsideItsPredicateSubquery`
   cover the predicate subqueries: each analyzed form in a read's `WHERE`, a
   join `ON` condition, an `UPDATE`, a `DELETE`, and a `DO UPDATE` predicate,
@@ -1895,8 +1907,10 @@ Reads:
   level rejected; one name shared by two levels as one parameter; the textual
   binding order across levels; the placeholder of a negated predicate; the
   select-list items a subquery accepts, an unmapped column included, and the
-  unknown one it rejects; the set operation rejected inside one; and a write's
-  `WITH` clause read by its own predicate subquery;
+  unknown one it rejects; a set operation analyzed branch by branch inside an
+  `EXISTS`, an `IN`, and a scalar comparison of a read and inside a `DELETE`
+  predicate, with its own paging typed; and a write's `WITH` clause read by its
+  own predicate subquery;
   `SqlcjCompilerIntegrationTest.shouldGenerateCompilableJavaForPredicateSubqueries`
   compiles a repository over uncast `EXISTS`, `NOT EXISTS`, and `IN` membership
   checks, and
@@ -1928,8 +1942,10 @@ Reads:
   `QueryAnalyzerTest.shouldAnalyzeAParenthesizedSetOperationBranch`,
   `QueryAnalyzerTest.shouldResolveTheOwnClausesOfANestedSetOperationBranch`,
   `QueryAnalyzerTest.shouldRejectANestedSetOperationOrderingOutsideItsResultColumns`,
-  and
-  `QueryAnalyzerTest.shouldRejectASetOperationWithoutResultQueryType` cover the
+  `QueryAnalyzerTest.shouldRejectASetOperationWithoutResultQueryType`,
+  `QueryAnalyzerTest.shouldAnalyzeASetOperationAsACommonTableExpressionBody`,
+  `QueryAnalyzerTest.shouldAnalyzeASetOperationAsASubquerySource`, and
+  `QueryAnalyzerTest.shouldRejectAnExcludedNestedSetOperation` cover the
   set operations: each operator with and without `ALL`, the nullability of its
   own operator and of `INTERSECT` grouped before `UNION` and `EXCEPT`, every
   widening rule in both branch orders, one identical enum and array type, every
@@ -1940,19 +1956,26 @@ Reads:
   and the trailing page, the orderings named by column, by position, and by an
   unknown or qualified reference, the `WITH` clause every branch reads, a
   parenthesized and a nested branch, the ordering and the paging a nested
-  branch carries itself, and the result annotation such a read requires, while
-  `QueryAnalyzerTest.shouldRejectExcludedDerivedSourceForm`,
-  `QueryAnalyzerTest.shouldRejectASetOperationInsideAPredicateSubquery`, and
-  `QueryAnalyzerTest.shouldRejectASetOperationAsAnInsertRowSource` keep the
-  rejection of a set operation in a `WITH` body, a subquery source, a predicate
-  subquery, and an `INSERT` row source;
+  branch carries itself, the result annotation such a read requires, and the
+  nested locations: the names, the widened type, the operator nullability, and
+  the outer placeholder of a `WITH` body and of a subquery source, the textual
+  binding order across their branches and the query reading them, and the
+  column-count, `MINUS`, nested `ORDER BY`, and distinct-name rejections those
+  locations keep, while
+  `QueryAnalyzerTest.shouldRejectASetOperationAsAnInsertRowSource` and
+  `QueryAnalyzerTest.shouldAnalyzeAnInsertSelectFromASetOperationSubquerySource`
+  cover the rejection of a set operation as an `INSERT` row source and the
+  subquery rewrite that diagnostic names;
   `SqlcjCompilerIntegrationTest.shouldGenerateCompilableJavaForSetOperations`
   compiles a repository over an ordered and paged `UNION`, an `EXCEPT ALL` of a
   parenthesized `INTERSECT`, and a `UNION` of whole-row branches that returns
   the shared row record;
   `PostgresIntegrationTest.shouldExecuteGeneratedSetOperationsAgainstPostgres`
   executes `UNION`, `UNION ALL`, `INTERSECT`, `EXCEPT`, and a trailing `LIMIT`
-  against PostgreSQL 16, and
+  against PostgreSQL 16,
+  `PostgresIntegrationTest.shouldExecuteGeneratedNestedSetOperationsAgainstPostgres`
+  executes a `UNION` as a `WITH` body, a `UNION ALL` subquery source filtered
+  through its resolved column, and a `UNION` inside an `IN` predicate, and
   `PostgresIntegrationTest.shouldResolveSetOperationColumnTypesAsPostgresDoes`
   confirms every widening rule and both character orders against the column
   type PostgreSQL 16 itself reports for the same query; and
@@ -2126,9 +2149,8 @@ Unsupported queries and internal errors:
 
 - `SqlcjCompilerIntegrationTest.shouldRejectUnsupportedQueryBeforeWriting`
   covers the whole located diagnostic line, and the absence of generated
-  output, of each rejected input: the set operations written directly and in
-  parentheses, the `VALUES`, `TABLE`, `MERGE`, `TRUNCATE`, `EXPLAIN`,
-  `EXECUTE`, `CREATE TABLE`, and `SET` statements, a window and a
+  output, of each rejected input: the `VALUES`, `TABLE`, `MERGE`, `TRUNCATE`,
+  `EXPLAIN`, `EXECUTE`, `CREATE TABLE`, and `SET` statements, a window and a
   concatenation projection, a computed `RETURNING` item, the `RIGHT`, `FULL`,
   `USING`, `NATURAL`, `CROSS`, comma, and `LATERAL` joins, a column list on a
   subquery alias, a subquery source without an alias, a `WITH RECURSIVE`
