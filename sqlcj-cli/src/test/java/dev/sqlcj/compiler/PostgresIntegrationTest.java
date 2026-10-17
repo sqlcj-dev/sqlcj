@@ -1432,6 +1432,101 @@ class PostgresIntegrationTest {
     }
 
     /**
+     * Covers the typed aggregates end to end: a {@code :one} read of a count,
+     * a distinct count, a minimum, a maximum, a sum, and an average, none of
+     * them cast, is generated, compiled, and executed against PostgreSQL, so
+     * each component carries the Java type its aggregate produces and reads
+     * its value for a matching filter. Over no matching row the counts are
+     * {@code 0} and every other component is {@code null}.
+     */
+    @Test
+    void shouldExecuteGeneratedAggregatesAgainstPostgres() throws Exception {
+        Path classesDirectory = generateAndCompile("""
+            -- name: SummarizeUsersByName :one
+            SELECT COUNT(id)            AS users,
+                   COUNT(DISTINCT code) AS codes,
+                   MIN(created_at)      AS first_created_at,
+                   MAX(created_at)      AS last_created_at,
+                   SUM(code)            AS code_total,
+                   AVG(balance)         AS average_balance
+            FROM users
+            WHERE name LIKE $1;
+            """);
+
+        execute("""
+            INSERT INTO users (id, code, name, created_at, balance)
+            VALUES
+                (1, 1, 'Alice', TIMESTAMP '2026-01-01 10:00:00', 10.50),
+                (2, 1, 'Amy', TIMESTAMP '2026-02-02 11:00:00', 2.50),
+                (3, 3, 'Bob', TIMESTAMP '2026-03-03 12:00:00', 100.00)
+            """);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Method summarize = repository.getClass().getMethod(
+                "summarizeUsersByName",
+                String.class
+            );
+
+            Object matching = summarize.invoke(repository, "A%");
+
+            assertEquals(
+                List.of(
+                    "users",
+                    "codes",
+                    "firstCreatedAt",
+                    "lastCreatedAt",
+                    "codeTotal",
+                    "averageBalance"
+                ),
+                recordComponentNames(matching)
+            );
+
+            assertEquals(
+                List.of(
+                    Long.class,
+                    Long.class,
+                    LocalDateTime.class,
+                    LocalDateTime.class,
+                    Long.class,
+                    BigDecimal.class
+                ),
+                recordComponentTypes(matching)
+            );
+
+            assertEquals(2L, component(matching, "users"));
+            assertEquals(1L, component(matching, "codes"));
+
+            assertEquals(
+                LocalDateTime.of(2026, 1, 1, 10, 0),
+                component(matching, "firstCreatedAt")
+            );
+
+            assertEquals(
+                LocalDateTime.of(2026, 2, 2, 11, 0),
+                component(matching, "lastCreatedAt")
+            );
+
+            assertEquals(2L, component(matching, "codeTotal"));
+
+            assertEquals(
+                new BigDecimal("6.5"),
+                ((BigDecimal) component(matching, "averageBalance")).stripTrailingZeros()
+            );
+
+            Object empty = summarize.invoke(repository, "Z%");
+
+            assertEquals(0L, component(empty, "users"));
+            assertEquals(0L, component(empty, "codes"));
+            assertNull(component(empty, "firstCreatedAt"));
+            assertNull(component(empty, "lastCreatedAt"));
+            assertNull(component(empty, "codeTotal"));
+            assertNull(component(empty, "averageBalance"));
+        }
+    }
+
+    /**
      * Covers a cast projection end to end: a {@code :one} read whose single
      * projection is a cast aggregate is generated, compiled, and executed
      * against PostgreSQL, so its result record exposes one nullable

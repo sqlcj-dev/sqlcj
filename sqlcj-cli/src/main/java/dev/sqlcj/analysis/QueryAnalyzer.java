@@ -71,8 +71,10 @@ import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 public final class QueryAnalyzer {
@@ -102,13 +104,24 @@ public final class QueryAnalyzer {
 
     /**
      * The rejection of a projected expression that is neither a column, a
-     * wildcard, the scalar count, nor a cast, which is written as the query
-     * spells it. A cast states the type of such a projection, so the rejection
-     * names that fix.
+     * wildcard, a typed aggregate, nor a cast, which is written as the query
+     * spells it. An aggregate outside the typed forms, such as one of an
+     * argument or a column type PostgreSQL defines no such aggregate for, is
+     * one of them. A cast states the type of such a projection, so the
+     * rejection names that fix.
      */
     private static final String COMPUTED_PROJECTION_REJECTION = """
         Cannot infer the type of %s in SELECT; state it with a cast and an alias, \
         such as SUM(amount)::numeric AS total""";
+
+    /**
+     * The rejection of a typed aggregate projection without a result alias,
+     * which names one result component. Both the rejected item and the example
+     * are the aggregate as the query writes it, so the named fix is the
+     * query's own aggregate followed by an alias.
+     */
+    private static final String AGGREGATE_ALIAS_REJECTION = """
+        %s requires a result alias, such as %s AS total.""";
 
     /**
      * The rejection of a returned item that is neither a column of the write
@@ -247,6 +260,47 @@ public final class QueryAnalyzer {
      * PostgreSQL resolves it.
      */
     private static final String EXCLUDED_QUALIFIER = "EXCLUDED";
+
+    /**
+     * The scalar types PostgreSQL 16 defines no {@code MIN} and no {@code MAX}
+     * for, because it orders no two values of them. An array of such a type is
+     * ordered, so a column of one is excluded only where it is scalar.
+     */
+    private static final Set<ColumnType> UNORDERED_TYPES = Set.of(
+        ColumnType.BOOLEAN,
+        ColumnType.UUID,
+        ColumnType.BYTEA,
+        ColumnType.JSON,
+        ColumnType.JSONB
+    );
+
+    /**
+     * The type of a {@code SUM} of each scalar type PostgreSQL 16 defines one
+     * for, which widens an integral type so that the sum of many rows fits. A
+     * type this table does not name has no sum, an array included.
+     */
+    private static final Map<ColumnType, ColumnType> SUM_TYPES = Map.of(
+        ColumnType.SMALLINT, ColumnType.BIGINT,
+        ColumnType.INTEGER, ColumnType.BIGINT,
+        ColumnType.BIGINT, ColumnType.DECIMAL,
+        ColumnType.DECIMAL, ColumnType.DECIMAL,
+        ColumnType.REAL, ColumnType.REAL,
+        ColumnType.DOUBLE_PRECISION, ColumnType.DOUBLE_PRECISION
+    );
+
+    /**
+     * The type of an {@code AVG} of each scalar type PostgreSQL 16 defines one
+     * for, which is exact for an exact input and floating for a floating one.
+     * A type this table does not name has no average, an array included.
+     */
+    private static final Map<ColumnType, ColumnType> AVERAGE_TYPES = Map.of(
+        ColumnType.SMALLINT, ColumnType.DECIMAL,
+        ColumnType.INTEGER, ColumnType.DECIMAL,
+        ColumnType.BIGINT, ColumnType.DECIMAL,
+        ColumnType.DECIMAL, ColumnType.DECIMAL,
+        ColumnType.REAL, ColumnType.DOUBLE_PRECISION,
+        ColumnType.DOUBLE_PRECISION, ColumnType.DOUBLE_PRECISION
+    );
 
     /**
      * Resolves the Java type of parameter occurrence, which decides whether a
@@ -3488,7 +3542,9 @@ public final class QueryAnalyzer {
 
     /**
      * Resolves one projection item that is not a wildcard into its single
-     * column.
+     * column: a direct column, an aliased aggregate this subset types, or an
+     * aliased cast. Every other item is a computed projection, which a cast
+     * states the type of.
      */
     private dev.sqlcj.schema.Column resolveColumnItem(
         SelectItem<?> selectItem,
@@ -3514,8 +3570,16 @@ public final class QueryAnalyzer {
             );
         }
 
-        if (expression instanceof Function function && isScalarCount(function)) {
-            return scalarCountColumn(selectItem.getAlias());
+        if (expression instanceof Function function) {
+            dev.sqlcj.schema.Column aggregate = aggregateColumn(
+                function,
+                selectItem.getAlias(),
+                scope
+            );
+
+            if (aggregate != null) {
+                return aggregate;
+            }
         }
 
         if (expression instanceof CastExpression cast && cast.getColDataType() != null) {
@@ -3532,44 +3596,150 @@ public final class QueryAnalyzer {
     }
 
     /**
-     * Reports whether a projected function is the supported scalar count, which
-     * is an unqualified case-insensitive {@code COUNT} whose single argument is
-     * exactly {@code *}. A qualified name such as {@code pg_catalog.count(*)},
-     * a {@code DISTINCT} count, and {@code COUNT(t.*)}, whose argument is a
-     * subtype of the {@code COUNT(*)} argument, are other functions.
+     * Resolves one projected aggregate into its single result column, and
+     * reports {@code null} for a function this rule types no result of, which
+     * the computed-projection rejection then names as the query writes it.
+     *
+     * <p>A typed aggregate is an unqualified case-insensitive {@code COUNT},
+     * {@code MIN}, {@code MAX}, {@code SUM}, or {@code AVG} of exactly one
+     * argument, written with or without {@code DISTINCT} or {@code ALL}, so a
+     * qualified name such as {@code pg_catalog.count(*)}, another function, and
+     * the {@code FILTER} and {@code OVER} forms, which the parser reports as
+     * expressions of their own, are typed by no rule here. The shape and the
+     * argument are checked before the alias is required, so an aggregate this
+     * rule types no result of says why rather than that it is unnamed.
+     *
+     * <p>A {@code COUNT} is a non-null {@code BIGINT} of any argument, because
+     * {@code count} returns {@code bigint} and counts {@code 0} rows rather
+     * than none: a direct column resolves against the query's sources whether
+     * or not its type is mapped, {@code COUNT(<source>.*)} resolves its
+     * qualifier, and any other argument reaches the database as written. Only
+     * {@code *} written with {@code DISTINCT} or {@code ALL} is left untyped,
+     * because PostgreSQL's grammar admits {@code *} alone.
+     *
+     * <p>{@code MIN}, {@code MAX}, {@code SUM}, and {@code AVG} take one
+     * direct, unsubscripted column of a mapped type and are nullable, because
+     * each reads {@code NULL} over no row. {@code MIN} and {@code MAX} take the
+     * column's own type, its enum type, its array spelling, and its
+     * blank-padded spelling included; {@code SUM} and {@code AVG} take the type
+     * PostgreSQL 16 defines for the column's scalar type. A column of any other
+     * type is left untyped, because PostgreSQL defines no such aggregate for
+     * it.
      */
-    private boolean isScalarCount(Function function) {
+    private dev.sqlcj.schema.Column aggregateColumn(
+        Function function,
+        Alias alias,
+        Scope scope
+    ) {
         List<String> name = function.getMultipartName();
-
-        if (name == null || name.size() != 1 || !name.get(0).equalsIgnoreCase("count")) {
-            return false;
-        }
-
-        if (function.isDistinct()) {
-            return false;
-        }
-
         ExpressionList<?> arguments = function.getParameters();
 
-        return arguments != null
-            && arguments.size() == 1
-            && arguments.get(0).getClass() == AllColumns.class;
+        if (name == null || name.size() != 1 || arguments == null || arguments.size() != 1) {
+            return null;
+        }
+
+        String aggregate = name.get(0).toLowerCase(Locale.ROOT);
+        Expression argument = arguments.get(0);
+
+        if (aggregate.equals("count")) {
+            return countedColumn(function, alias, argument, scope);
+        }
+
+        boolean extremum = aggregate.equals("min") || aggregate.equals("max");
+
+        Map<ColumnType, ColumnType> scalarTypes = switch (aggregate) {
+            case "sum" -> SUM_TYPES;
+            case "avg" -> AVERAGE_TYPES;
+            default -> Map.of();
+        };
+
+        if (!extremum && scalarTypes.isEmpty()) {
+            return null;
+        }
+
+        net.sf.jsqlparser.schema.Column argumentColumn = directColumn(argument);
+
+        if (argumentColumn == null) {
+            return null;
+        }
+
+        dev.sqlcj.schema.Column column = resolveColumn(argumentColumn, scope).column();
+        ColumnType type = requireSupportedType(column);
+
+        if (extremum) {
+            return column.array() || !UNORDERED_TYPES.contains(type)
+                ? new dev.sqlcj.schema.Column(
+                    aggregateName(function, alias),
+                    type,
+                    true,
+                    null,
+                    column.enumType(),
+                    column.array(),
+                    column.blankPadded()
+                )
+                : null;
+        }
+
+        ColumnType aggregated = column.array()
+            ? null
+            : scalarTypes.get(type);
+
+        return aggregated == null
+            ? null
+            : new dev.sqlcj.schema.Column(aggregateName(function, alias), aggregated, true);
     }
 
     /**
-     * Resolves the scalar count projection into its single result column, which
-     * is named after the required alias. The column is {@code BIGINT} because
-     * {@code count(*)} returns {@code bigint}, and it is non-null because a
-     * count is always a number, {@code 0} when no row matches.
+     * Resolves a projected {@code COUNT} of one argument into its single result
+     * column, and reports {@code null} for the one argument shape PostgreSQL
+     * counts no rows of, a {@code *} written with {@code DISTINCT} or
+     * {@code ALL}.
+     *
+     * <p>A direct column and the qualifier of {@code COUNT(<source>.*)} resolve
+     * against the query's sources, which rejects a reference no source exposes,
+     * while the type of a counted column is never read, so a column of an
+     * unmapped type is counted too. Every other argument reaches the database
+     * as written, as the operand of a cast projection does.
      */
-    private dev.sqlcj.schema.Column scalarCountColumn(Alias alias) {
+    private dev.sqlcj.schema.Column countedColumn(
+        Function function,
+        Alias alias,
+        Expression argument,
+        Scope scope
+    ) {
+        net.sf.jsqlparser.schema.Column counted = directColumn(argument);
+
+        if (argument.getClass() == AllColumns.class) {
+            if (function.isDistinct() || function.isAllColumns()) {
+                return null;
+            }
+        } else if (argument instanceof AllTableColumns qualified) {
+            findSource(scope, qualified.getTable().getUnquotedName());
+        } else if (counted != null) {
+            resolveColumn(counted, scope);
+        }
+
+        return new dev.sqlcj.schema.Column(
+            aggregateName(function, alias),
+            ColumnType.BIGINT,
+            false
+        );
+    }
+
+    /**
+     * The name a typed aggregate's result column takes, which is its required
+     * alias, written with or without {@code AS}. The aggregate itself names no
+     * column, so a missing alias is rejected naming the aggregate as the query
+     * writes it.
+     */
+    private String aggregateName(Function function, Alias alias) {
         if (alias == null) {
             throw new UnsupportedOperationException(
-                "COUNT(*) requires a result alias, such as COUNT(*) AS total."
+                AGGREGATE_ALIAS_REJECTION.formatted(written(function), written(function))
             );
         }
 
-        return new dev.sqlcj.schema.Column(alias.getUnquotedName(), ColumnType.BIGINT, false);
+        return alias.getUnquotedName();
     }
 
     /**
