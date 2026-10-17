@@ -154,6 +154,49 @@ the application decides whether to continue or roll back.
 The runtime is blocking and synchronous. An executor built on a caller-owned
 connection inherits that connection's confinement to a single thread at a time.
 
+A framework that manages transactions itself owns the connection, so a
+generated repository takes part in such a transaction by executing on the
+connection the framework bound to it. In Spring that connection is reached
+through `org.springframework.jdbc.datasource.TransactionAwareDataSourceProxy`,
+which wraps the application's `DataSource`, so the repository is built over an
+executor on that proxy:
+
+```java
+@Bean
+AuthorRepository authorRepository(DataSource dataSource) {
+    return new AuthorRepository(
+        new JdbcQueryExecutor(new TransactionAwareDataSourceProxy(dataSource))
+    );
+}
+```
+
+The proxy wraps only the `DataSource` handed to `JdbcQueryExecutor`. The
+transaction manager keeps the plain `DataSource`: a
+`DataSourceTransactionManager` is built on it, and with JPA the
+`EntityManagerFactory` is built on that same `DataSource` and the
+`JpaTransactionManager` on that factory. Inside a transaction of either
+manager, the operations of a repository bound to the proxy run on the
+transaction's connection, so its writes are committed or rolled back with that
+transaction, a JPA write in the same transaction included.
+
+Two consequences follow from the connection the proxy returns:
+
+- A repository built over the plain `DataSource` obtains a connection of its
+  own, so it runs outside the surrounding transaction: its write is committed
+  at once and survives a rollback of that transaction.
+- A pending JPA change is visible to a sqlcj read in the same transaction only
+  after `EntityManager.flush()`, because that read reaches the database and not
+  the persistence context. A `persist` of an entity with an assigned key, for
+  instance, is written at the flush, after which the same read returns the row.
+
+`JdbcTransactions` is not used inside a framework's transaction: it obtains a
+connection of its own, so its work would be a second, independent transaction.
+Inside a Spring-managed transaction the transaction belongs to Spring, and the
+repository takes part through the proxy alone.
+
+Spring and a JPA provider are used only by sqlcj's own tests, which verify the
+behavior above; neither the runtime nor the generated code depends on either.
+
 Behavior is verified against PostgreSQL 16. The pipeline is executed end to end
 against a `postgres:16-alpine` container: the schema snapshot is run as
 PostgreSQL DDL, the generated Java is compiled, and the generated repository is
@@ -161,8 +204,8 @@ executed through the JDBC runtime. Those tests are skipped when Docker is
 unavailable.
 
 H2 is used only inside sqlcj's own tests as a convenience database and is not a
-supported target. The PostgreSQL driver, the container library, and H2 are all
-test-scoped dependencies of the build.
+supported target. The PostgreSQL driver, the container library, H2, Spring
+Framework, and Hibernate ORM are all test-scoped dependencies of the build.
 
 ## Schema Snapshot Input
 
@@ -1340,3 +1383,21 @@ Connection ownership and transactions:
   finds none of them after a runtime exception, an error, and the cardinality
   failure of a generated `:one` query; both assert that the callback's
   connection is closed afterwards.
+- `SpringTransactionIntegrationTest` covers the Spring-managed transaction over
+  PostgreSQL 16, with a repository bound to a
+  `TransactionAwareDataSourceProxy` and each transaction manager given the
+  plain `DataSource` or the entity factory built on it:
+  `shouldCommitGeneratedWritesWithTheDataSourceTransactionManager` and
+  `shouldRollBackGeneratedWritesWithTheDataSourceTransactionManager` commit and
+  roll back two generated writes of a `DataSourceTransactionManager`
+  transaction, the first also finding neither write through a plain
+  `DataSource` repository while the transaction is open;
+  `shouldLeaveAPlainDataSourceRepositoryOutsideTheTransaction` keeps the write
+  made through a plain `DataSource` repository after that transaction rolls
+  back and removes the write made through the proxy;
+  `shouldCommitAJpaWriteAndAGeneratedWriteInOneTransaction` and
+  `shouldRollBackAJpaWriteAndAGeneratedWriteInOneTransaction` commit and roll
+  back a `persist` of a JPA entity beside a generated write in one
+  `JpaTransactionManager` transaction; and
+  `shouldSeeAPendingJpaWriteOnlyAfterAFlush` covers the deferred `persist` a
+  generated read finds only after `EntityManager.flush()`.
