@@ -243,3 +243,38 @@ FROM comments c
     USING tasks t
 WHERE t.id = c.task_id
   AND t.project_id = :projectId;
+
+-- name: ListProjectsWithOpenTaskCount :many
+SELECT p.*,
+       COUNT(t.id) AS open_tasks
+FROM projects p
+         LEFT JOIN tasks t ON t.project_id = p.id AND t.status = 'open'
+WHERE p.organization_id = :organizationId
+GROUP BY p.id
+ORDER BY p.id;
+
+-- name: ListTasksWithLastComment :many
+SELECT t.*,
+       MAX(c.created_at) AS last_comment_at
+FROM tasks t
+         LEFT JOIN comments c ON c.task_id = t.id
+WHERE t.project_id = :projectId
+GROUP BY t.id
+ORDER BY t.id;
+
+-- name: ListTasksWithProject :many
+SELECT t.*,
+       p.*
+FROM tasks t
+         JOIN projects p ON p.id = t.project_id
+WHERE p.organization_id = :organizationId
+ORDER BY t.id;
+
+-- name: ListProjectsWithTheirTasks :many
+SELECT t.*,
+       p.*
+FROM projects p
+         LEFT JOIN tasks t ON t.project_id = p.id
+WHERE p.organization_id = :organizationId
+ORDER BY p.id,
+         t.id;

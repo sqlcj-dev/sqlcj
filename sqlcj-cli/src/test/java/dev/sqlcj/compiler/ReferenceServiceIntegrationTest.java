@@ -29,6 +29,7 @@ import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
@@ -45,6 +46,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -961,6 +963,160 @@ class ReferenceServiceIntegrationTest {
             assertEquals(List.of("COPY", "NEST"), componentsOf(bothProjects, "code"));
 
             assertEquals(List.of(2L, 2L), componentsOf(bothProjects, "openTasks"));
+        }
+    }
+
+    /**
+     * The generated repository executes the result shapes this milestone adds
+     * against the migrated database: the list-with-count and the
+     * latest-activity reads, whose uncast {@code COUNT} and {@code MAX} stand
+     * beside an embedded table row, and the inner-joined and left-joined
+     * {@code SELECT t.*, p.*} reads, whose left-joined task row is absent for
+     * a project without tasks.
+     *
+     * <p>The database is shared with the other tests of this class, so this one
+     * works inside its own organization, projects, and user, and writes no
+     * audit entry.
+     */
+    @Test
+    void shouldExecuteTheGeneratedResultShapes() throws Exception {
+        Path generatedDirectory = tempDir.resolve("generated-rows");
+
+        generate(List.of(migrations().toString()), generatedDirectory);
+
+        Path classesDirectory = compile(generatedDirectory, tempDir.resolve("classes-rows"));
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Long organizationId = (Long) component(
+                invoke(repository, "createOrganization", "Row Test", "{}"),
+                "id"
+            );
+
+            Object rowsProject = invoke(
+                repository,
+                "createProject",
+                organizationId,
+                "ROWS",
+                "Rows"
+            );
+
+            Object emptyProject = invoke(
+                repository,
+                "createProject",
+                organizationId,
+                "EMPTY",
+                "Empty"
+            );
+
+            Long rowsId = (Long) component(rowsProject, "id");
+
+            Object open = enumConstant(classLoader, "TaskStatus", "OPEN");
+            Object doing = enumConstant(classLoader, "TaskStatus", "DOING");
+
+            Object alpha = createShapeTask(repository, rowsId, "Alpha", (short) 1, open);
+            Object beta = createShapeTask(repository, rowsId, "Beta", (short) 2, doing);
+
+            Long alphaId = (Long) component(alpha, "id");
+
+            Long authorId = (Long) component(
+                invoke(repository, "createUser", organizationId, "alan@example.com", "Alan Turing"),
+                "id"
+            );
+
+            Object firstComment = invoke(repository, "addComment", alphaId, authorId, "First.");
+            Object secondComment = invoke(repository, "addComment", alphaId, authorId, "Second.");
+
+            Instant firstCommentAt = ((OffsetDateTime) component(firstComment, "createdAt"))
+                .toInstant();
+
+            Instant secondCommentAt = ((OffsetDateTime) component(secondComment, "createdAt"))
+                .toInstant();
+
+            Instant lastCommentAt = firstCommentAt.isAfter(secondCommentAt)
+                ? firstCommentAt
+                : secondCommentAt;
+
+            List<?> withOpenTaskCount = (List<?>) invoke(
+                repository,
+                "listProjectsWithOpenTaskCount",
+                organizationId
+            );
+
+            assertEquals(
+                List.of(rowsProject, emptyProject),
+                componentsOf(withOpenTaskCount, "p"),
+                "the embedded project row is the shared row record the write returned"
+            );
+
+            assertEquals(
+                List.of(1L, 0L),
+                componentsOf(withOpenTaskCount, "openTasks"),
+                "the uncast COUNT counts each project's open tasks"
+            );
+
+            List<?> withLastComment = (List<?>) invoke(
+                repository,
+                "listTasksWithLastComment",
+                rowsId
+            );
+
+            assertEquals(
+                List.of(alpha, beta),
+                componentsOf(withLastComment, "t"),
+                "the embedded task row is the shared row record the write returned"
+            );
+
+            assertEquals(
+                lastCommentAt,
+                ((OffsetDateTime) component(withLastComment.get(0), "lastCommentAt")).toInstant(),
+                "the uncast MAX reads the later comment's timestamp"
+            );
+
+            assertNull(
+                component(withLastComment.get(1), "lastCommentAt"),
+                "the uncast MAX of a task without comments is null"
+            );
+
+            List<?> withProject = (List<?>) invoke(
+                repository,
+                "listTasksWithProject",
+                organizationId
+            );
+
+            assertEquals(List.of(alpha, beta), componentsOf(withProject, "t"));
+
+            assertEquals(List.of(rowsProject, rowsProject), componentsOf(withProject, "p"));
+
+            assertEquals(
+                "TasksRow",
+                component(withProject.get(0), "t").getClass().getSimpleName(),
+                "the inner-joined read embeds the shared task row"
+            );
+
+            assertEquals(
+                "ProjectsRow",
+                component(withProject.get(0), "p").getClass().getSimpleName(),
+                "the inner-joined read embeds the shared project row"
+            );
+
+            List<?> withTheirTasks = (List<?>) invoke(
+                repository,
+                "listProjectsWithTheirTasks",
+                organizationId
+            );
+
+            assertEquals(
+                Arrays.asList(alpha, beta, null),
+                componentsOf(withTheirTasks, "t"),
+                "the left-joined task row is absent for a project without tasks"
+            );
+
+            assertEquals(
+                List.of(rowsProject, rowsProject, emptyProject),
+                componentsOf(withTheirTasks, "p")
+            );
         }
     }
 
