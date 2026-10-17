@@ -11,6 +11,7 @@ import org.sqlcj.config.Config;
 import org.sqlcj.config.JavaConfig;
 import org.sqlcj.config.SqlConfig;
 import org.sqlcj.runtime.JdbcQueryExecutor;
+import org.sqlcj.runtime.JdbcTransactions;
 import org.sqlcj.runtime.QueryCardinalityException;
 import org.sqlcj.runtime.QueryExecutor;
 import org.testcontainers.DockerClientFactory;
@@ -30,6 +31,7 @@ import java.net.URLClassLoader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.time.LocalDate;
@@ -43,6 +45,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -51,6 +54,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -4379,6 +4383,157 @@ class PostgresIntegrationTest {
     }
 
     /**
+     * Runs one transaction through the runtime helper: two generated writes and
+     * a hand-written insert on the connection it handed the callback, and a
+     * generated read that sees all three uncommitted rows. The callback's
+     * normal return commits them, its value becomes the result, and the
+     * connection it ran on is closed afterwards.
+     */
+    @Test
+    void shouldCommitGeneratedAndHandWrittenWritesThroughTheTransactionHelper() throws Exception {
+        Path classesDirectory = generateAndCompile(TRANSACTION_QUERIES + CARDINALITY_QUERIES);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            JdbcTransactions transactions = new JdbcTransactions(dataSource);
+
+            AtomicReference<Connection> used = new AtomicReference<>();
+
+            List<Object> committed = transactions.inTransaction(connection -> {
+                used.set(connection);
+
+                writeUsersOnOneConnection(classLoader, connection, 1L);
+
+                return listUserNames(classLoader, new JdbcQueryExecutor(connection));
+            });
+
+            assertEquals(List.of("Alice", "Bob", "Carol"), committed);
+            assertEquals(List.of("Alice", "Bob", "Carol"), listUserNames(classLoader));
+
+            assertTrue(used.get().isClosed());
+        }
+    }
+
+    /**
+     * Rolls the same generated and hand-written writes back when the callback
+     * fails with a runtime exception, with an error, and with the cardinality
+     * failure of a generated {@code :one} query on the transaction's own
+     * connection. Each failure is rethrown as the same instance, none of the
+     * writes survives, and the connection is closed afterwards.
+     */
+    @Test
+    void shouldRollBackGeneratedAndHandWrittenWritesWhenTheTransactionFails() throws Exception {
+        Path classesDirectory = generateAndCompile(TRANSACTION_QUERIES + CARDINALITY_QUERIES);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            JdbcTransactions transactions = new JdbcTransactions(dataSource);
+
+            AtomicReference<Connection> used = new AtomicReference<>();
+
+            IllegalStateException thrown = new IllegalStateException("callback failed");
+
+            assertSame(
+                thrown,
+                assertThrows(
+                    IllegalStateException.class,
+                    () -> transactions.useTransaction(connection -> {
+                        used.set(connection);
+
+                        writeUsersOnOneConnection(classLoader, connection, 1L);
+
+                        throw thrown;
+                    })
+                )
+            );
+
+            assertEquals(List.of(), listUserNames(classLoader));
+            assertTrue(used.get().isClosed());
+
+            CallbackError error = new CallbackError();
+
+            assertSame(
+                error,
+                assertThrows(
+                    CallbackError.class,
+                    () -> transactions.useTransaction(connection -> {
+                        writeUsersOnOneConnection(classLoader, connection, 1L);
+
+                        throw error;
+                    })
+                )
+            );
+
+            assertEquals(List.of(), listUserNames(classLoader));
+
+            QueryCardinalityException failure = assertThrows(
+                QueryCardinalityException.class,
+                () -> transactions.useTransaction(connection -> {
+                    writeUsersOnOneConnection(classLoader, connection, 1L);
+
+                    Object repository = newRepository(
+                        classLoader,
+                        new JdbcQueryExecutor(connection)
+                    );
+
+                    // The generated :one query runs on the transaction's own
+                    // connection and fails its cardinality check there; only
+                    // the reflective wrapper is removed before the exception
+                    // leaves the callback, as it would in application code.
+                    throw cardinalityFailure(
+                        repository.getClass().getMethod("getUserByCode", Integer.class),
+                        repository,
+                        999
+                    );
+                })
+            );
+
+            assertEquals(
+                "Query 'GetUserByCode' in UsersRepository returned no row; expected exactly one",
+                failure.getMessage()
+            );
+
+            assertEquals(List.of(), listUserNames(classLoader));
+        }
+    }
+
+    /**
+     * Runs a generated affected-row write, a generated returning write, and a
+     * hand-written insert on one connection, so one transaction holds all
+     * three.
+     */
+    private void writeUsersOnOneConnection(
+        URLClassLoader classLoader,
+        Connection connection,
+        long firstId
+    ) throws Exception {
+        QueryExecutor executor = new JdbcQueryExecutor(connection);
+
+        assertEquals(1, insertUser(classLoader, executor, firstId, 42, "Alice"));
+
+        Object returned = insertUserReturningRow(
+            classLoader,
+            executor,
+            firstId + 1,
+            43,
+            "Bob"
+        );
+
+        assertNotNull(returned);
+        assertEquals("Bob", component(returned, "name"));
+
+        try (
+            PreparedStatement statement = connection.prepareStatement(
+                "INSERT INTO users (id, code, name) VALUES (?, ?, ?)"
+            )
+        ) {
+            statement.setLong(1, firstId + 2);
+            statement.setInt(2, 44);
+            statement.setString(3, "Carol");
+
+            assertEquals(1, statement.executeUpdate());
+        }
+    }
+
+    /**
      * Runs a migration directory end to end: PostgreSQL applies the same files
      * the compiler loads as its schema source, in file-name order, and the
      * generated code writes and reads the migrated tables through the renamed
@@ -4749,5 +4904,12 @@ class PostgresIntegrationTest {
             .getClass()
             .getMethod(componentName)
             .invoke(record);
+    }
+
+    /**
+     * An error a transaction callback of these tests throws, distinct from an
+     * assertion failure.
+     */
+    private static final class CallbackError extends Error {
     }
 }
