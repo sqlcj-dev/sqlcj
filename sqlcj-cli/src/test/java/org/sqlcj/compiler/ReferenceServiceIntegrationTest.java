@@ -100,16 +100,6 @@ class ReferenceServiceIntegrationTest {
      */
     private static final List<UnsupportedQuery> UNSUPPORTED_QUERIES = List.of(
         new UnsupportedQuery(
-            "union.sql",
-            "ListProjectAndTaskTitles",
-            "UNION, INTERSECT, and EXCEPT are not supported; write one query per SELECT."
-        ),
-        new UnsupportedQuery(
-            "union_all.sql",
-            "ListEveryProjectAndTaskTitle",
-            "UNION, INTERSECT, and EXCEPT are not supported; write one query per SELECT."
-        ),
-        new UnsupportedQuery(
             "right_join.sql",
             "ListProjectsWithTasks",
             "RIGHT JOIN is not supported; write a LEFT JOIN with the two sources swapped."
@@ -1118,6 +1108,63 @@ class ReferenceServiceIntegrationTest {
                 componentsOf(withTheirTasks, "p")
             );
         }
+    }
+
+    /**
+     * The generated repository executes the set operations this milestone adds
+     * against the migrated database: the project and task titles combined with
+     * {@code UNION}, which returns one row per distinct title, and with
+     * {@code UNION ALL}, which returns one row per selected title.
+     *
+     * <p>Both queries read every project and task of the database, which the
+     * other tests of this class share, so this one works on a title of its own:
+     * one project named after it and two tasks titled the same.
+     */
+    @Test
+    void shouldExecuteTheGeneratedSetOperationQueries() throws Exception {
+        Path generatedDirectory = tempDir.resolve("generated-sets");
+
+        generate(List.of(migrations().toString()), generatedDirectory);
+
+        Path classesDirectory = compile(generatedDirectory, tempDir.resolve("classes-sets"));
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            Long organizationId = (Long) component(
+                invoke(repository, "createOrganization", "Set Test", "{}"),
+                "id"
+            );
+
+            Long projectId = (Long) component(
+                invoke(repository, "createProject", organizationId, "SETS", "Shared Title"),
+                "id"
+            );
+
+            Object open = enumConstant(classLoader, "TaskStatus", "OPEN");
+
+            createShapeTask(repository, projectId, "Shared Title", (short) 1, open);
+            createShapeTask(repository, projectId, "Shared Title", (short) 2, open);
+
+            assertEquals(
+                1,
+                sharedTitles((List<?>) invoke(repository, "listProjectAndTaskTitles")),
+                "UNION returns the repeated title once"
+            );
+
+            assertEquals(
+                3,
+                sharedTitles((List<?>) invoke(repository, "listEveryProjectAndTaskTitle")),
+                "UNION ALL returns the project name and both task titles"
+            );
+        }
+    }
+
+    /** The rows of a title read whose title is the set operation test's own. */
+    private long sharedTitles(List<?> rows) throws Exception {
+        return componentsOf(rows, "title").stream()
+            .filter("Shared Title"::equals)
+            .count();
     }
 
     /**

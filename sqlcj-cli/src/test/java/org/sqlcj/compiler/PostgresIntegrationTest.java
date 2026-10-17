@@ -191,6 +191,93 @@ class PostgresIntegrationTest {
         """;
 
     /**
+     * A snapshot declaring one column of every type a set operation resolves,
+     * so that one branch can select each of them.
+     */
+    private static final String READING_SCHEMA = """
+        CREATE TABLE readings
+        (
+            id          BIGINT PRIMARY KEY,
+            tiny        SMALLINT,
+            counted     INTEGER,
+            total       BIGINT,
+            amount      NUMERIC(10, 2),
+            ratio       REAL,
+            average     DOUBLE PRECISION,
+            label       VARCHAR(50),
+            note        TEXT,
+            taken_on    DATE,
+            taken_at    TIMESTAMP,
+            recorded_at TIMESTAMPTZ
+        );
+        """;
+
+    /**
+     * One set operation type rule: the two columns its branches select, the
+     * Java type sqlcj resolves them to, and PostgreSQL's own name for the
+     * column type it resolves the same query to.
+     */
+    private record SetOperationTypeRule(
+        String name,
+        String first,
+        String second,
+        Class<?> javaType,
+        String postgresType
+    ) {
+
+        /** The set operation this rule resolves the result column type of. */
+        private String sql() {
+            return "SELECT %s AS value FROM readings UNION ALL SELECT %s FROM readings"
+                .formatted(first, second);
+        }
+    }
+
+    /**
+     * Every type rule a set operation resolves by widening, in both branch
+     * orders where the order decides the result, and both branch orders of the
+     * character types, which resolve to the first branch's type.
+     */
+    private static final List<SetOperationTypeRule> SET_OPERATION_TYPE_RULES = List.of(
+        new SetOperationTypeRule("WiderInteger", "tiny", "counted", Integer.class, "int4"),
+        new SetOperationTypeRule("WiderBigint", "counted", "total", Long.class, "int8"),
+        new SetOperationTypeRule("WiderNumeric", "total", "amount", BigDecimal.class, "numeric"),
+        new SetOperationTypeRule("WiderReal", "amount", "ratio", Float.class, "float4"),
+        new SetOperationTypeRule("WiderDouble", "ratio", "average", Double.class, "float8"),
+        new SetOperationTypeRule("WidestDouble", "average", "tiny", Double.class, "float8"),
+        new SetOperationTypeRule("NarrowerInteger", "counted", "tiny", Integer.class, "int4"),
+        new SetOperationTypeRule(
+            "WiderTimestamp",
+            "taken_on",
+            "taken_at",
+            LocalDateTime.class,
+            "timestamp"
+        ),
+        new SetOperationTypeRule(
+            "WiderTimestamptz",
+            "taken_at",
+            "recorded_at",
+            OffsetDateTime.class,
+            "timestamptz"
+        ),
+        new SetOperationTypeRule(
+            "WidestTimestamptz",
+            "recorded_at",
+            "taken_on",
+            OffsetDateTime.class,
+            "timestamptz"
+        ),
+        new SetOperationTypeRule(
+            "NarrowerTimestamp",
+            "taken_at",
+            "taken_on",
+            LocalDateTime.class,
+            "timestamp"
+        ),
+        new SetOperationTypeRule("FirstVarchar", "label", "note", String.class, "varchar"),
+        new SetOperationTypeRule("FirstText", "note", "label", String.class, "text")
+    );
+
+    /**
      * A snapshot declaring one nullable column of each JSON spelling, so that
      * one row can carry JSON text and another can carry nulls.
      */
@@ -575,6 +662,7 @@ class PostgresIntegrationTest {
         execute("DROP TABLE IF EXISTS memberships");
         execute("DROP TABLE IF EXISTS teams");
         execute("DROP TABLE IF EXISTS measurements");
+        execute("DROP TABLE IF EXISTS readings");
         execute("DROP TABLE IF EXISTS documents");
         execute("DROP TABLE IF EXISTS user_aliases");
         execute("DROP TABLE IF EXISTS users");
@@ -3481,6 +3569,199 @@ class PostgresIntegrationTest {
 
             assertEquals(30L, component(orders.get(1), "id"));
             assertEquals(1, component(orders.get(1), "quantity"));
+        }
+    }
+
+    /**
+     * Covers the set operators end to end: a {@code UNION} of two text columns
+     * returns each distinct value once, a {@code UNION ALL} returns one row per
+     * selected value, an {@code INTERSECT} returns the values both branches
+     * select, an {@code EXCEPT} the values its left branch alone selects, and a
+     * trailing {@code LIMIT} pages the whole result rather than one branch,
+     * which is how PostgreSQL applies the clause the parser reports on the last
+     * branch.
+     */
+    @Test
+    void shouldExecuteGeneratedSetOperationsAgainstPostgres() throws Exception {
+        execute(READING_SCHEMA);
+
+        Path classesDirectory = generateAndCompile(
+            READING_SCHEMA,
+            """
+                -- name: ListLabels :many
+                SELECT label AS value
+                FROM readings
+                WHERE id <= $1
+                UNION
+                SELECT note
+                FROM readings
+                ORDER BY value;
+
+                -- name: ListEveryLabel :many
+                SELECT label AS value
+                FROM readings
+                UNION ALL
+                SELECT note
+                FROM readings
+                ORDER BY value;
+
+                -- name: ListSharedLabels :many
+                SELECT label AS value
+                FROM readings
+                INTERSECT
+                SELECT note
+                FROM readings;
+
+                -- name: ListUnsharedLabels :many
+                SELECT label AS value
+                FROM readings
+                EXCEPT
+                SELECT note
+                FROM readings;
+
+                -- name: ListFirstLabel :many
+                SELECT label AS value
+                FROM readings
+                UNION ALL
+                SELECT note
+                FROM readings
+                LIMIT $1;
+                """
+        );
+
+        execute(
+            """
+                INSERT INTO readings (id, label, note)
+                VALUES (1, 'alpha', 'beta'), (2, 'beta', 'beta')
+                """
+        );
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            List<?> labels = (List<?>) repository.getClass()
+                .getMethod("listLabels", Long.class)
+                .invoke(repository, 1L);
+
+            assertEquals(List.of("value"), recordComponentNames(labels.get(0)));
+
+            assertEquals(List.of("alpha", "beta"), values(labels));
+
+            assertEquals(
+                List.of("alpha", "beta", "beta", "beta"),
+                values(
+                    (List<?>) repository.getClass()
+                        .getMethod("listEveryLabel")
+                        .invoke(repository)
+                ),
+                "UNION ALL returns one row per selected value"
+            );
+
+            assertEquals(
+                List.of("beta"),
+                values(
+                    (List<?>) repository.getClass()
+                        .getMethod("listSharedLabels")
+                        .invoke(repository)
+                ),
+                "INTERSECT returns the values both branches select"
+            );
+
+            assertEquals(
+                List.of("alpha"),
+                values(
+                    (List<?>) repository.getClass()
+                        .getMethod("listUnsharedLabels")
+                        .invoke(repository)
+                ),
+                "EXCEPT returns the values its left branch alone selects"
+            );
+
+            assertEquals(
+                1,
+                ((List<?>) repository.getClass()
+                    .getMethod("listFirstLabel", Integer.class)
+                    .invoke(repository, 1)).size(),
+                "a trailing LIMIT pages the whole result"
+            );
+        }
+    }
+
+    /**
+     * Covers the set operation type rules against PostgreSQL itself: each
+     * widening rule and both branch orders of the character types are
+     * generated, compiled, and executed, and the Java type of the generated
+     * component is the Java type of the column type PostgreSQL 16 reports for
+     * the same query through {@link java.sql.ResultSetMetaData}.
+     */
+    @Test
+    void shouldResolveSetOperationColumnTypesAsPostgresDoes() throws Exception {
+        execute(READING_SCHEMA);
+
+        StringBuilder queries = new StringBuilder();
+
+        for (SetOperationTypeRule rule : SET_OPERATION_TYPE_RULES) {
+            queries.append("-- name: List%s :many%n%s;%n%n".formatted(rule.name(), rule.sql()));
+        }
+
+        Path classesDirectory = generateAndCompile(READING_SCHEMA, queries.toString());
+
+        execute(
+            """
+                INSERT INTO readings (id, tiny, counted, total, amount, ratio, average,
+                                      label, note, taken_on, taken_at, recorded_at)
+                VALUES (1, 1, 2, 3, 4.50, 5.5, 6.5,
+                        'label', 'note', '2026-01-01', '2026-01-01 10:00:00',
+                        '2026-01-01 10:00:00+00')
+                """
+        );
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            for (SetOperationTypeRule rule : SET_OPERATION_TYPE_RULES) {
+                List<?> rows = (List<?>) repository.getClass()
+                    .getMethod("list" + rule.name())
+                    .invoke(repository);
+
+                assertEquals(2, rows.size(), rule.name());
+
+                assertEquals(List.of("value"), recordComponentNames(rows.get(0)), rule.name());
+
+                assertEquals(
+                    List.of(rule.javaType()),
+                    recordComponentTypes(rows.get(0)),
+                    rule.name()
+                );
+
+                assertEquals(
+                    rule.postgresType(),
+                    columnTypeName(rule.sql()),
+                    rule.name()
+                );
+            }
+        }
+    }
+
+    /** The values of the one component of a set operation's result rows. */
+    private List<Object> values(List<?> rows) throws Exception {
+        List<Object> values = new ArrayList<>();
+
+        for (Object row : rows) {
+            values.add(component(row, "value"));
+        }
+
+        return values;
+    }
+
+    /** The type name PostgreSQL reports for the one column of a query. */
+    private String columnTypeName(String sql) throws Exception {
+        try (
+            Connection connection = dataSource.getConnection();
+            Statement statement = connection.createStatement();
+            ResultSet resultSet = statement.executeQuery(sql)
+        ) {
+            return resultSet.getMetaData().getColumnTypeName(1);
         }
     }
 

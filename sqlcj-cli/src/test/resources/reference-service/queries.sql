@@ -278,3 +278,17 @@ FROM projects p
 WHERE p.organization_id = :organizationId
 ORDER BY p.id,
          t.id;
+
+-- name: ListProjectAndTaskTitles :many
+SELECT name AS title
+FROM projects
+UNION
+SELECT title
+FROM tasks;
+
+-- name: ListEveryProjectAndTaskTitle :many
+SELECT name AS title
+FROM projects
+UNION ALL
+SELECT title
+FROM tasks;

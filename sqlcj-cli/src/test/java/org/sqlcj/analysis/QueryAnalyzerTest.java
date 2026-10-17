@@ -298,6 +298,61 @@ class QueryAnalyzerTest {
         )
     );
 
+    /**
+     * A schema whose {@code users} table carries one column of every type a set
+     * operation resolves — a nullable and a non-null column of one type, each
+     * scalar type, a blank-padded character column, two declared enum types,
+     * and an array of a scalar and of an enum type — beside the
+     * {@code profiles} table, whose complete row a branch returns.
+     */
+    private static final Schema setOperationSchema = new Schema(
+        List.of(
+            new Table(
+                "users",
+                List.of(
+                    new Column("id", ColumnType.BIGINT, false),
+                    new Column("parent_id", ColumnType.BIGINT, true),
+                    new Column("score", ColumnType.SMALLINT, true),
+                    new Column("visits", ColumnType.INTEGER, true),
+                    new Column("balance", ColumnType.DECIMAL, true),
+                    new Column("ratio", ColumnType.REAL, true),
+                    new Column("weight", ColumnType.DOUBLE_PRECISION, true),
+                    new Column("name", ColumnType.VARCHAR, true),
+                    new Column("bio", ColumnType.TEXT, true),
+                    new Column("code", ColumnType.VARCHAR, true, null, null, false, true),
+                    new Column("birth_date", ColumnType.DATE, true),
+                    new Column("opened_at", ColumnType.TIME, true),
+                    new Column("created_at", ColumnType.TIMESTAMP, true),
+                    new Column("updated_at", ColumnType.TIMESTAMP_WITH_TIME_ZONE, true),
+                    new Column("active", ColumnType.BOOLEAN, true),
+                    new Column("external_id", ColumnType.UUID, true),
+                    new Column("avatar", ColumnType.BYTEA, true),
+                    new Column("payload", ColumnType.JSON, true),
+                    new Column("document", ColumnType.JSONB, true),
+                    new Column("role", ColumnType.ENUM, true, null, "user_role"),
+                    new Column("state", ColumnType.ENUM, true, null, "user_state"),
+                    new Column("past_roles", ColumnType.ENUM, true, null, "user_role", true),
+                    new Column("labels", ColumnType.VARCHAR, true, null, null, true),
+                    new Column("scores", ColumnType.INTEGER, true, null, null, true)
+                ),
+                List.of()
+            ),
+            new Table(
+                "profiles",
+                List.of(
+                    new Column("id", ColumnType.BIGINT, false),
+                    new Column("user_id", ColumnType.BIGINT, false),
+                    new Column("nickname", ColumnType.VARCHAR, true)
+                ),
+                List.of()
+            )
+        ),
+        List.of(
+            new EnumType("user_role", List.of("admin", "member")),
+            new EnumType("user_state", List.of("active", "retired"))
+        )
+    );
+
     private final SqlParser parser = new SqlParser();
     private final QueryAnalyzer analyzer = new QueryAnalyzer();
 
@@ -9434,5 +9489,788 @@ class QueryAnalyzerTest {
         );
 
         assertEquals(List.of(1, 2, 1, 3), model.bindingParameterIndexes());
+    }
+
+    /**
+     * Each set operator, written with and without {@code ALL}, combines the
+     * branches into one result whose column takes the leftmost branch's name,
+     * the type both branches state, and the nullability of its own operator: a
+     * {@code UNION} column reads {@code NULL} where either branch's does, an
+     * {@code INTERSECT} column only where every branch's does, and an
+     * {@code EXCEPT} column where its left side's does, because it returns rows
+     * of that side alone.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "UNION|id|parent_id|true",
+            "UNION ALL|id|parent_id|true",
+            "UNION|parent_id|id|true",
+            "UNION ALL|id|id|false",
+            "INTERSECT|id|parent_id|false",
+            "INTERSECT ALL|parent_id|id|false",
+            "INTERSECT|parent_id|parent_id|true",
+            "EXCEPT|id|parent_id|false",
+            "EXCEPT ALL|parent_id|id|true"
+        }
+    )
+    void shouldAnalyzeEachSetOperator(
+        String operator,
+        String first,
+        String second,
+        boolean nullable
+    ) {
+        String sql = "SELECT %s AS value FROM users %s SELECT %s FROM users"
+            .formatted(first, operator, second);
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListValues", QueryType.MANY, sql),
+            parser.parse(sql),
+            setOperationSchema
+        );
+
+        assertEquals("users", model.table());
+
+        assertEquals(
+            List.of(new QueryColumn("value", ColumnType.BIGINT, nullable)),
+            model.columns()
+        );
+
+        assertNull(model.rowTable());
+
+        assertTrue(model.parameters().isEmpty());
+    }
+
+    /**
+     * {@code INTERSECT} binds more tightly than {@code UNION} and
+     * {@code EXCEPT}, as it does in PostgreSQL, so consecutive
+     * {@code INTERSECT} branches are one group before the remaining operators
+     * fold left to right. A plain left-to-right fold of
+     * {@code A UNION B INTERSECT C} would read the first row as not nullable.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "parent_id|UNION|parent_id|INTERSECT|id|true",
+            "id|UNION|parent_id|INTERSECT|parent_id|true",
+            "id|UNION|id|INTERSECT|parent_id|false",
+            "parent_id|EXCEPT|parent_id|INTERSECT|id|true",
+            "id|EXCEPT|parent_id|INTERSECT|parent_id|false"
+        }
+    )
+    void shouldGroupIntersectBranchesBeforeTheOtherOperators(
+        String first,
+        String firstOperator,
+        String second,
+        String secondOperator,
+        String third,
+        boolean nullable
+    ) {
+        String sql = "SELECT %s AS value FROM users %s SELECT %s FROM users %s SELECT %s FROM users"
+            .formatted(first, firstOperator, second, secondOperator, third);
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListValues", QueryType.MANY, sql),
+            parser.parse(sql),
+            setOperationSchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("value", ColumnType.BIGINT, nullable)),
+            model.columns()
+        );
+    }
+
+    /**
+     * Each column of a set operation takes the type PostgreSQL 16 resolves the
+     * branches' types to where sqlcj states it exactly: two scalar numeric
+     * types and two scalar date and time types resolve to the wider, in either
+     * branch order, and two scalar character types resolve to the first
+     * branch's, blank-padded or not, because each converts implicitly to the
+     * other.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "score|visits|INTEGER",
+            "visits|parent_id|BIGINT",
+            "parent_id|balance|DECIMAL",
+            "balance|ratio|REAL",
+            "ratio|weight|DOUBLE_PRECISION",
+            "weight|score|DOUBLE_PRECISION",
+            "score|weight|DOUBLE_PRECISION",
+            "visits|score|INTEGER",
+            "birth_date|created_at|TIMESTAMP",
+            "created_at|updated_at|TIMESTAMP_WITH_TIME_ZONE",
+            "updated_at|birth_date|TIMESTAMP_WITH_TIME_ZONE",
+            "created_at|birth_date|TIMESTAMP",
+            "name|bio|VARCHAR",
+            "bio|name|TEXT",
+            "code|bio|VARCHAR",
+            "name|name|VARCHAR"
+        }
+    )
+    void shouldResolveSetOperationColumnTypeAcrossBranches(
+        String first,
+        String second,
+        ColumnType type
+    ) {
+        String sql = "SELECT %s AS value FROM users UNION SELECT %s FROM users"
+            .formatted(first, second);
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListValues", QueryType.MANY, sql),
+            parser.parse(sql),
+            setOperationSchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("value", type, true)),
+            model.columns()
+        );
+    }
+
+    /**
+     * One type both branches state resolves to itself, its enum type and its
+     * array spelling included, which no widening rule reads.
+     */
+    @Test
+    void shouldResolveOneSetOperationColumnTypeToItself() {
+        String enumSql = "SELECT role AS value FROM users UNION SELECT role FROM users";
+
+        assertEquals(
+            List.of(new QueryColumn("value", ColumnType.ENUM, true, "user_role")),
+            analyzer.analyze(
+                new Query("ListValues", QueryType.MANY, enumSql),
+                parser.parse(enumSql),
+                setOperationSchema
+            ).columns()
+        );
+
+        String arraySql = "SELECT labels AS value FROM users INTERSECT SELECT labels FROM users";
+
+        assertEquals(
+            List.of(new QueryColumn("value", ColumnType.VARCHAR, true, null, true)),
+            analyzer.analyze(
+                new Query("ListValues", QueryType.MANY, arraySql),
+                parser.parse(arraySql),
+                setOperationSchema
+            ).columns()
+        );
+
+        String enumArraySql = "SELECT past_roles AS value FROM users"
+            + " UNION SELECT past_roles FROM users";
+
+        assertEquals(
+            List.of(new QueryColumn("value", ColumnType.ENUM, true, "user_role", true)),
+            analyzer.analyze(
+                new Query("ListValues", QueryType.MANY, enumArraySql),
+                parser.parse(enumArraySql),
+                setOperationSchema
+            ).columns()
+        );
+    }
+
+    /**
+     * A column whose branches state types this subset resolves to no single
+     * type is rejected naming the column, both types as PostgreSQL spells them,
+     * and the cast that states one type for every branch, because an inferred
+     * type that is not PostgreSQL's own would model the result wrongly.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "score|active|smallint|boolean",
+            "visits|external_id|integer|uuid",
+            "parent_id|name|bigint|varchar",
+            "balance|bio|numeric|text",
+            "ratio|avatar|real|bytea",
+            "weight|payload|double precision|json",
+            "birth_date|document|date|jsonb",
+            "opened_at|created_at|time|timestamp",
+            "updated_at|labels|timestamptz|varchar[]",
+            "code|scores|bpchar|integer[]",
+            "role|state|user_role|user_state",
+            "past_roles|role|user_role[]|user_role",
+            "labels|name|varchar[]|varchar"
+        }
+    )
+    void shouldRejectUnresolvableSetOperationColumnType(
+        String first,
+        String second,
+        String firstType,
+        String secondType
+    ) {
+        String sql = "SELECT %s AS value FROM users UNION SELECT %s FROM users"
+            .formatted(first, second);
+        Query query = new Query("ListValues", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, setOperationSchema)
+        );
+
+        assertEquals(
+            "Set operation column value has types %s and %s;"
+                .formatted(firstType, secondType)
+                + " cast it to one type in every branch, such as value::" + firstType,
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * The branches of a set operation pair their columns by position, so each
+     * must select the number of columns the leftmost branch selects, and a
+     * wildcard counts as the columns it expands to. The rejection names the
+     * first branch that differs.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "SELECT id, name FROM users UNION SELECT id FROM users|2|2|1",
+            "SELECT id FROM users UNION SELECT id FROM users UNION SELECT id, name FROM users|1|3|2",
+            "SELECT * FROM profiles EXCEPT SELECT id FROM profiles|3|2|1"
+        }
+    )
+    void shouldRejectDifferentSetOperationColumnCounts(
+        String sql,
+        int expected,
+        int branch,
+        int selected
+    ) {
+        Query query = new Query("ListValues", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, setOperationSchema)
+        );
+
+        assertEquals(
+            "Every branch of a set operation must select the same number of columns;"
+                + " the first selects %d and branch %d selects %d.".formatted(
+                    expected,
+                    branch,
+                    selected
+                ),
+            exception.getMessage()
+        );
+    }
+
+    /** {@code MINUS}, which PostgreSQL does not have, names {@code EXCEPT}. */
+    @Test
+    void shouldRejectMinus() {
+        String sql = "SELECT id FROM users MINUS SELECT id FROM profiles";
+        Query query = new Query("ListValues", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, setOperationSchema)
+        );
+
+        assertEquals("MINUS is not supported; write EXCEPT.", exception.getMessage());
+    }
+
+    /**
+     * The leftmost branch names the result columns, so a cast and a typed
+     * aggregate of any other branch may omit the alias each requires of a read.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "SELECT name AS label FROM users UNION SELECT 'anonymous'::text FROM users"
+                + "|label|VARCHAR|true",
+            "SELECT visits AS total FROM users UNION SELECT COUNT(*) FROM users"
+                + "|total|BIGINT|true",
+            "SELECT visits AS total FROM users UNION SELECT MAX(score) FROM users"
+                + "|total|INTEGER|true"
+        }
+    )
+    void shouldAcceptAnUnaliasedCastOrAggregateOutsideTheLeftmostBranch(
+        String sql,
+        String name,
+        ColumnType type,
+        boolean nullable
+    ) {
+        QueryModel model = analyzer.analyze(
+            new Query("ListValues", QueryType.MANY, sql),
+            parser.parse(sql),
+            setOperationSchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn(name, type, nullable)),
+            model.columns()
+        );
+    }
+
+    /**
+     * The leftmost branch names the result columns, so its own cast and
+     * aggregate still require an alias.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "SELECT 'anonymous'::text FROM users UNION SELECT name AS label FROM users"
+                + "|A cast projection requires a result alias,"
+                + " such as SUM(amount)::numeric AS total.",
+            "SELECT COUNT(*) FROM users UNION SELECT visits AS total FROM users"
+                + "|COUNT(*) requires a result alias, such as COUNT(*) AS total."
+        }
+    )
+    void shouldRequireAResultAliasInTheLeftmostBranch(String sql, String message) {
+        Query query = new Query("ListValues", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, setOperationSchema)
+        );
+
+        assertEquals(message, exception.getMessage());
+    }
+
+    /**
+     * A set operation whose every branch returns one table's complete row
+     * returns that table's shared row record, so the whole-row reads of a
+     * package stay one result type.
+     */
+    @Test
+    void shouldReturnTheSharedRowRecordWhenEveryBranchReturnsOneTablesRow() {
+        String sql = "SELECT * FROM profiles UNION SELECT * FROM profiles WHERE id > $1";
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListProfiles", QueryType.MANY, sql),
+            parser.parse(sql),
+            setOperationSchema
+        );
+
+        assertEquals("profiles", model.rowTable());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("user_id", ColumnType.BIGINT, false),
+                new QueryColumn("nickname", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+    }
+
+    /**
+     * A set operation any branch of which returns a result of its own returns
+     * flat columns, and a wildcard beside another item embeds no row there,
+     * because a set operation's column belongs to no one source.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "SELECT * FROM profiles UNION SELECT id, user_id, nickname FROM profiles",
+            "SELECT id, user_id, nickname FROM profiles UNION SELECT * FROM profiles"
+        }
+    )
+    void shouldReturnFlatColumnsWhenABranchReturnsItsOwnResult(String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("ListProfiles", QueryType.MANY, sql),
+            parser.parse(sql),
+            setOperationSchema
+        );
+
+        assertNull(model.rowTable());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("user_id", ColumnType.BIGINT, false),
+                new QueryColumn("nickname", ColumnType.VARCHAR, true)
+            ),
+            model.columns()
+        );
+    }
+
+    /**
+     * A wildcard written beside another item embeds one row of its source in a
+     * read, while a set operation resolves the columns the wildcard expands to,
+     * so the result is flat.
+     */
+    @Test
+    void shouldResolveTheExpandedColumnsOfAWildcardBesideAnotherItem() {
+        String sql = """
+            SELECT p.*,
+                   0::bigint AS extra
+            FROM profiles p
+            UNION
+            SELECT p.*,
+                   p.user_id
+            FROM profiles p
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListProfiles", QueryType.MANY, sql),
+            parser.parse(sql),
+            setOperationSchema
+        );
+
+        assertNull(model.rowTable());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("user_id", ColumnType.BIGINT, false),
+                new QueryColumn("nickname", ColumnType.VARCHAR, true),
+                new QueryColumn("extra", ColumnType.BIGINT, true)
+            ),
+            model.columns()
+        );
+    }
+
+    /**
+     * The placeholders of every branch are typed by that branch's own clause
+     * rules and bind in the textual order the parser reported, and a trailing
+     * {@code LIMIT} and {@code OFFSET} page the whole result, which the parser
+     * reports on the last branch without an {@code ORDER BY} and on the set
+     * operation itself with one.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            """
+                SELECT id FROM users WHERE name = $1
+                UNION
+                SELECT id FROM profiles WHERE nickname = $2
+                LIMIT $3 OFFSET $4
+                """,
+            """
+                SELECT id FROM users WHERE name = $1
+                UNION
+                SELECT id FROM profiles WHERE nickname = $2
+                ORDER BY id
+                LIMIT $3 OFFSET $4
+                """
+        }
+    )
+    void shouldBindSetOperationParametersInTextualOrder(String sql) {
+        QueryModel model = analyzer.analyze(
+            new Query("ListIds", QueryType.MANY, sql),
+            parser.parse(sql),
+            setOperationSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "name", ColumnType.VARCHAR),
+                new QueryParameter(2, "nickname", ColumnType.VARCHAR),
+                new QueryParameter(3, "limit", ColumnType.INTEGER),
+                new QueryParameter(4, "offset", ColumnType.INTEGER)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2, 3, 4), model.bindingParameterIndexes());
+
+        assertEquals(
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            model.columns()
+        );
+    }
+
+    /**
+     * One named placeholder written in two branches is one parameter, bound at
+     * each of its textual positions, as it is inside one {@code SELECT}.
+     */
+    @Test
+    void shouldShareOneNamedParameterAcrossSetOperationBranches() {
+        String sql = """
+            SELECT id FROM users WHERE name = :handle
+            UNION ALL
+            SELECT id FROM profiles WHERE nickname = :handle
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListIds", QueryType.MANY, sql),
+            parser.parse(sql),
+            setOperationSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "handle", ColumnType.VARCHAR)),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 1), model.bindingParameterIndexes());
+    }
+
+    /**
+     * An {@code ORDER BY} of a set operation's result may name a result column,
+     * compared ignoring case, or a position, and every other item reaches the
+     * database as written.
+     */
+    @ParameterizedTest
+    @ValueSource(
+        strings = {
+            "ORDER BY value",
+            "ORDER BY VALUE",
+            "ORDER BY value DESC",
+            "ORDER BY 1",
+            "ORDER BY lower(value)"
+        }
+    )
+    void shouldAcceptASetOperationOrderingOfItsResultColumns(String ordering) {
+        String sql = "SELECT name AS value FROM users UNION SELECT nickname FROM profiles "
+            + ordering;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListValues", QueryType.MANY, sql),
+            parser.parse(sql),
+            setOperationSchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("value", ColumnType.VARCHAR, true)),
+            model.columns()
+        );
+    }
+
+    /**
+     * An {@code ORDER BY} column of a set operation's result that names no
+     * result column, a qualified reference to one included, is rejected as
+     * PostgreSQL restricts such an ordering, naming the item as written and a
+     * result column to order by.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "ORDER BY name|name",
+            "ORDER BY name DESC|name DESC",
+            "ORDER BY users.value|users.value"
+        }
+    )
+    void shouldRejectASetOperationOrderingOutsideItsResultColumns(
+        String ordering,
+        String written
+    ) {
+        String sql = "SELECT name AS value FROM users UNION SELECT nickname FROM profiles "
+            + ordering;
+        Query query = new Query("ListValues", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, setOperationSchema)
+        );
+
+        assertEquals(
+            "ORDER BY %s must name a result column of the set operation, such as ORDER BY value."
+                .formatted(written),
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A {@code WITH} clause written before a set operation belongs to the whole
+     * list, so every branch reads it, and its own body's placeholders are typed
+     * by its clause rules.
+     */
+    @Test
+    void shouldAnalyzeACommonTableExpressionBeforeASetOperation() {
+        String sql = """
+            WITH recent AS (SELECT id, nickname
+                            FROM profiles
+                            WHERE nickname = $1)
+            SELECT id
+            FROM recent
+            UNION
+            SELECT id
+            FROM recent
+            WHERE nickname = $2
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListRecentIds", QueryType.MANY, sql),
+            parser.parse(sql),
+            setOperationSchema
+        );
+
+        assertEquals("recent", model.table());
+
+        assertEquals(
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "nickname", ColumnType.VARCHAR),
+                new QueryParameter(2, "nickname", ColumnType.VARCHAR)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A branch written in parentheses is the query it encloses: a set operation
+     * of its own, which states the grouping the parentheses write, or a plain
+     * {@code SELECT} with a {@code WITH} list of its own. A parenthesized
+     * top-level set operation is the set operation it encloses, as a
+     * parenthesized read is the read it encloses.
+     */
+    @Test
+    void shouldAnalyzeAParenthesizedSetOperationBranch() {
+        String nested = """
+            SELECT id AS value
+            FROM users
+            UNION
+            (SELECT parent_id FROM users INTERSECT SELECT parent_id FROM users)
+            """;
+
+        assertEquals(
+            List.of(new QueryColumn("value", ColumnType.BIGINT, true)),
+            analyzer.analyze(
+                new Query("ListValues", QueryType.MANY, nested),
+                parser.parse(nested),
+                setOperationSchema
+            ).columns()
+        );
+
+        String withBranch = """
+            SELECT id
+            FROM users
+            UNION
+            (WITH recent AS (SELECT id FROM profiles) SELECT id FROM recent)
+            """;
+
+        assertEquals(
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            analyzer.analyze(
+                new Query("ListIds", QueryType.MANY, withBranch),
+                parser.parse(withBranch),
+                setOperationSchema
+            ).columns()
+        );
+
+        String parenthesized = "(SELECT id FROM users UNION SELECT parent_id FROM users)";
+
+        assertEquals(
+            List.of(new QueryColumn("id", ColumnType.BIGINT, true)),
+            analyzer.analyze(
+                new Query("ListIds", QueryType.MANY, parenthesized),
+                parser.parse(parenthesized),
+                setOperationSchema
+            ).columns()
+        );
+    }
+
+    /**
+     * A nested set operation written in parentheses carries the
+     * {@code ORDER BY}, {@code LIMIT}, and {@code OFFSET} the parser reports on
+     * it, so its own result column check and its own pagination rules apply to
+     * them, beside the parameters the other branches type, and every parameter
+     * binds in the textual order the parser reported.
+     */
+    @Test
+    void shouldResolveTheOwnClausesOfANestedSetOperationBranch() {
+        String sql = """
+            SELECT id FROM users WHERE name = $1
+            UNION
+            (SELECT id FROM profiles
+             UNION
+             SELECT user_id FROM profiles
+             ORDER BY id
+             LIMIT $2 OFFSET $3)
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListIds", QueryType.MANY, sql),
+            parser.parse(sql),
+            setOperationSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "name", ColumnType.VARCHAR),
+                new QueryParameter(2, "limit", ColumnType.INTEGER),
+                new QueryParameter(3, "offset", ColumnType.INTEGER)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2, 3), model.bindingParameterIndexes());
+
+        assertEquals(
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            model.columns()
+        );
+    }
+
+    /**
+     * An {@code ORDER BY} column of a nested set operation that names no result
+     * column of that nested list is rejected as one of the top-level list is,
+     * naming the item as written and a result column of the nested list to
+     * order by.
+     */
+    @Test
+    void shouldRejectANestedSetOperationOrderingOutsideItsResultColumns() {
+        String sql = """
+            SELECT name AS value FROM users
+            UNION
+            (SELECT nickname FROM profiles
+             UNION
+             SELECT nickname FROM profiles
+             ORDER BY name)
+            """;
+        Query query = new Query("ListValues", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, setOperationSchema)
+        );
+
+        assertEquals(
+            "ORDER BY name must name a result column of the set operation,"
+                + " such as ORDER BY nickname.",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * A set operation produces rows, so it must be declared with a result
+     * annotation as every other read is.
+     */
+    @Test
+    void shouldRejectASetOperationWithoutResultQueryType() {
+        String sql = "SELECT id FROM users UNION SELECT id FROM profiles";
+        Query query = new Query("ListIds", QueryType.EXEC, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, setOperationSchema)
+        );
+
+        assertEquals(
+            "SELECT queries must be declared as :one, :optional, or :many",
+            exception.getMessage()
+        );
     }
 }
