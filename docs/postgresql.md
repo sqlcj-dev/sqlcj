@@ -34,9 +34,88 @@ The caller-owned connection path is how several generated operations take part
 in one application-controlled transaction: the application disables auto-commit,
 constructs another repository instance over an executor bound to that
 connection, runs generated reads and writes through it, and then calls `commit`
-or `rollback` itself. sqlcj provides no transaction callback or template API, no
-savepoints, and no isolation configuration. The [Quickstart](quickstart.md)
-runs that pattern end to end.
+or `rollback` itself. The runtime's transaction helper runs that pattern for the
+application, and an application that needs the connection in its own hands runs
+it directly. The [Quickstart](quickstart.md) runs that pattern end to end.
+
+`org.sqlcj.runtime.JdbcTransactions` is constructed from a `DataSource` and runs
+one unit of work on one connection inside one transaction. `inTransaction`
+returns the callback's value, and `useTransaction` takes a callback that returns
+none:
+
+```java
+JdbcTransactions transactions = new JdbcTransactions(dataSource);
+
+Long id = transactions.inTransaction(connection -> {
+    AuthorRepository authors = new AuthorRepository(new JdbcQueryExecutor(connection));
+
+    AuthorsRow created = authors.createAuthor("Ada Lovelace", "First programmer");
+
+    try (
+        PreparedStatement statement = connection.prepareStatement(
+            "INSERT INTO author_audit (author_id, action) VALUES (?, ?)"
+        )
+    ) {
+        statement.setLong(1, created.id());
+        statement.setString(2, "created");
+        statement.executeUpdate();
+    }
+
+    return created.id();
+});
+```
+
+The callback receives the transaction's connection, binds the generated
+repositories it needs over `new JdbcQueryExecutor(connection)`, and may run
+hand-written JDBC on the same connection, so every operation takes part in the
+same transaction. It never commits, rolls back, closes, or reconfigures the
+connection itself. A callback that throws a checked exception has it rethrown as
+declared, and a callback that throws none needs neither a `catch` nor a `throws`
+clause.
+
+Each call manages the transaction by these rules:
+
+- It obtains one connection from the `DataSource` and disables auto-commit on
+  it, unless that connection already has auto-commit disabled, which it then
+  leaves untouched.
+- A normal return commits the transaction.
+- Any exception or error the callback throws rolls the transaction back and is
+  rethrown as the same instance, unchanged, including a
+  `QueryCardinalityException` a generated operation raised.
+- A failure to begin or to commit raises
+  `org.sqlcj.runtime.TransactionException` with the `SQLException` as its cause.
+  On a begin failure the callback does not run.
+- A failure to roll back is attached to the callback's failure as a suppressed
+  `TransactionException`.
+- Auto-commit is restored to `true` only when the call disabled it, and only
+  after a successful commit or rollback, because changing auto-commit during an
+  open transaction commits that transaction.
+- The connection is closed on every path, even when restoring auto-commit
+  failed. A failure to restore auto-commit or to close raises
+  `TransactionException` when no other failure is pending, and is attached to
+  the pending failure as a suppressed `TransactionException` otherwise.
+
+A `TransactionException` reports what the helper itself could not do, so its
+message names no query:
+
+```text
+Failed to begin a transaction
+Failed to commit the transaction
+Failed to roll back the transaction
+Failed to release the transaction's connection
+```
+
+Each call uses its own connection, so a call made inside another call's callback
+is an independent transaction: it commits or rolls back on its own, and the
+outcome of the surrounding call does not change it.
+
+The helper covers one transaction over one connection. Anything else a
+transaction may need, such as a `setTransactionIsolation` level, a savepoint, or
+a `SET LOCAL` statement, is applied by the application on a connection it
+obtains and owns itself, with repositories bound over
+`new JdbcQueryExecutor(connection)` and with `commit` or `rollback` called by
+the application, as the table above describes. sqlcj has no API of its own for
+any of them.
 
 In both paths the `PreparedStatement` and any `ResultSet` opened for an
 operation are closed before that operation returns, on success, on a cardinality
@@ -1230,3 +1309,34 @@ Connection ownership and transactions:
   run a generated affected-row write, a generated returning write, and a
   generated read on one caller-owned connection with auto-commit disabled, and
   prove the application's own `commit` and `rollback`.
+- `JdbcTransactionsTest` covers the helper over H2: the committed value of
+  `inTransaction` and of `useTransaction` in
+  `shouldReturnTheCallbackValueAndCommit` and
+  `shouldCommitACallbackThatReturnsNoValue`; the rolled-back and unchanged
+  rethrow of a runtime exception, an error, a checked `SQLException` from
+  hand-written JDBC, and a `QueryCardinalityException` in
+  `shouldRollBackAndRethrowARuntimeException`,
+  `shouldRollBackAndRethrowAnError`,
+  `shouldRollBackAndRethrowACheckedSqlException`, and
+  `shouldRollBackAndRethrowACardinalityFailure`; and the failure of every JDBC
+  call the helper makes in `shouldFailWhenTheConnectionCannotBeObtained`,
+  `shouldFailWhenAutoCommitCannotBeDisabled`, `shouldFailWhenTheCommitFails`,
+  `shouldAttachARollbackFailureToTheCallbackFailure`,
+  `shouldFailWhenAutoCommitCannotBeRestored`, and
+  `shouldReportAFailureToCloseTheConnection`. Those tests assert, through a
+  recording proxy, the `setAutoCommit`, `commit`, `rollback`, and `close` calls
+  the helper made on the connection it obtained, so the auto-commit handling
+  and the closing of every path are covered.
+  `shouldNotTouchAutoCommitOfAConnectionThatAlreadyHasItDisabled` covers the
+  connection the helper leaves configured as it was,
+  `shouldRunANestedCallAsAnIndependentTransaction` covers the nested call that
+  commits although the outer call rolls back, and
+  `shouldRequireNoCatchOrThrowsForACallbackThatThrowsNothing` compiles a
+  callback that throws nothing with neither a `catch` nor a `throws` clause.
+- `PostgresIntegrationTest.shouldCommitGeneratedAndHandWrittenWritesThroughTheTransactionHelper`
+  commits two generated writes and a hand-written `PreparedStatement` insert
+  made on the connection the helper handed the callback, and
+  `PostgresIntegrationTest.shouldRollBackGeneratedAndHandWrittenWritesWhenTheTransactionFails`
+  finds none of them after a runtime exception, an error, and the cardinality
+  failure of a generated `:one` query; both assert that the callback's
+  connection is closed afterwards.
