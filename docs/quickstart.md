@@ -296,18 +296,19 @@ import com.example.app.db.AuthorRepository;
 import com.example.app.db.AuthorsRow;
 import org.postgresql.ds.PGSimpleDataSource;
 import org.sqlcj.runtime.JdbcQueryExecutor;
+import org.sqlcj.runtime.JdbcTransactions;
 import org.sqlcj.runtime.QueryCardinalityException;
 import org.sqlcj.runtime.QueryExecutor;
 
 import javax.sql.DataSource;
-import java.sql.Connection;
-import java.sql.SQLException;
 import java.util.Optional;
 
 public final class App {
 
-    public static void main(String[] args) throws SQLException {
+    public static void main(String[] args) {
         DataSource dataSource = dataSource();
+
+        JdbcTransactions transactions = new JdbcTransactions(dataSource);
 
         QueryExecutor executor = new JdbcQueryExecutor(dataSource);
 
@@ -339,36 +340,30 @@ public final class App {
             System.out.println("missing row rejected: " + e.getMessage());
         }
 
-        Long committedId;
-
-        try (Connection connection = dataSource.getConnection()) {
-            connection.setAutoCommit(false);
-
+        Long committedId = transactions.inTransaction(connection -> {
             AuthorRepository transactionalAuthors = new AuthorRepository(new JdbcQueryExecutor(connection));
 
             AuthorsRow committed = transactionalAuthors.createAuthor("Grace Hopper", null);
 
             transactionalAuthors.updateAuthorBio(committed.id(), "Compiler pioneer");
 
-            connection.commit();
+            return committed.id();
+        });
 
-            committedId = committed.id();
+        System.out.println("committed: " + authors.getAuthor(committedId).bio());
 
-            System.out.println("committed: " + authors.getAuthor(committedId).bio());
-        }
+        try {
+            transactions.useTransaction(connection -> {
+                AuthorRepository transactionalAuthors = new AuthorRepository(new JdbcQueryExecutor(connection));
 
-        try (Connection connection = dataSource.getConnection()) {
-            connection.setAutoCommit(false);
+                AuthorsRow discarded = transactionalAuthors.createAuthor("Temporary Author", null);
 
-            AuthorRepository transactionalAuthors = new AuthorRepository(new JdbcQueryExecutor(connection));
+                transactionalAuthors.updateAuthorBio(discarded.id(), "never stored");
 
-            AuthorsRow discarded = transactionalAuthors.createAuthor("Temporary Author", null);
-
-            transactionalAuthors.updateAuthorBio(discarded.id(), "never stored");
-
-            connection.rollback();
-
-            System.out.println("rolled back: " + authors.findAuthor(discarded.id()).isPresent());
+                transactionalAuthors.getAuthor(-1L);
+            });
+        } catch (QueryCardinalityException e) {
+            System.out.println("rolled back: " + authors.searchAuthors("Temporary Author").isEmpty());
         }
 
         for (AuthorsRow author : authors.searchAuthors("%lovelace%")) {
@@ -405,8 +400,8 @@ public final class App {
 ```
 
 One repository instance serves the whole `DataSource`-backed execution context,
-and each transaction constructs another repository over its caller-owned
-connection. No code constructs a type per query.
+and each transaction constructs another repository over the connection the
+transaction helper hands its callback. No code constructs a type per query.
 
 ## 9. Start PostgreSQL and apply the migrations
 
@@ -477,7 +472,7 @@ listed: 1 Ada Lovelace
 missing row: false
 missing row rejected: Query 'GetAuthor' in AuthorRepository returned no row; expected exactly one
 committed: Compiler pioneer
-rolled back: false
+rolled back: true
 searched: 1 Ada Lovelace
 count: 2
 page: 2 Grace Hopper
@@ -498,7 +493,7 @@ That output is the whole MVP contract in one run:
   the repository when none matches or several do.
 - `FindAuthor` is an `:optional` read of the same row, and returns
   `Optional.empty()` when no row matches, which is how the sample checks for a
-  missing, rolled back, or deleted author.
+  missing or deleted author.
 - `ListAuthors` is a `:many` read, and returns an empty list when no row
   matches.
 - `SearchAuthors` filters with `name ILIKE $1`, so the pattern is a `String`
@@ -519,10 +514,17 @@ That output is the whole MVP contract in one run:
   parameter even though `$2` occurs first in the SQL text. `CreateBook` writes
   the schema's other table, so the methods of one query group may span every
   table of its schema.
-- The two `try` blocks run generated operations on a caller-owned `Connection`
-  with auto-commit disabled. The runtime never closes, commits, rolls back, or
-  reconfigures that connection, so the application's own `commit` makes both
-  writes durable and its own `rollback` discards them.
+- The two transactions run generated operations through
+  `org.sqlcj.runtime.JdbcTransactions`, which obtains a connection, disables its
+  auto-commit, and hands it to the callback. The first callback returns
+  normally, so the helper commits both of its writes and `inTransaction` returns
+  the new author's id. In the second, the `:one` `GetAuthor` read of a missing
+  id fails, so the helper rolls both of its writes back and the
+  `QueryCardinalityException` of that read reaches the application unchanged.
+  [Connection Ownership and Transactions](postgresql.md#connection-ownership-and-transactions)
+  documents the helper's commit, rollback, and failure rules, and the
+  caller-owned connection an application that needs the connection itself runs
+  directly.
 
 ## 11. Re-running after a SQL change
 

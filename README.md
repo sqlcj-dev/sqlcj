@@ -93,7 +93,8 @@ it cannot read or write.
 
 Follow the [Quickstart](docs/quickstart.md) to build a Maven application that
 generates, compiles, and runs PostgreSQL create, read, list, update, and delete
-operations, including an application-controlled commit and rollback.
+operations, including a committed and a rolled-back transaction run through the
+runtime's transaction helper.
 
 ## Documentation
 

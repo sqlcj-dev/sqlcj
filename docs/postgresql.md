@@ -36,7 +36,7 @@ constructs another repository instance over an executor bound to that
 connection, runs generated reads and writes through it, and then calls `commit`
 or `rollback` itself. The runtime's transaction helper runs that pattern for the
 application, and an application that needs the connection in its own hands runs
-it directly. The [Quickstart](quickstart.md) runs that pattern end to end.
+it directly. The [Quickstart](quickstart.md) runs the helper end to end.
 
 `org.sqlcj.runtime.JdbcTransactions` is constructed from a `DataSource` and runs
 one unit of work on one connection inside one transaction. `inTransaction`

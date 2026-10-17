@@ -6,12 +6,11 @@ import com.example.app.db.BookFormat;
 import com.example.app.db.BooksRow;
 import org.postgresql.ds.PGSimpleDataSource;
 import org.sqlcj.runtime.JdbcQueryExecutor;
+import org.sqlcj.runtime.JdbcTransactions;
 import org.sqlcj.runtime.QueryCardinalityException;
 import org.sqlcj.runtime.QueryExecutor;
 
 import javax.sql.DataSource;
-import java.sql.Connection;
-import java.sql.SQLException;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -27,7 +26,11 @@ import java.util.Optional;
  * <p>All eighteen named queries are methods of one generated
  * {@link AuthorRepository}. The repository is constructed once per execution
  * context: once from the {@code DataSource}-backed executor, and once more per
- * transaction from a caller-owned connection.
+ * transaction, over the connection {@link JdbcTransactions} hands its
+ * callback. The first transaction commits on a normal return and returns the
+ * new author's id, while the second is rolled back by a failing statement, the
+ * {@code :one} {@code GetAuthor} read of a missing id, whose
+ * {@link QueryCardinalityException} the helper rethrows unchanged.
  *
  * <p>Create, read, optional read, list, search, page, filter, upsert, and the
  * read by id list each return one complete {@code authors} row, so all nine
@@ -75,8 +78,10 @@ public final class App {
     private App() {
     }
 
-    public static void main(String[] args) throws SQLException {
+    public static void main(String[] args) {
         DataSource dataSource = dataSource();
+
+        JdbcTransactions transactions = new JdbcTransactions(dataSource);
 
         QueryExecutor executor = new JdbcQueryExecutor(dataSource);
 
@@ -137,7 +142,7 @@ public final class App {
             System.out.println("missing row rejected: " + e.getMessage());
         }
 
-        Long committedId = writeAndCommit(dataSource);
+        Long committedId = writeAndCommit(transactions);
 
         AuthorsRow committed = authors.getAuthor(committedId);
 
@@ -147,10 +152,10 @@ public final class App {
 
         System.out.println("committed: " + committed.bio());
 
-        Long discardedId = writeAndRollback(dataSource);
+        writeAndRollback(transactions);
 
         check(
-            authors.findAuthor(discardedId).isEmpty(),
+            authors.searchAuthors("Temporary Author").isEmpty(),
             "the rolled back author must not be readable"
         );
 
@@ -316,13 +321,12 @@ public final class App {
     }
 
     /**
-     * Writes through a caller-owned connection with auto-commit disabled and
-     * commits, so the written row must be visible to a later read.
+     * Writes two generated statements inside one transaction the helper
+     * commits on a normal return, so the written row must be visible to a
+     * later read, and returns the new author's id.
      */
-    private static Long writeAndCommit(DataSource dataSource) throws SQLException {
-        try (Connection connection = dataSource.getConnection()) {
-            connection.setAutoCommit(false);
-
+    private static Long writeAndCommit(JdbcTransactions transactions) {
+        return transactions.inTransaction(connection -> {
             AuthorRepository transactionalAuthors = new AuthorRepository(new JdbcQueryExecutor(connection));
 
             AuthorsRow author = transactionalAuthors.createAuthor("Grace Hopper", null);
@@ -334,33 +338,35 @@ public final class App {
 
             checkEquals(1, rows, "UpdateAuthorBio affected rows inside the committed transaction");
 
-            connection.commit();
-
             return author.id();
-        }
+        });
     }
 
     /**
-     * Writes through a caller-owned connection with auto-commit disabled and
-     * rolls back, so the written row must not be visible to a later read.
+     * Writes two generated statements inside one transaction a failing
+     * {@code GetAuthor} read of a missing id rolls back, so neither write must
+     * be visible to a later read. The helper rethrows the
+     * {@link QueryCardinalityException} of that read unchanged.
      */
-    private static Long writeAndRollback(DataSource dataSource) throws SQLException {
-        try (Connection connection = dataSource.getConnection()) {
-            connection.setAutoCommit(false);
+    private static void writeAndRollback(JdbcTransactions transactions) {
+        try {
+            transactions.useTransaction(connection -> {
+                AuthorRepository transactionalAuthors = new AuthorRepository(new JdbcQueryExecutor(connection));
 
-            AuthorRepository transactionalAuthors = new AuthorRepository(new JdbcQueryExecutor(connection));
+                AuthorsRow author = transactionalAuthors.createAuthor("Temporary Author", null);
 
-            AuthorsRow author = transactionalAuthors.createAuthor("Temporary Author", null);
+                check(author != null, "CreateAuthor returned no row inside the rolled back transaction");
 
-            check(author != null, "CreateAuthor returned no row inside the rolled back transaction");
+                int rows = transactionalAuthors.updateAuthorBio(author.id(), "never stored");
 
-            int rows = transactionalAuthors.updateAuthorBio(author.id(), "never stored");
+                checkEquals(1, rows, "UpdateAuthorBio affected rows inside the rolled back transaction");
 
-            checkEquals(1, rows, "UpdateAuthorBio affected rows inside the rolled back transaction");
+                transactionalAuthors.getAuthor(-1L);
+            });
 
-            connection.rollback();
-
-            return author.id();
+            throw new IllegalStateException("GetAuthor must fail inside the rolled back transaction");
+        } catch (QueryCardinalityException e) {
+            // The failing read rolled both writes back, so there is nothing to undo here.
         }
     }
 
