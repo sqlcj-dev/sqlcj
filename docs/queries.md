@@ -169,23 +169,36 @@ configuration entry.
   or one range of the array column rather than the column, so it is rejected
   like any other computed projection unless a cast states its type, as in
   `labels[1]::text AS first` or `labels[1:2]::varchar[] AS pair`.
-- A wildcard of a table source that is not left-joined — `qualifier.*`, or each
-  such source of a bare `*` — is one result component holding that table's
-  complete row, typed by the table's shared `<TableName>Row` record and named
-  after the name its source exposes, which is the source's alias or its table
-  name as written. The row's columns are the table's own, in schema column
-  order, with their declared nullability, and the component itself is never
+- A wildcard of a table source — `qualifier.*`, or each such source of a bare
+  `*` — is one result component holding that table's complete row, typed by the
+  table's shared `<TableName>Row` record and named after the name its source
+  exposes, which is the source's alias or its table name as written. The row's
+  columns are the table's own, in schema column order, with their declared
+  nullability.
+- The component holding the row of a left-joined source is nullable, and it is
+  read as `null` exactly when every column of that embedded row reads `NULL`,
+  which is how an unmatched left join reads. The row's own columns keep their
+  declared nullability, so one table's row record is the same record wherever it
+  is embedded or returned, and the absence of the whole row is carried by the
+  component instead. A component of an inner-joined or base source is never
   null.
-- A projection that is one wildcard covering exactly one such source returns
-  that table's shared row itself instead of a record holding it, so
+- A matched row every column of which is `NULL` therefore reads as an absent
+  row. No table with at least one `NOT NULL` column can produce that, because
+  such a column reads a value for every matched row.
+- A projection that is one wildcard covering exactly one source that is neither
+  derived nor left-joined returns that table's shared row itself instead of a
+  record holding it, so
   `SELECT u.* FROM users u JOIN profiles p ON p.user_id = u.id` returns
-  `UsersRow`.
+  `UsersRow`. A lone wildcard of a left-joined source returns a
+  `<QueryName>Result` with one nullable row component instead, so a query named
+  `ListProfiles` whose projection is `p.*` over
+  `users u LEFT JOIN profiles p ON p.user_id = u.id` returns
+  `ListProfilesResult`, whose single component `p` is a `ProfilesRow` or
+  `null`.
 - A wildcard of a derived source — a common table expression or a subquery
-  source — or of a left-joined source expands into that source's own columns in
-  order, because a derived source has no row record and a left-joined source
-  reads every column as nullable. A bare `*` therefore holds an embedded row per
-  source that is not left-joined and the expanded columns of every other
-  source, in source order.
+  source — expands into that source's own columns in order, because a derived
+  source has no row record. A bare `*` therefore holds an embedded row per table
+  source and the expanded columns of every derived source, in source order.
 - Selected-column order is the order of the generated result record and of the
   positional row mapper. An embedded row stands in the position its wildcard is
   written at and holds the columns that wildcard selected, so the read order
@@ -1021,6 +1034,30 @@ included.
   `new ListUserProfilesResult(new UsersRow(resultSet.getObject(1, Long.class),
   ...), new ProfilesRow(resultSet.getObject(3, Long.class), ...))`, so a row the
   repository only embeds generates no mapper field of its own.
+- A nullable row component, which a left-joined source contributes, is guarded
+  by `dev.sqlcj.runtime.SqlRow.isNull`, written out in full as every other
+  runtime helper is, over the one-based first and last positions of that row's
+  own columns:
+
+  ```java
+  private static final RowMapper<ListUserProfilesResult> listUserProfilesRowMapper =
+          resultSet -> new ListUserProfilesResult(
+          new UsersRow(
+                  resultSet.getObject(1, Long.class),
+                  resultSet.getObject(2, String.class)
+          ),
+          dev.sqlcj.runtime.SqlRow.isNull(resultSet, 3, 5)
+              ? null
+              : new ProfilesRow(
+                      resultSet.getObject(3, Long.class),
+                      resultSet.getObject(4, Long.class),
+                      resultSet.getObject(5, String.class)
+              )
+  );
+  ```
+
+  `SqlRow.isNull` reads that range alone, stops at the first column that reads a
+  value, and so leaves every other position of the result untouched.
 - A `:exec` query generates no result record and returns `int`.
 - Every generated method passes the repository class name and the query name to
   the executor, as the first two arguments of its call, so a runtime failure
@@ -1427,12 +1464,11 @@ Reads:
   `QueryAnalyzerTest.shouldEmbedTheRowOfAWildcardBesideAScalarCount`,
   `QueryAnalyzerTest.shouldEmbedTheRowOfASingleSourceWildcardBesideAnotherItem`,
   `QueryAnalyzerTest.shouldExpandTheWildcardOfADerivedSourceAsItsOwnColumns`,
-  `QueryAnalyzerTest.shouldResolveRowTableForALoneJoinedWildcard`, and
-  `QueryAnalyzerTest.shouldNotResolveRowTableForALoneLeftJoinedWildcard` cover
+  and `QueryAnalyzerTest.shouldResolveRowTableForALoneJoinedWildcard` cover
   the embedded rows of a wildcard: two qualified wildcards and a bare one over
   joined sources, one table under two aliases, a wildcard beside a column and
-  beside a count, the shared row of a lone joined wildcard, and the derived and
-  left-joined wildcards that stay expanded columns;
+  beside a count, the shared row of a lone joined wildcard, and the derived
+  wildcard that stays expanded columns;
   `JavaCodeGeneratorTest.shouldGenerateResultRecordEmbeddingTheRowOfEachJoinedSource`,
   `JavaCodeGeneratorTest.shouldGenerateRowRecordAndEnumOnlyForAnEmbeddedRow`,
   and
@@ -1446,6 +1482,30 @@ Reads:
   `PostgresIntegrationTest.shouldExecuteGeneratedJoinedWildcardReadIntoSharedRowTypesAgainstPostgres`
   executes a joined wildcard read against PostgreSQL 16 whose components are
   instances of the shared row records.
+- `QueryAnalyzerTest.shouldEmbedTheRowOfALeftJoinedSourceAsNullable`,
+  `QueryAnalyzerTest.shouldEmbedTheRowOfAQualifiedLeftJoinedWildcardAsNullable`,
+  and
+  `QueryAnalyzerTest.shouldNotResolveRowTableForALoneLeftJoinedWildcard` cover
+  the nullable row component of a left-joined source and its declared-nullability
+  columns, under a bare `*`, a qualified wildcard beside a column, and a lone
+  wildcard that reports no row table;
+  `JavaCodeGeneratorTest.shouldGenerateGuardedConstructionForALeftJoinedEmbeddedRow`
+  and
+  `JavaCodeGeneratorTest.shouldGenerateResultRecordForALoneLeftJoinedWildcard`
+  cover the `dev.sqlcj.runtime.SqlRow.isNull` guard at the row's own positions,
+  the row record generated without a mapper field, and the compiled sources;
+  `SqlRowTest.shouldReportAnAllNullRangeAsNull`,
+  `SqlRowTest.shouldReportAPartlyNullRangeAsPresent`, and
+  `SqlRowTest.shouldReadTheGivenRangeAlone` cover the runtime check over an
+  all-`NULL` range, a partly `NULL` range, and a range beside a non-null column
+  outside it;
+  `SqlcjCompilerIntegrationTest.shouldGenerateOneSharedRowRecordForALeftJoinedAndAWholeRowEntry`
+  compiles one package whose one row record is shared by an entry that
+  left-joins the table and an entry that returns it whole, and
+  `PostgresIntegrationTest.shouldExecuteGeneratedLeftJoinedWildcardAsAnAbsentRowAgainstPostgres`
+  executes `c.*, o.*` and a lone `o.*` against PostgreSQL 16, where a customer
+  without orders reads a `null` row and a matched order inserted with a `NULL`
+  status and `created_at` reads a row whose own components are `null`.
 - `QueryAnalyzerTest.shouldResolveAPublicQualifiedSource` covers the
   unqualified, `public`-qualified, quoted, and upper-case qualifier forms of one
   source, and `QueryAnalyzerTest.shouldRejectASourceOfAnotherSchema` covers the
@@ -1566,8 +1626,8 @@ Reads:
   executes a `:one` cast `SUM` against PostgreSQL 16 whose `BigDecimal`
   component is the sum and `null` when no row matches.
 - `QueryAnalyzerTest.shouldAnalyzeLeftJoinWithNullableJoinedColumns`,
-  `QueryAnalyzerTest.shouldExpandAllColumnsOfLeftJoinedSourceAsNullable`,
-  `QueryAnalyzerTest.shouldExpandQualifiedAllColumnsOfLeftJoinedSourceAsNullable`,
+  `QueryAnalyzerTest.shouldEmbedTheRowOfALeftJoinedSourceAsNullable`,
+  `QueryAnalyzerTest.shouldEmbedTheRowOfAQualifiedLeftJoinedWildcardAsNullable`,
   `QueryAnalyzerTest.shouldAnalyzeLeftJoinAfterInnerJoin`,
   `QueryAnalyzerTest.shouldAnalyzeInnerJoinAfterLeftJoin`,
   `QueryAnalyzerTest.shouldResolveLeftJoinedParametersInTextualBindingOrder`,

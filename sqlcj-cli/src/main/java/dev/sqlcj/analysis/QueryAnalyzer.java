@@ -261,7 +261,8 @@ public final class QueryAnalyzer {
      * One query source and the name it exposes to column references, which is
      * its alias when present and otherwise its table name. A left-joined
      * source contributes no row when the join finds no match, so every column
-     * read from it is nullable regardless of its schema declaration.
+     * read from it is nullable regardless of its schema declaration, and a
+     * wildcard of one embeds a row that may itself be absent.
      *
      * <p>A derived source — a common table expression or a subquery source —
      * carries the result columns of its own {@code SELECT} under its exposed
@@ -362,8 +363,8 @@ public final class QueryAnalyzer {
     /**
      * One analyzed projection in selected order: the columns it expands to,
      * which are the columns a derived source exposes, and the result components
-     * of a top-level read, where a wildcard of a schema table that is not
-     * left-joined is one embedded row.
+     * of a top-level read, where a wildcard of a schema table is one embedded
+     * row, nullable when its source is left-joined.
      */
     private record ResolvedProjection(
         List<dev.sqlcj.schema.Column> columns,
@@ -3382,8 +3383,8 @@ public final class QueryAnalyzer {
      *
      * <p>Beside the expanded columns, which are the columns a derived source
      * exposes, the projection carries the result components of a top-level
-     * read, where a wildcard of a schema table that is not left-joined is one
-     * embedded row rather than that table's own columns.
+     * read, where a wildcard of a schema table is one embedded row rather than
+     * that table's own columns, nullable when its source is left-joined.
      */
     private ResolvedProjection resolveProjection(
         PlainSelect plainSelect,
@@ -3433,9 +3434,14 @@ public final class QueryAnalyzer {
      * components: the source's columns in schema order, and one embedded row of
      * the source's table in its own position.
      *
-     * <p>A derived source has no row record, and a left-joined source's row may
-     * be absent, so each contributes its expanded columns as result components
-     * too.
+     * <p>The embedded row holds the table's own columns with their declared
+     * nullability, and the component itself is nullable when the source is
+     * left-joined, which is where the absence of the whole row is recorded. The
+     * expanded columns stay the columns a derived source exposes, so a
+     * left-joined source still exposes every one of them as nullable.
+     *
+     * <p>A derived source has no row record, so it contributes its expanded
+     * columns as result components too.
      */
     private void addWildcardColumns(
         List<dev.sqlcj.schema.Column> columns,
@@ -3450,8 +3456,9 @@ public final class QueryAnalyzer {
             resultColumns.add(
                 QueryColumn.row(
                     source.name(),
+                    source.leftJoined(),
                     source.rowTable(),
-                    toQueryColumns(sourceColumns)
+                    toQueryColumns(resolveRowColumns(source))
                 )
             );
 
@@ -3464,10 +3471,19 @@ public final class QueryAnalyzer {
     /**
      * Reports whether a wildcard of one source selects the complete row of a
      * table the package generates a row record for, which a derived source has
-     * none of and a left-joined source may contribute no row for.
+     * none of.
      */
     private boolean embedsRow(Source source) {
-        return !source.derived() && !source.leftJoined();
+        return !source.derived();
+    }
+
+    /**
+     * Reports whether a wildcard of one source returns the shared row record
+     * itself rather than embedding it, which a left-joined source does not,
+     * because its row may be absent and a result of its own records that.
+     */
+    private boolean returnsRow(Source source) {
+        return embedsRow(source) && !source.leftJoined();
     }
 
     /**
@@ -3608,8 +3624,8 @@ public final class QueryAnalyzer {
      *
      * <p>A derived source names no table, so a read over one returns a result
      * specific to its own query even when the source is named like a table, and
-     * a left-joined source's row may be absent, so a wildcard of one is read as
-     * its own columns.
+     * a left-joined source's row may be absent, so a lone wildcard of one
+     * returns a result of its own holding that row as one nullable component.
      */
     private String resolveSelectRowTable(PlainSelect plainSelect, List<Source> sources) {
         List<SelectItem<?>> selectItems = plainSelect.getSelectItems();
@@ -3633,10 +3649,10 @@ public final class QueryAnalyzer {
 
     /**
      * The table whose complete row a wildcard of one source returns, and
-     * {@code null} for a source whose wildcard is read as its own columns.
+     * {@code null} for a source whose wildcard is read as a result of its own.
      */
     private String wildcardRowTable(Source source) {
-        return embedsRow(source)
+        return returnsRow(source)
             ? source.rowTable()
             : null;
     }
@@ -3799,12 +3815,35 @@ public final class QueryAnalyzer {
      * source.
      */
     private List<dev.sqlcj.schema.Column> resolveAllColumns(Source source) {
+        return resolveSourceColumns(source, source.leftJoined());
+    }
+
+    /**
+     * The columns of one source's table in schema order, each with the
+     * nullability the schema declares, which are the columns of the row record
+     * a wildcard of that source embeds. A left-joined row is absent or complete
+     * as a whole, and the component holding it carries that, so the row's own
+     * columns keep their declaration and one table's row record stays the same
+     * record in every query that embeds or returns it.
+     */
+    private List<dev.sqlcj.schema.Column> resolveRowColumns(Source source) {
+        return resolveSourceColumns(source, false);
+    }
+
+    /**
+     * The columns of one source's table in schema order, each nullable when the
+     * schema declares it so or when {@code nullableSource} forces it.
+     */
+    private List<dev.sqlcj.schema.Column> resolveSourceColumns(
+        Source source,
+        boolean nullableSource
+    ) {
         return source.table().columns().stream()
             .map(
                 column -> new dev.sqlcj.schema.Column(
                     column.name(),
                     requireSupportedType(column),
-                    column.nullable() || source.leftJoined(),
+                    column.nullable() || nullableSource,
                     null,
                     column.enumType(),
                     column.array(),

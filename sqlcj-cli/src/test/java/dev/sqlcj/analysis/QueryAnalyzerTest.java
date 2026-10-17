@@ -2316,12 +2316,12 @@ class QueryAnalyzerTest {
     }
 
     /**
-     * A bare wildcard embeds the row of every source that is not left-joined
-     * and expands a left-joined source into its own nullable columns, each in
-     * its written position.
+     * A bare wildcard embeds the row of every table source, each in its written
+     * position, and the row of a left-joined source is one nullable component
+     * whose own columns keep their declared nullability.
      */
     @Test
-    void shouldExpandAllColumnsOfLeftJoinedSourceAsNullable() {
+    void shouldEmbedTheRowOfALeftJoinedSourceAsNullable() {
         String sql = """
             SELECT *
             FROM users u
@@ -2344,16 +2344,23 @@ class QueryAnalyzerTest {
                         new QueryColumn("name", ColumnType.VARCHAR, true)
                     )
                 ),
-                new QueryColumn("id", ColumnType.BIGINT, true),
-                new QueryColumn("user_id", ColumnType.BIGINT, true),
-                new QueryColumn("nickname", ColumnType.VARCHAR, true)
+                QueryColumn.row(
+                    "p",
+                    true,
+                    "profiles",
+                    List.of(
+                        new QueryColumn("id", ColumnType.BIGINT, false),
+                        new QueryColumn("user_id", ColumnType.BIGINT, false),
+                        new QueryColumn("nickname", ColumnType.VARCHAR, true)
+                    )
+                )
             ),
             model.columns()
         );
     }
 
     @Test
-    void shouldExpandQualifiedAllColumnsOfLeftJoinedSourceAsNullable() {
+    void shouldEmbedTheRowOfAQualifiedLeftJoinedWildcardAsNullable() {
         String sql = """
             SELECT p.*, u.name
             FROM users u
@@ -2368,9 +2375,16 @@ class QueryAnalyzerTest {
 
         assertEquals(
             List.of(
-                new QueryColumn("id", ColumnType.BIGINT, true),
-                new QueryColumn("user_id", ColumnType.BIGINT, true),
-                new QueryColumn("nickname", ColumnType.VARCHAR, true),
+                QueryColumn.row(
+                    "p",
+                    true,
+                    "profiles",
+                    List.of(
+                        new QueryColumn("id", ColumnType.BIGINT, false),
+                        new QueryColumn("user_id", ColumnType.BIGINT, false),
+                        new QueryColumn("nickname", ColumnType.VARCHAR, true)
+                    )
+                ),
                 new QueryColumn("name", ColumnType.VARCHAR, true)
             ),
             model.columns()
@@ -2763,8 +2777,9 @@ class QueryAnalyzerTest {
     }
 
     /**
-     * A lone wildcard of a left-joined source may read no row, so it stays that
-     * source's own nullable columns.
+     * A lone wildcard of a left-joined source may read no row, so it returns a
+     * result of its own holding that row as one nullable component rather than
+     * the row record itself.
      */
     @Test
     void shouldNotResolveRowTableForALoneLeftJoinedWildcard() {
@@ -2780,9 +2795,16 @@ class QueryAnalyzerTest {
 
         assertEquals(
             List.of(
-                new QueryColumn("id", ColumnType.BIGINT, true),
-                new QueryColumn("user_id", ColumnType.BIGINT, true),
-                new QueryColumn("nickname", ColumnType.VARCHAR, true)
+                QueryColumn.row(
+                    "p",
+                    true,
+                    "profiles",
+                    List.of(
+                        new QueryColumn("id", ColumnType.BIGINT, false),
+                        new QueryColumn("user_id", ColumnType.BIGINT, false),
+                        new QueryColumn("nickname", ColumnType.VARCHAR, true)
+                    )
+                )
             ),
             model.columns()
         );
