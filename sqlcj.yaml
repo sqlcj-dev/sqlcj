@@ -6,5 +6,5 @@ sql:
     queries: queries.sql
 
 java:
-  package: dev.sqlcj.example
+  package: org.sqlcj.example
   out: generated

@@ -14,7 +14,7 @@ blocking JDBC execution. There is no engine option and no dialect option in
 [Queries](queries.md).
 
 The application owns the database connection: sqlcj's runtime
-`dev.sqlcj.runtime.JdbcQueryExecutor` executes each generated query as a JDBC
+`org.sqlcj.runtime.JdbcQueryExecutor` executes each generated query as a JDBC
 `PreparedStatement`. sqlcj does not ship a JDBC driver, so the application also
 supplies the PostgreSQL driver.
 
@@ -48,7 +48,7 @@ application called.
 
 Every `SQLException` raised while acquiring a connection, preparing a statement,
 binding parameters, executing, reading results, or closing a DataSource-acquired
-connection is translated into `dev.sqlcj.runtime.QueryExecutionException` with
+connection is translated into `org.sqlcj.runtime.QueryExecutionException` with
 the message `Failed to execute query '<query>' in <repository>` and the
 `SQLException` as its cause:
 
@@ -57,7 +57,7 @@ Failed to execute query 'GetAuthor' in AuthorRepository
 ```
 
 A row count an annotation does not allow raises
-`dev.sqlcj.runtime.QueryCardinalityException`, a subclass of
+`org.sqlcj.runtime.QueryCardinalityException`, a subclass of
 `QueryExecutionException` that carries only a message:
 
 ```text
@@ -201,17 +201,17 @@ or with `resultSet.getString(position)` for a `JSON` or `JSONB` column, which
 the driver reports as a type of its own rather than as a character type. An
 enum column reads its label the same way and resolves it with
 `<EnumType>.fromLabel(...)`, and an array column is read with
-`dev.sqlcj.runtime.SqlArray.getList(...)`.
+`org.sqlcj.runtime.SqlArray.getList(...)`.
 
 A `JSON` or `JSONB` argument is passed to the executor as
-`new dev.sqlcj.runtime.UntypedText(value)`, written out in full so that the
+`new org.sqlcj.runtime.UntypedText(value)`, written out in full so that the
 generated imports are unchanged, and `JdbcQueryExecutor` binds that text with
 `java.sql.Types.OTHER`. PostgreSQL then types the text from the context of its
 placeholder, which is what a `json` or `jsonb` column or comparison needs: text
 bound as `varchar` is rejected there. An enum argument is passed the same way,
 around the label of its constant, because a label bound as `varchar` is
 rejected where an enum is expected. An array argument is wrapped in
-`dev.sqlcj.runtime.SqlArray` the same way; see [Array Types](#array-types).
+`org.sqlcj.runtime.SqlArray` the same way; see [Array Types](#array-types).
 
 ## Enum Types
 
@@ -380,7 +380,7 @@ generates `List<String> tags` and `List<StageSetting> past`.
   rejections. No other array operator or function, such as `&&`, is analyzed.
 
 An array argument is passed to the executor as
-`new dev.sqlcj.runtime.SqlArray("<element type>", <parameter>)`, written out in
+`new org.sqlcj.runtime.SqlArray("<element type>", <parameter>)`, written out in
 full so that the generated imports are unchanged, where `<element type>` is
 PostgreSQL's own name of the element type: `int4`, `int8`, `int2`, `bool`,
 `varchar`, `bpchar`, `text`, `date`, `time`, `timestamp`, `timestamptz`,
@@ -391,14 +391,14 @@ with another one; `VARCHAR` and `CHARACTER VARYING` elements are named
 `varchar`. Both read their elements back as `String`, blank padded to the
 declared length for `CHAR`, as a scalar of that type is read. An array of an
 enum carries the labels of its constants instead, as
-`dev.sqlcj.runtime.SqlArray.of("<enum type>", <parameter>, <EnumType>::label)`.
+`org.sqlcj.runtime.SqlArray.of("<enum type>", <parameter>, <EnumType>::label)`.
 
 `JdbcQueryExecutor` builds the value with `Connection.createArrayOf` on the
 connection the operation runs on and binds it with
 `PreparedStatement.setArray`. An array column is read with
-`dev.sqlcj.runtime.SqlArray.getList(resultSet, position, <Type>.class)`, which
+`org.sqlcj.runtime.SqlArray.getList(resultSet, position, <Type>.class)`, which
 reads each element as a scalar of that type is read; an array of an enum is read
-as `dev.sqlcj.runtime.SqlArray.getList(resultSet, position, String.class,
+as `org.sqlcj.runtime.SqlArray.getList(resultSet, position, String.class,
 <EnumType>::fromLabel)`. Both go through the JDBC `java.sql.Array` API alone, so
 neither the runtime nor the generated code depends on a driver.
 
@@ -731,7 +731,7 @@ mixed:
 
 - absence is expressed only by the query's annotation: `:optional` returns
   `Optional.empty()`, and `:one` fails with
-  `dev.sqlcj.runtime.QueryCardinalityException`,
+  `org.sqlcj.runtime.QueryCardinalityException`,
 - `Optional` is used only as the return type of an `:optional` query. No record
   component and no method parameter is wrapped in `Optional`, and no custom
   nullable wrapper is used.
@@ -743,16 +743,16 @@ Null handling does not depend on the column type:
 - `JdbcQueryExecutor` binds each argument positionally with
   `PreparedStatement.setObject`, so a null argument is bound as SQL `NULL`. A
   `JSON` or `JSONB` argument is bound the same way through its
-  `dev.sqlcj.runtime.UntypedText` wrapper, so a null value becomes a SQL `NULL`
+  `org.sqlcj.runtime.UntypedText` wrapper, so a null value becomes a SQL `NULL`
   without a declared type. A null enum argument is wrapped the same way, so it
   is bound as SQL `NULL` instead of as the label of a constant. A null array
   argument is bound as a SQL `NULL` array through its
-  `dev.sqlcj.runtime.SqlArray` wrapper, and a null element stays null inside the
+  `org.sqlcj.runtime.SqlArray` wrapper, and a null element stays null inside the
   bound array,
 - each result column is read with `ResultSet.getObject(position, Class)`, or
   with `ResultSet.getString(position)` for `JSON`, `JSONB`, and an enum, so a
   SQL `NULL` is read back as `null`, which `fromLabel` keeps `null` for an
-  enum. An array column is read with `dev.sqlcj.runtime.SqlArray.getList`, which
+  enum. An array column is read with `org.sqlcj.runtime.SqlArray.getList`, which
   reads a SQL `NULL` as a null list and a `NULL` element as a null element.
 
 Nullability itself is parsed from `NOT NULL` only:

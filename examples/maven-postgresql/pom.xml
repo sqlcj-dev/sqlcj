@@ -24,7 +24,7 @@
 
     <dependencies>
         <dependency>
-            <groupId>dev.sqlcj</groupId>
+            <groupId>org.sqlcj</groupId>
             <artifactId>sqlcj-runtime</artifactId>
             <version>${sqlcj.version}</version>
         </dependency>

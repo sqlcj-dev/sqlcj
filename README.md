@@ -60,8 +60,8 @@ or release procedure yet either.
 
 | Artifact | What it is |
 | --- | --- |
-| `sqlcj-cli/target/sqlcj-cli-0.1.0-SNAPSHOT.jar` | The executable command line tool. It bundles its own dependencies and starts `dev.sqlcj.Main`. |
-| `dev.sqlcj:sqlcj-runtime:0.1.0-SNAPSHOT` | The dependency of generated code. It has no dependencies of its own, so compiler, YAML, and SQL-parser libraries never reach an application. |
+| `sqlcj-cli/target/sqlcj-cli-0.1.0-SNAPSHOT.jar` | The executable command line tool. It bundles its own dependencies and starts `org.sqlcj.Main`. |
+| `org.sqlcj:sqlcj-runtime:0.1.0-SNAPSHOT` | The dependency of generated code. It has no dependencies of its own, so compiler, YAML, and SQL-parser libraries never reach an application. |
 
 The CLI and the runtime must always be used at the same version.
 
