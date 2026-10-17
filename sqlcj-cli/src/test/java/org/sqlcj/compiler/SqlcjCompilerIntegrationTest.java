@@ -2660,9 +2660,9 @@ class SqlcjCompilerIntegrationTest {
 
     /**
      * Every statement kind, projection, {@code RETURNING} item, join kind, and
-     * source outside the supported subset, a set operation in a location this
-     * subset analyzes none in included, is reported as one located line in SQL
-     * terms, before any file is written.
+     * source outside the supported subset, a set operation as the row source of
+     * an {@code INSERT} included, is reported as one located line in SQL terms,
+     * before any file is written.
      */
     @ParameterizedTest
     @MethodSource("rejectedQueries")
@@ -2686,9 +2686,6 @@ class SqlcjCompilerIntegrationTest {
     }
 
     private static Stream<Arguments> rejectedQueries() {
-        String setOperation = "UNION, INTERSECT, and EXCEPT are not supported;"
-            + " write one query per SELECT.";
-
         String statement = "Only SELECT, INSERT, UPDATE, and DELETE statements are supported.";
 
         return Stream.of(
@@ -2787,7 +2784,9 @@ class SqlcjCompilerIntegrationTest {
                 ":exec",
                 "INSERT INTO users (id, name) SELECT id, nickname FROM profiles"
                     + " UNION SELECT id, nickname FROM profiles",
-                setOperation
+                "A set operation as the row source of INSERT is not supported;"
+                    + " select from it as a subquery,"
+                    + " such as SELECT * FROM (SELECT ... UNION SELECT ...) AS combined."
             ),
             Arguments.of(
                 ":exec",
