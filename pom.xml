@@ -31,6 +31,8 @@
         <testcontainers.version>1.21.4</testcontainers.version>
         <postgresql.version>42.7.13</postgresql.version>
         <commons-compress.version>1.28.0</commons-compress.version>
+        <spring.version>7.0.9</spring.version>
+        <hibernate.version>7.4.13.Final</hibernate.version>
     </properties>
 
     <dependencyManagement>
@@ -77,6 +79,36 @@
                 <groupId>org.postgresql</groupId>
                 <artifactId>postgresql</artifactId>
                 <version>${postgresql.version}</version>
+                <scope>test</scope>
+            </dependency>
+            <!--
+                Spring and a JPA provider are used only by the tests that prove
+                generated repositories take part in a framework-managed
+                transaction. Neither the runtime nor generated code depends on
+                them.
+            -->
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-orm</artifactId>
+                <version>${spring.version}</version>
+                <scope>test</scope>
+            </dependency>
+            <!--
+                spring-orm does not depend on spring-context, while
+                LocalContainerEntityManagerFactoryBean implements its
+                ResourceLoaderAware and LoadTimeWeaverAware interfaces, so the
+                tests need it to compile.
+            -->
+            <dependency>
+                <groupId>org.springframework</groupId>
+                <artifactId>spring-context</artifactId>
+                <version>${spring.version}</version>
+                <scope>test</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.hibernate.orm</groupId>
+                <artifactId>hibernate-core</artifactId>
+                <version>${hibernate.version}</version>
                 <scope>test</scope>
             </dependency>
             <!--
