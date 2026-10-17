@@ -2147,6 +2147,15 @@ Reference service:
   its `INSERT ... SELECT` from a table, its `UPDATE ... FROM` returning the
   shared task row, and its `DELETE ... USING`, against PostgreSQL 16 through
   the generated repository.
+- `ReferenceServiceIntegrationTest.shouldExecuteTheGeneratedResultShapes`
+  executes the reference service's `SELECT p.*, COUNT(t.id) AS open_tasks`
+  grouped by `p.id`, which reads a `ProjectsRow p` beside an uncast `Long
+  openTasks`, its `SELECT t.*, MAX(c.created_at) AS last_comment_at` grouped by
+  `t.id`, which reads a `TasksRow t` beside an uncast, nullable
+  `OffsetDateTime lastCommentAt`, its inner-joined `SELECT t.*, p.*`, which
+  reads two non-null embedded rows, and its left-joined `SELECT t.*, p.*`,
+  whose `TasksRow t` is `null` for a project without tasks, against
+  PostgreSQL 16 through the generated repository.
 - `ReferenceServiceIntegrationTest.shouldRejectEachUnsupportedCatalogueQuery`
   covers the whole located diagnostic line, and the absence of generated
   output, of every entry of the reference service's unsupported query
