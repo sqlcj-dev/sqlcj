@@ -91,8 +91,8 @@ version=$(
 
 log "Verifying the staged artifacts for version ${version}"
 
-cli_jar="${local_repo}/dev/sqlcj/sqlcj-cli/${version}/sqlcj-cli-${version}.jar"
-runtime_jar="${local_repo}/dev/sqlcj/sqlcj-runtime/${version}/sqlcj-runtime-${version}.jar"
+cli_jar="${local_repo}/org/sqlcj/sqlcj-cli/${version}/sqlcj-cli-${version}.jar"
+runtime_jar="${local_repo}/org/sqlcj/sqlcj-runtime/${version}/sqlcj-runtime-${version}.jar"
 
 [ -f "${cli_jar}" ] || fail "the staged CLI is missing: ${cli_jar}"
 [ -f "${runtime_jar}" ] || fail "the staged runtime is missing: ${runtime_jar}"

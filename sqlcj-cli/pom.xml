@@ -5,7 +5,7 @@
     <modelVersion>4.0.0</modelVersion>
 
     <parent>
-        <groupId>dev.sqlcj</groupId>
+        <groupId>org.sqlcj</groupId>
         <artifactId>sqlcj</artifactId>
         <version>0.1.0-SNAPSHOT</version>
     </parent>
@@ -37,7 +37,7 @@
             compile and execute generated source.
         -->
         <dependency>
-            <groupId>dev.sqlcj</groupId>
+            <groupId>org.sqlcj</groupId>
             <artifactId>sqlcj-runtime</artifactId>
             <scope>test</scope>
         </dependency>
@@ -61,7 +61,7 @@
                 <configuration>
                     <archive>
                         <manifest>
-                            <mainClass>dev.sqlcj.Main</mainClass>
+                            <mainClass>org.sqlcj.Main</mainClass>
                             <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
                         </manifest>
                     </archive>
@@ -93,7 +93,7 @@
                             <transformers>
                                 <transformer
                                     implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
-                                    <mainClass>dev.sqlcj.Main</mainClass>
+                                    <mainClass>org.sqlcj.Main</mainClass>
                                     <manifestEntries>
                                         <Implementation-Title>${project.name}</Implementation-Title>
                                         <Implementation-Version>${project.version}</Implementation-Version>
@@ -110,7 +110,7 @@
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>exec-maven-plugin</artifactId>
                 <configuration>
-                    <mainClass>dev.sqlcj.Main</mainClass>
+                    <mainClass>org.sqlcj.Main</mainClass>
                 </configuration>
             </plugin>
         </plugins>

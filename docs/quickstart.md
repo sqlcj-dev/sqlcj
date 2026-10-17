@@ -5,7 +5,7 @@ PostgreSQL tables through sqlcj-generated Java. Every file is listed in full, so
 the steps can be followed from an empty directory.
 
 The finished project uses only the packaged sqlcj artifacts: the executable CLI
-JAR and the `dev.sqlcj:sqlcj-runtime` dependency. The sqlcj source tree is never
+JAR and the `org.sqlcj:sqlcj-runtime` dependency. The sqlcj source tree is never
 on the application's classpath.
 
 ## 1. Prerequisites
@@ -26,12 +26,12 @@ mvn -f /path/to/sqlcj/pom.xml -DskipTests install
 
 That command:
 
-- installs `dev.sqlcj:sqlcj-runtime:0.1.0-SNAPSHOT` into the local Maven
+- installs `org.sqlcj:sqlcj-runtime:0.1.0-SNAPSHOT` into the local Maven
   repository, where the application below resolves it, and
 - produces the executable CLI at
   `/path/to/sqlcj/sqlcj-cli/target/sqlcj-cli-0.1.0-SNAPSHOT.jar`.
 
-The CLI JAR carries its own dependencies and starts `dev.sqlcj.Main`. Copy it
+The CLI JAR carries its own dependencies and starts `org.sqlcj.Main`. Copy it
 into the new project and confirm its version:
 
 ```bash
@@ -88,7 +88,7 @@ mkdir -p sql/migrations src/main/java/com/example/app
 
     <dependencies>
         <dependency>
-            <groupId>dev.sqlcj</groupId>
+            <groupId>org.sqlcj</groupId>
             <artifactId>sqlcj-runtime</artifactId>
             <version>${sqlcj.version}</version>
         </dependency>
@@ -294,10 +294,10 @@ package com.example.app;
 
 import com.example.app.db.AuthorRepository;
 import com.example.app.db.AuthorsRow;
-import dev.sqlcj.runtime.JdbcQueryExecutor;
-import dev.sqlcj.runtime.QueryCardinalityException;
-import dev.sqlcj.runtime.QueryExecutor;
 import org.postgresql.ds.PGSimpleDataSource;
+import org.sqlcj.runtime.JdbcQueryExecutor;
+import org.sqlcj.runtime.QueryCardinalityException;
+import org.sqlcj.runtime.QueryExecutor;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
@@ -494,7 +494,7 @@ That output is the whole MVP contract in one run:
 - `CreateAuthor` is a `:one` write whose `RETURNING` clause reads back the
   database-generated `BIGSERIAL` identifier as a typed `Long`.
 - `GetAuthor` is a `:one` read: it returns the row when exactly one matches, and
-  fails with `dev.sqlcj.runtime.QueryCardinalityException` naming the query and
+  fails with `org.sqlcj.runtime.QueryCardinalityException` naming the query and
   the repository when none matches or several do.
 - `FindAuthor` is an `:optional` read of the same row, and returns
   `Optional.empty()` when no row matches, which is how the sample checks for a

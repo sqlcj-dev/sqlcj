@@ -44,8 +44,8 @@ database, or build queries at runtime.
 
 sqlcj is pre-release. The current version is `0.1.0-SNAPSHOT`, and no artifact
 has been published to Maven Central or any other public repository yet, so the
-CLI and runtime must be built from this repository. There is no released license
-or release procedure yet either.
+CLI and runtime must be built from this repository. There is no release
+procedure yet either.
 
 ## Requirements
 
@@ -60,8 +60,8 @@ or release procedure yet either.
 
 | Artifact | What it is |
 | --- | --- |
-| `sqlcj-cli/target/sqlcj-cli-0.1.0-SNAPSHOT.jar` | The executable command line tool. It bundles its own dependencies and starts `dev.sqlcj.Main`. |
-| `dev.sqlcj:sqlcj-runtime:0.1.0-SNAPSHOT` | The dependency of generated code. It has no dependencies of its own, so compiler, YAML, and SQL-parser libraries never reach an application. |
+| `sqlcj-cli/target/sqlcj-cli-0.1.0-SNAPSHOT.jar` | The executable command line tool. It bundles its own dependencies and starts `org.sqlcj.Main`. |
+| `org.sqlcj:sqlcj-runtime:0.1.0-SNAPSHOT` | The dependency of generated code. It has no dependencies of its own, so compiler, YAML, and SQL-parser libraries never reach an application. |
 
 The CLI and the runtime must always be used at the same version.
 
@@ -106,3 +106,7 @@ operations, including an application-controlled commit and rollback.
 - [PostgreSQL Support](docs/postgresql.md) — the engine contract, accepted
   column types and `CREATE TABLE` constructs, null handling, and connection
   ownership.
+
+## License
+
+sqlcj is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE).

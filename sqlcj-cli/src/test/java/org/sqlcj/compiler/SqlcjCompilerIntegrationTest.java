@@ -1,0 +1,4739 @@
+package org.sqlcj.compiler;
+
+import org.h2.jdbcx.JdbcDataSource;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.sqlcj.analysis.QueryAnalyzer;
+import org.sqlcj.analysis.QueryGroupModel;
+import org.sqlcj.analysis.QueryModel;
+import org.sqlcj.config.Config;
+import org.sqlcj.config.JavaConfig;
+import org.sqlcj.config.SqlConfig;
+import org.sqlcj.generator.CodeGenerator;
+import org.sqlcj.generator.GeneratedFile;
+import org.sqlcj.generator.JavaCodeGenerator;
+import org.sqlcj.parser.Query;
+import org.sqlcj.runtime.JdbcQueryExecutor;
+import org.sqlcj.runtime.QueryCardinalityException;
+import org.sqlcj.runtime.QueryExecutor;
+import org.sqlcj.schema.Schema;
+import org.sqlcj.schema.parser.DefaultSchemaParser;
+import org.sqlcj.schema.parser.SchemaParser;
+import org.sqlcj.sql.SqlParser;
+
+import javax.tools.JavaCompiler;
+import javax.tools.ToolProvider;
+import java.io.IOException;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.RecordComponent;
+import java.math.BigDecimal;
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.Statement;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.UUID;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+import java.util.stream.Stream;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class SqlcjCompilerIntegrationTest {
+
+    private static final String JOIN_SCHEMA = """
+        CREATE TABLE users
+        (
+            id   BIGINT NOT NULL,
+            name VARCHAR(255)
+        );
+
+        CREATE TABLE profiles
+        (
+            id       BIGINT NOT NULL,
+            user_id  BIGINT NOT NULL,
+            nickname VARCHAR(255)
+        );
+
+        CREATE TABLE orders
+        (
+            id      BIGINT NOT NULL,
+            user_id BIGINT NOT NULL,
+            total   DECIMAL(10, 2)
+        );
+        """;
+
+    @TempDir
+    Path tempDir;
+
+    @Test
+    void shouldGenerateCompilableJavaFiles() throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+        Path classesDirectory = tempDir.resolve("classes");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE users
+                (
+                    id         BIGINT NOT NULL,
+                    name       VARCHAR(255),
+                    active     BOOLEAN,
+                    birth_date DATE,
+                    created_at TIMESTAMP,
+                    balance    DECIMAL(10, 2)
+                );
+                """
+        );
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: GetUser :one
+                SELECT *
+                FROM users
+                WHERE created_at = $1;
+
+                -- name: ListUsers :many
+                SELECT id, birth_date, created_at, balance
+                FROM users
+                WHERE created_at = $1;
+
+                -- name: FindUsers :many
+                SELECT id, name
+                FROM users
+                WHERE id IN ($1, $2)
+                  AND (active = $3 OR name = $4);
+                """
+        );
+
+        Config config = new Config(
+            List.of(
+                new SqlConfig(
+                    "Users",
+                    schemaFile.toString(),
+                    queriesFile.toString()
+                )
+            ),
+            new JavaConfig(
+                generatedDirectory.toString(),
+                "generated"
+            )
+        );
+
+        SqlcjCompiler compiler = new SqlcjCompiler();
+
+        compiler.compile(config);
+
+        Path repositoryFile = generatedDirectory.resolve("generated/UsersRepository.java");
+
+        assertTrue(Files.exists(repositoryFile));
+
+        assertFalse(Files.exists(generatedDirectory.resolve("generated/GetUser.java")));
+        assertFalse(Files.exists(generatedDirectory.resolve("generated/ListUsers.java")));
+        assertFalse(Files.exists(generatedDirectory.resolve("generated/FindUsers.java")));
+
+        String repository = Files.readString(repositoryFile);
+
+        assertTrue(repository.contains("public final class UsersRepository"));
+        assertTrue(repository.contains("import java.time.LocalDate;"));
+        assertTrue(repository.contains("import java.time.LocalDateTime;"));
+        assertTrue(repository.contains("import java.math.BigDecimal;"));
+        assertTrue(repository.contains("import java.util.List;"));
+
+        assertEquals(
+            1,
+            repository.lines()
+                .filter(line -> line.equals("    private final QueryExecutor executor;"))
+                .count()
+        );
+
+        assertEquals(
+            1,
+            repository.lines()
+                .filter(line -> line.contains("public UsersRepository(QueryExecutor executor)"))
+                .count()
+        );
+
+        assertTrue(repository.contains("public UsersRow getUser(LocalDateTime createdAt)"));
+        assertFalse(repository.contains("GetUserResult"));
+        assertTrue(repository.contains("Long id"));
+        assertTrue(repository.contains("String name"));
+        assertTrue(repository.contains("LocalDate birthDate"));
+        assertTrue(repository.contains("LocalDateTime createdAt"));
+        assertTrue(repository.contains("BigDecimal balance"));
+
+        Path rowFile = generatedDirectory.resolve("generated/UsersRow.java");
+
+        assertTrue(Files.exists(rowFile));
+
+        String row = Files.readString(rowFile);
+
+        assertTrue(row.contains("package generated;"));
+        assertTrue(row.contains("Table: users"));
+        assertTrue(row.contains("public record UsersRow("));
+        assertFalse(repository.contains("public record UsersRow("));
+
+        assertEquals(
+            List.of(
+                "Long id",
+                "String name",
+                "Boolean active",
+                "LocalDate birthDate",
+                "LocalDateTime createdAt",
+                "BigDecimal balance"
+            ),
+            recordComponents(row, "UsersRow")
+        );
+
+        assertTrue(repository.contains("private static final RowMapper<UsersRow> usersRowMapper"));
+        assertTrue(repository.contains("resultSet.getObject(1, Long.class)"));
+        assertTrue(repository.contains("resultSet.getObject(2, String.class)"));
+        assertTrue(repository.contains("resultSet.getObject(3, Boolean.class)"));
+        assertTrue(repository.contains("resultSet.getObject(4, LocalDate.class)"));
+        assertTrue(repository.contains("resultSet.getObject(5, LocalDateTime.class)"));
+        assertTrue(repository.contains("resultSet.getObject(6, BigDecimal.class)"));
+
+        assertTrue(repository.contains("public List<ListUsersResult> listUsers(LocalDateTime createdAt)"));
+        assertTrue(repository.contains("private static final RowMapper<ListUsersResult> listUsersRowMapper"));
+
+        assertEquals(
+            List.of(
+                "Long id",
+                "LocalDate birthDate",
+                "LocalDateTime createdAt",
+                "BigDecimal balance"
+            ),
+            recordComponents(repository, "ListUsersResult")
+        );
+
+        assertTrue(
+            repository
+                .contains("public List<FindUsersResult> findUsers(Long id1, Long id2, Boolean active, String name)")
+        );
+        assertTrue(repository.contains("public record FindUsersResult("));
+        assertTrue(repository.contains("private static final RowMapper<FindUsersResult> findUsersRowMapper"));
+
+        assertTrue(
+            repository.indexOf("public UsersRow getUser(") < repository
+                .indexOf("public List<ListUsersResult> listUsers(")
+        );
+
+        assertTrue(
+            repository.indexOf("public List<ListUsersResult> listUsers(") < repository
+                .indexOf("public List<FindUsersResult> findUsers(")
+        );
+
+        assertCompiles(generatedDirectory, classesDirectory);
+
+        assertTrue(
+            Files.exists(
+                classesDirectory.resolve("generated/UsersRepository.class")
+            )
+        );
+
+        assertTrue(
+            Files.exists(
+                classesDirectory.resolve("generated/UsersRow.class")
+            )
+        );
+    }
+
+    @Test
+    void shouldExecuteGeneratedQuery() throws Exception {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+        Path classesDirectory = tempDir.resolve("classes");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE users
+                (
+                    id         BIGINT NOT NULL,
+                    name       VARCHAR(255),
+                    active     BOOLEAN,
+                    birth_date DATE,
+                    created_at TIMESTAMP,
+                    balance    DECIMAL(10, 2)
+                );
+                """
+        );
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: GetUser :one
+                SELECT *
+                FROM users
+                WHERE created_at = $1;
+                """
+        );
+
+        Config config = new Config(
+            List.of(
+                new SqlConfig(
+                    "Users",
+                    schemaFile.toString(),
+                    queriesFile.toString()
+                )
+            ),
+            new JavaConfig(
+                generatedDirectory.toString(),
+                "generated"
+            )
+        );
+
+        SqlcjCompiler compiler = new SqlcjCompiler();
+
+        compiler.compile(config);
+
+        Path repositoryFile = generatedDirectory.resolve("generated/UsersRepository.java");
+
+        assertTrue(Files.exists(repositoryFile));
+
+        assertCompiles(generatedDirectory, classesDirectory);
+
+        JdbcDataSource dataSource = new JdbcDataSource();
+
+        dataSource.setURL(
+            "jdbc:h2:mem:" + UUID.randomUUID()
+                + ";DB_CLOSE_DELAY=-1"
+        );
+
+        try (
+            Connection connection = dataSource.getConnection();
+            Statement statement = connection.createStatement()
+        ) {
+            statement.execute("""
+                CREATE TABLE users (
+                    id BIGINT PRIMARY KEY,
+                    name VARCHAR(255),
+                    active BOOLEAN,
+                    birth_date DATE,
+                    created_at TIMESTAMP,
+                    balance DECIMAL(10, 2)
+                )
+                """);
+
+            statement.execute("""
+                INSERT INTO users
+                    (id, name, active, birth_date, created_at, balance)
+                VALUES
+                    (1, 'Alice', TRUE, '1990-01-15',
+                     '2026-01-01 10:00:00', 100.50)
+                """);
+        }
+
+        QueryExecutor executor = new JdbcQueryExecutor(dataSource);
+
+        URL[] classpathUrls = {
+            classesDirectory.toUri().toURL()
+        };
+
+        try (URLClassLoader classLoader = new URLClassLoader(classpathUrls, getClass().getClassLoader())) {
+            Class<?> generatedClass = Class.forName(
+                "generated.UsersRepository",
+                true,
+                classLoader
+            );
+
+            Constructor<?> constructor = generatedClass.getConstructor(
+                QueryExecutor.class
+            );
+
+            Object generatedQuery = constructor.newInstance(executor);
+
+            Method method = generatedClass.getMethod(
+                "getUser",
+                LocalDateTime.class
+            );
+
+            Object result = method.invoke(
+                generatedQuery,
+                LocalDateTime.of(
+                    2026,
+                    1,
+                    1,
+                    10,
+                    0
+                )
+            );
+
+            assertNotNull(result);
+
+            assertEquals(
+                1L,
+                getRecordComponent(result, "id")
+            );
+
+            assertEquals(
+                "Alice",
+                getRecordComponent(result, "name")
+            );
+
+            assertEquals(
+                true,
+                getRecordComponent(result, "active")
+            );
+        }
+    }
+
+    @Test
+    void shouldExecuteGeneratedManyQuery() throws Exception {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+        Path classesDirectory = tempDir.resolve("classes");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE users
+                (
+                    id         BIGINT NOT NULL,
+                    name       VARCHAR(255),
+                    active     BOOLEAN,
+                    birth_date DATE,
+                    created_at TIMESTAMP,
+                    balance    DECIMAL(10, 2)
+                );
+                """
+        );
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: ListActiveUsers :many
+                SELECT id, name, active
+                FROM users
+                WHERE active = $1
+                ORDER BY id;
+                """
+        );
+
+        Config config = new Config(
+            List.of(
+                new SqlConfig(
+                    "Users",
+                    schemaFile.toString(),
+                    queriesFile.toString()
+                )
+            ),
+            new JavaConfig(
+                generatedDirectory.toString(),
+                "generated"
+            )
+        );
+
+        SqlcjCompiler compiler = new SqlcjCompiler();
+
+        compiler.compile(config);
+
+        Path repositoryFile = generatedDirectory.resolve("generated/UsersRepository.java");
+
+        assertTrue(Files.exists(repositoryFile));
+
+        assertCompiles(generatedDirectory, classesDirectory);
+
+        JdbcDataSource dataSource = new JdbcDataSource();
+
+        dataSource.setURL(
+            "jdbc:h2:mem:" + UUID.randomUUID()
+                + ";DB_CLOSE_DELAY=-1"
+        );
+
+        try (
+            Connection connection = dataSource.getConnection();
+            Statement statement = connection.createStatement()
+        ) {
+            statement.execute("""
+                CREATE TABLE users (
+                    id BIGINT PRIMARY KEY,
+                    name VARCHAR(255),
+                    active BOOLEAN,
+                    birth_date DATE,
+                    created_at TIMESTAMP,
+                    balance DECIMAL(10, 2)
+                )
+                """);
+
+            statement.execute("""
+                INSERT INTO users
+                    (id, name, active, birth_date, created_at, balance)
+                VALUES
+                    (1, 'Alice', TRUE, '1990-01-15',
+                     '2026-01-01 10:00:00', 100.50),
+                    (2, 'Bob', FALSE, '1985-05-20',
+                     '2026-02-01 11:30:00', 200.75),
+                    (3, 'Charlie', TRUE, '1995-10-10',
+                     '2026-03-01 12:45:00', 300.25)
+                """);
+        }
+
+        QueryExecutor executor = new JdbcQueryExecutor(dataSource);
+
+        URL[] classpathUrls = {
+            classesDirectory.toUri().toURL()
+        };
+
+        try (
+            URLClassLoader classLoader = new URLClassLoader(
+                classpathUrls,
+                getClass().getClassLoader()
+            )
+        ) {
+            Class<?> generatedClass = Class.forName(
+                "generated.UsersRepository",
+                true,
+                classLoader
+            );
+
+            Constructor<?> constructor = generatedClass.getConstructor(
+                QueryExecutor.class
+            );
+
+            Object generatedQuery = constructor.newInstance(executor);
+
+            Method method = generatedClass.getMethod(
+                "listActiveUsers",
+                Boolean.class
+            );
+
+            Object result = method.invoke(
+                generatedQuery,
+                true
+            );
+
+            assertNotNull(result);
+            assertInstanceOf(List.class, result);
+
+            List<?> users = (List<?>) result;
+
+            assertEquals(2, users.size());
+
+            Object first = users.get(0);
+            Object second = users.get(1);
+
+            assertEquals(
+                1L,
+                getRecordComponent(first, "id")
+            );
+
+            assertEquals(
+                "Alice",
+                getRecordComponent(first, "name")
+            );
+
+            assertEquals(
+                true,
+                getRecordComponent(first, "active")
+            );
+
+            assertEquals(
+                3L,
+                getRecordComponent(second, "id")
+            );
+
+            assertEquals(
+                "Charlie",
+                getRecordComponent(second, "name")
+            );
+
+            assertEquals(
+                true,
+                getRecordComponent(second, "active")
+            );
+        }
+    }
+
+    @Test
+    void shouldExecuteGeneratedQueryWithOutOfOrderPlaceholders() throws Exception {
+        Path classesDirectory = generateAndCompile(
+            """
+                -- name: FindUser :one
+                SELECT id, name, active
+                FROM users
+                WHERE active = $2
+                  AND id = $1;
+                """
+        );
+
+        String source = Files.readString(tempDir.resolve("generated/generated/UsersRepository.java"));
+
+        assertTrue(
+            source.contains(
+                "public FindUserResult findUser(Long id, Boolean active)"
+            )
+        );
+
+        assertTrue(source.contains("java.util.Arrays.asList(active, id)"));
+
+        QueryExecutor executor = new JdbcQueryExecutor(usersDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName(
+                "generated.UsersRepository",
+                true,
+                classLoader
+            );
+
+            Object generatedQuery = generatedClass
+                .getConstructor(QueryExecutor.class)
+                .newInstance(executor);
+
+            Method method = generatedClass.getMethod(
+                "findUser",
+                Long.class,
+                Boolean.class
+            );
+
+            Object result = method.invoke(generatedQuery, 1L, true);
+
+            assertNotNull(result);
+
+            assertEquals(1L, getRecordComponent(result, "id"));
+            assertEquals("Alice", getRecordComponent(result, "name"));
+            assertEquals(true, getRecordComponent(result, "active"));
+        }
+    }
+
+    /**
+     * A repository generated from a cast placeholder compiles: the cast types
+     * its placeholder, the compared column names it, and the cast reaches the
+     * executable SQL as written beside its {@code ?} marker.
+     */
+    @Test
+    void shouldGenerateCompilableJavaForCastPlaceholders() throws IOException {
+        generateAndCompile(
+            """
+                -- name: FindUsers :many
+                SELECT id, name
+                FROM users
+                WHERE name = $1::text OR name = $2;
+                """
+        );
+
+        String source = Files.readString(
+            tempDir.resolve("generated/generated/UsersRepository.java")
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<FindUsersResult> findUsers(String name1, String name2)"
+            ),
+            source
+        );
+
+        assertTrue(source.contains("WHERE name = ?::text OR name = ?"), source);
+        assertTrue(source.contains("java.util.Arrays.asList(name1, name2)"), source);
+    }
+
+    /**
+     * A repository generated from named placeholders compiles and executes: its
+     * method parameters follow first-occurrence order and carry the placeholder
+     * names, while a repeated name binds at each of its textual positions.
+     */
+    @Test
+    void shouldExecuteGeneratedQueryWithNamedPlaceholders() throws Exception {
+        Path classesDirectory = generateAndCompile(
+            """
+                -- name: FindUser :one
+                SELECT id, name, active
+                FROM users
+                WHERE (name = :term OR name = :term)
+                  AND id = :userId;
+                """
+        );
+
+        String source = Files.readString(tempDir.resolve("generated/generated/UsersRepository.java"));
+
+        assertTrue(
+            source.contains(
+                "public FindUserResult findUser(String term, Long userId)"
+            )
+        );
+
+        assertTrue(source.contains("java.util.Arrays.asList(term, term, userId)"));
+        assertTrue(source.contains("WHERE (name = ? OR name = ?)"));
+        assertTrue(source.contains("AND id = ?"));
+
+        QueryExecutor executor = new JdbcQueryExecutor(usersDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName(
+                "generated.UsersRepository",
+                true,
+                classLoader
+            );
+
+            Object generatedQuery = generatedClass
+                .getConstructor(QueryExecutor.class)
+                .newInstance(executor);
+
+            Method method = generatedClass.getMethod(
+                "findUser",
+                String.class,
+                Long.class
+            );
+
+            Object result = method.invoke(generatedQuery, "Alice", 1L);
+
+            assertNotNull(result);
+
+            assertEquals(1L, getRecordComponent(result, "id"));
+            assertEquals("Alice", getRecordComponent(result, "name"));
+        }
+    }
+
+    @Test
+    void shouldExecuteGeneratedQueryWithRepeatedPlaceholder() throws Exception {
+        Path classesDirectory = generateAndCompile(
+            """
+                -- name: FindUser :one
+                SELECT id, name, active
+                FROM users
+                WHERE name = $2
+                  AND (id = $1 OR id = $1);
+                """
+        );
+
+        String source = Files.readString(tempDir.resolve("generated/generated/UsersRepository.java"));
+
+        assertTrue(
+            source.contains(
+                "public FindUserResult findUser(Long id, String name)"
+            )
+        );
+
+        assertTrue(source.contains("java.util.Arrays.asList(name, id, id)"));
+        assertTrue(source.contains("AND (id = ? OR id = ?)"));
+
+        QueryExecutor executor = new JdbcQueryExecutor(usersDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName(
+                "generated.UsersRepository",
+                true,
+                classLoader
+            );
+
+            Object generatedQuery = generatedClass
+                .getConstructor(QueryExecutor.class)
+                .newInstance(executor);
+
+            Method method = generatedClass.getMethod(
+                "findUser",
+                Long.class,
+                String.class
+            );
+
+            Object result = method.invoke(generatedQuery, 1L, "Alice");
+
+            assertNotNull(result);
+
+            assertEquals(1L, getRecordComponent(result, "id"));
+            assertEquals("Alice", getRecordComponent(result, "name"));
+
+            InvocationTargetException failure = assertThrows(
+                InvocationTargetException.class,
+                () -> method.invoke(generatedQuery, 2L, "Alice")
+            );
+
+            QueryCardinalityException cardinality = assertInstanceOf(
+                QueryCardinalityException.class,
+                failure.getCause()
+            );
+
+            assertEquals(
+                "Query 'FindUser' in UsersRepository returned no row; expected exactly one",
+                cardinality.getMessage()
+            );
+        }
+    }
+
+    @Test
+    void shouldExecuteGeneratedQueryWithProtectedPlaceholderText() throws Exception {
+        Path classesDirectory = generateAndCompile(
+            """
+                -- name: FindUser :one
+                -- Keeps $9 in a comment.
+                SELECT id, name
+                FROM users
+                WHERE name <> '$1 literal' /* keeps $8 */
+                  AND id = $1;
+                """
+        );
+
+        String source = Files.readString(tempDir.resolve("generated/generated/UsersRepository.java"));
+
+        assertTrue(source.contains("-- Keeps $9 in a comment."));
+        assertTrue(source.contains("WHERE name <> '$1 literal' /* keeps $8 */"));
+        assertTrue(source.contains("AND id = ?"));
+
+        assertTrue(
+            source.contains(
+                "public FindUserResult findUser(Long id)"
+            )
+        );
+
+        QueryExecutor executor = new JdbcQueryExecutor(usersDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName(
+                "generated.UsersRepository",
+                true,
+                classLoader
+            );
+
+            Object generatedQuery = generatedClass
+                .getConstructor(QueryExecutor.class)
+                .newInstance(executor);
+
+            Object result = generatedClass
+                .getMethod("findUser", Long.class)
+                .invoke(generatedQuery, 1L);
+
+            assertNotNull(result);
+
+            assertEquals("Alice", getRecordComponent(result, "name"));
+        }
+    }
+
+    @Test
+    void shouldExecuteGeneratedQueryWithoutParameters() throws Exception {
+        Path classesDirectory = generateAndCompile(
+            """
+                -- name: ListAllUsers :many
+                SELECT id, name
+                FROM users
+                ORDER BY id;
+                """
+        );
+
+        String source = Files.readString(tempDir.resolve("generated/generated/UsersRepository.java"));
+
+        assertTrue(
+            source.contains(
+                "public List<ListAllUsersResult> listAllUsers()"
+            )
+        );
+
+        assertTrue(source.contains("java.util.Arrays.asList()"));
+
+        QueryExecutor executor = new JdbcQueryExecutor(usersDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName(
+                "generated.UsersRepository",
+                true,
+                classLoader
+            );
+
+            Object generatedQuery = generatedClass
+                .getConstructor(QueryExecutor.class)
+                .newInstance(executor);
+
+            List<?> results = assertInstanceOf(
+                List.class,
+                generatedClass
+                    .getMethod("listAllUsers")
+                    .invoke(generatedQuery)
+            );
+
+            assertEquals(2, results.size());
+
+            assertEquals(1L, getRecordComponent(results.get(0), "id"));
+            assertEquals("Alice", getRecordComponent(results.get(0), "name"));
+            assertEquals(2L, getRecordComponent(results.get(1), "id"));
+            assertEquals("Bob", getRecordComponent(results.get(1), "name"));
+        }
+    }
+
+    @Test
+    void shouldExecuteGeneratedInsert() throws Exception {
+        Path classesDirectory = generateAndCompile(
+            """
+                -- name: InsertUser :exec
+                INSERT INTO users (id, name, active)
+                VALUES ($1, $2, $3);
+                """
+        );
+
+        String source = Files.readString(tempDir.resolve("generated/generated/UsersRepository.java"));
+
+        assertTrue(
+            source.contains(
+                "public int insertUser(Long id, String name, Boolean active)"
+            )
+        );
+
+        assertTrue(source.contains("return executor.execute("));
+        assertTrue(source.contains("java.util.Arrays.asList(id, name, active)"));
+        assertFalse(source.contains("public record InsertUserResult("));
+        assertFalse(source.contains("RowMapper"));
+
+        QueryExecutor executor = new JdbcQueryExecutor(usersDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName(
+                "generated.UsersRepository",
+                true,
+                classLoader
+            );
+
+            Object generatedQuery = generatedClass
+                .getConstructor(QueryExecutor.class)
+                .newInstance(executor);
+
+            Object affected = generatedClass
+                .getMethod("insertUser", Long.class, String.class, Boolean.class)
+                .invoke(generatedQuery, 3L, "Carol", true);
+
+            assertEquals(1, affected);
+
+            assertEquals(
+                "Carol",
+                executor.queryOne(
+                    "UsersRepository",
+                    "GetUserName",
+                    "SELECT name FROM users WHERE id = ?",
+                    List.of(3L),
+                    resultSet -> resultSet.getString("name")
+                )
+            );
+        }
+    }
+
+    @Test
+    void shouldExecuteGeneratedUpdateWithOutOfOrderPlaceholders() throws Exception {
+        Path classesDirectory = generateAndCompile(
+            """
+                -- name: UpdateUserName :exec
+                UPDATE users
+                SET name = $2
+                WHERE id = $1;
+                """
+        );
+
+        String source = Files.readString(tempDir.resolve("generated/generated/UsersRepository.java"));
+
+        assertTrue(
+            source.contains(
+                "public int updateUserName(Long id, String name)"
+            )
+        );
+
+        assertTrue(source.contains("java.util.Arrays.asList(name, id)"));
+
+        QueryExecutor executor = new JdbcQueryExecutor(usersDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName(
+                "generated.UsersRepository",
+                true,
+                classLoader
+            );
+
+            Object generatedQuery = generatedClass
+                .getConstructor(QueryExecutor.class)
+                .newInstance(executor);
+
+            Object affected = generatedClass
+                .getMethod("updateUserName", Long.class, String.class)
+                .invoke(generatedQuery, 1L, "Alicia");
+
+            assertEquals(1, affected);
+
+            assertEquals(
+                "Alicia",
+                executor.queryOne(
+                    "UsersRepository",
+                    "GetUserName",
+                    "SELECT name FROM users WHERE id = ?",
+                    List.of(1L),
+                    resultSet -> resultSet.getString("name")
+                )
+            );
+        }
+    }
+
+    @Test
+    void shouldExecuteGeneratedDelete() throws Exception {
+        Path classesDirectory = generateAndCompile(
+            """
+                -- name: DeleteUser :exec
+                DELETE FROM users
+                WHERE id = $1;
+                """
+        );
+
+        String source = Files.readString(tempDir.resolve("generated/generated/UsersRepository.java"));
+
+        assertTrue(source.contains("public int deleteUser(Long id)"));
+        assertTrue(source.contains("java.util.Arrays.asList(id)"));
+
+        QueryExecutor executor = new JdbcQueryExecutor(usersDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName(
+                "generated.UsersRepository",
+                true,
+                classLoader
+            );
+
+            Object generatedQuery = generatedClass
+                .getConstructor(QueryExecutor.class)
+                .newInstance(executor);
+
+            Object affected = generatedClass
+                .getMethod("deleteUser", Long.class)
+                .invoke(generatedQuery, 2L);
+
+            assertEquals(1, affected);
+
+            assertTrue(
+                executor.queryOptional(
+                    "UsersRepository",
+                    "FindUserName",
+                    "SELECT name FROM users WHERE id = ?",
+                    List.of(2L),
+                    resultSet -> resultSet.getString("name")
+                ).isEmpty()
+            );
+        }
+    }
+
+    @Test
+    void shouldExecuteGeneratedAliasedQualifiedQuery() throws Exception {
+        Path classesDirectory = generateAndCompile(
+            JOIN_SCHEMA,
+            """
+                -- name: GetUser :one
+                SELECT u.id, u.name
+                FROM users u
+                WHERE u.id = $1;
+                """
+        );
+
+        String source = Files.readString(tempDir.resolve("generated/generated/UsersRepository.java"));
+
+        assertTrue(source.contains("public GetUserResult getUser(Long id)"));
+        assertTrue(source.contains("resultSet.getObject(1, Long.class)"));
+        assertTrue(source.contains("resultSet.getObject(2, String.class)"));
+
+        QueryExecutor executor = new JdbcQueryExecutor(joinDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName("generated.UsersRepository", true, classLoader);
+
+            Object result = generatedClass
+                .getMethod("getUser", Long.class)
+                .invoke(
+                    generatedClass
+                        .getConstructor(QueryExecutor.class)
+                        .newInstance(executor),
+                    1L
+                );
+
+            assertNotNull(result);
+            assertEquals(1L, getRecordComponent(result, "id"));
+            assertEquals("Alice", getRecordComponent(result, "name"));
+        }
+    }
+
+    @Test
+    void shouldExecuteGeneratedJoinQueryWithDuplicateColumnNames() throws Exception {
+        Path classesDirectory = generateAndCompile(
+            JOIN_SCHEMA,
+            """
+                -- name: ListUserProfiles :many
+                SELECT u.id, p.id, p.nickname
+                FROM users u
+                JOIN profiles p ON p.user_id = u.id
+                WHERE p.nickname = $2
+                  AND u.id = $1;
+                """
+        );
+
+        String source = Files.readString(tempDir.resolve("generated/generated/UsersRepository.java"));
+
+        assertTrue(
+            source.contains(
+                "public List<ListUserProfilesResult> listUserProfiles(Long id, String nickname)"
+            )
+        );
+
+        assertTrue(source.contains("java.util.Arrays.asList(nickname, id)"));
+        assertTrue(source.contains("Long id1"));
+        assertTrue(source.contains("Long id2"));
+
+        QueryExecutor executor = new JdbcQueryExecutor(joinDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName(
+                "generated.UsersRepository",
+                true,
+                classLoader
+            );
+
+            Object results = generatedClass
+                .getMethod("listUserProfiles", Long.class, String.class)
+                .invoke(
+                    generatedClass
+                        .getConstructor(QueryExecutor.class)
+                        .newInstance(executor),
+                    1L,
+                    "ali"
+                );
+
+            List<?> rows = assertInstanceOf(List.class, results);
+
+            assertEquals(1, rows.size());
+
+            Object row = rows.get(0);
+
+            assertEquals(1L, getRecordComponent(row, "id1"));
+            assertEquals(10L, getRecordComponent(row, "id2"));
+            assertEquals("ali", getRecordComponent(row, "nickname"));
+        }
+    }
+
+    /**
+     * An explicit projection alias names the generated record component, while
+     * the row mapper keeps reading each column by its projection position.
+     */
+    @Test
+    void shouldExecuteGeneratedJoinQueryWithProjectionAliases() throws Exception {
+        Path classesDirectory = generateAndCompile(
+            JOIN_SCHEMA,
+            """
+                -- name: ListUserProfiles :many
+                SELECT u.id AS user_id, p.id AS profile_id, p.nickname
+                FROM users u
+                JOIN profiles p ON p.user_id = u.id
+                WHERE u.id = $1;
+                """
+        );
+
+        String source = Files.readString(tempDir.resolve("generated/generated/UsersRepository.java"));
+
+        assertTrue(
+            source.contains(
+                "public List<ListUserProfilesResult> listUserProfiles(Long id)"
+            )
+        );
+
+        assertEquals(
+            List.of("Long userId", "Long profileId", "String nickname"),
+            recordComponents(source, "ListUserProfilesResult")
+        );
+
+        assertTrue(source.contains("resultSet.getObject(1, Long.class)"));
+        assertTrue(source.contains("resultSet.getObject(2, Long.class)"));
+        assertTrue(source.contains("resultSet.getObject(3, String.class)"));
+
+        QueryExecutor executor = new JdbcQueryExecutor(joinDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName(
+                "generated.UsersRepository",
+                true,
+                classLoader
+            );
+
+            Object results = generatedClass
+                .getMethod("listUserProfiles", Long.class)
+                .invoke(
+                    generatedClass
+                        .getConstructor(QueryExecutor.class)
+                        .newInstance(executor),
+                    1L
+                );
+
+            List<?> rows = assertInstanceOf(List.class, results);
+
+            assertEquals(1, rows.size());
+
+            Object row = rows.get(0);
+
+            assertEquals(1L, getRecordComponent(row, "userId"));
+            assertEquals(10L, getRecordComponent(row, "profileId"));
+            assertEquals("ali", getRecordComponent(row, "nickname"));
+        }
+    }
+
+    @Test
+    void shouldExecuteGeneratedMultipleJoinQuery() throws Exception {
+        Path classesDirectory = generateAndCompile(
+            JOIN_SCHEMA,
+            """
+                -- name: GetUserOrder :one
+                SELECT u.id, p.nickname, o.id, o.total
+                FROM users u
+                JOIN profiles p ON p.user_id = u.id
+                JOIN orders o ON o.user_id = u.id
+                WHERE u.id = $1;
+                """
+        );
+
+        QueryExecutor executor = new JdbcQueryExecutor(joinDataSource());
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> generatedClass = Class.forName(
+                "generated.UsersRepository",
+                true,
+                classLoader
+            );
+
+            Object result = generatedClass
+                .getMethod("getUserOrder", Long.class)
+                .invoke(
+                    generatedClass
+                        .getConstructor(QueryExecutor.class)
+                        .newInstance(executor),
+                    2L
+                );
+
+            assertNotNull(result);
+            assertEquals(2L, getRecordComponent(result, "id1"));
+            assertEquals("bob", getRecordComponent(result, "nickname"));
+            assertEquals(200L, getRecordComponent(result, "id2"));
+            assertEquals(new BigDecimal("20.00"), getRecordComponent(result, "total"));
+        }
+    }
+
+    /**
+     * A repository generated from join conditions of any boolean expression
+     * compiles: a composite-key inner join, a filtered left join, and a join
+     * condition that binds a placeholder before the {@code WHERE} one.
+     */
+    @Test
+    void shouldGenerateCompilableJavaForJoinConditions() throws IOException {
+        generateAndCompile(
+            JOIN_SCHEMA,
+            """
+                -- name: ListMatchingProfiles :many
+                SELECT u.id, p.nickname
+                FROM users u
+                JOIN profiles p ON p.user_id = u.id AND p.nickname = u.name
+                WHERE u.id = $1;
+
+                -- name: ListNicknamedProfiles :many
+                SELECT u.id, p.id AS profile_id, p.nickname
+                FROM users u
+                LEFT JOIN profiles p ON p.user_id = u.id AND p.nickname IS NOT NULL;
+
+                -- name: FindUserProfile :many
+                SELECT u.id
+                FROM users u
+                JOIN profiles p ON p.user_id = u.id AND p.nickname = $2
+                WHERE u.id = $1;
+                """
+        );
+
+        String source = Files.readString(
+            tempDir.resolve("generated/generated/UsersRepository.java")
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<ListMatchingProfilesResult> listMatchingProfiles(Long id)"
+            ),
+            source
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<ListNicknamedProfilesResult> listNicknamedProfiles()"
+            ),
+            source
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<FindUserProfileResult> findUserProfile(Long id, String nickname)"
+            ),
+            source
+        );
+
+        assertTrue(source.contains("java.util.Arrays.asList(nickname, id)"), source);
+
+        assertEquals(
+            List.of("Long id", "Long profileId", "String nickname"),
+            recordComponents(source, "ListNicknamedProfilesResult")
+        );
+    }
+
+    @Test
+    void shouldCompileConfiguredEntriesWithConfiguredPackage() throws IOException {
+        Path usersSchema = tempDir.resolve("users-schema.sql");
+        Path usersQueries = tempDir.resolve("users-queries.sql");
+        Path ordersSchema = tempDir.resolve("orders-schema.sql");
+        Path ordersQueries = tempDir.resolve("orders-queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+        Path classesDirectory = tempDir.resolve("classes");
+
+        Files.writeString(
+            usersSchema,
+            """
+                CREATE TABLE users
+                (
+                    id   BIGINT NOT NULL,
+                    name VARCHAR(255)
+                );
+                """
+        );
+
+        Files.writeString(
+            usersQueries,
+            """
+                -- name: GetUser :one
+                SELECT id, name
+                FROM users
+                WHERE id = $1;
+                """
+        );
+
+        Files.writeString(
+            ordersSchema,
+            """
+                CREATE TABLE orders
+                (
+                    id         BIGINT NOT NULL,
+                    total      DECIMAL(10, 2),
+                    created_at TIMESTAMP
+                );
+                """
+        );
+
+        Files.writeString(
+            ordersQueries,
+            """
+                -- name: ListOrders :many
+                SELECT id, total, created_at
+                FROM orders
+                WHERE created_at = $1;
+                """
+        );
+
+        Config config = new Config(
+            List.of(
+                new SqlConfig(
+                    "Users",
+                    usersSchema.toString(),
+                    usersQueries.toString()
+                ),
+                new SqlConfig(
+                    "Orders",
+                    ordersSchema.toString(),
+                    ordersQueries.toString()
+                )
+            ),
+            new JavaConfig(
+                generatedDirectory.toString(),
+                "dev.example.generated"
+            )
+        );
+
+        new SqlcjCompiler().compile(config);
+
+        Path usersFile = generatedDirectory.resolve("dev/example/generated/UsersRepository.java");
+
+        Path ordersFile = generatedDirectory.resolve("dev/example/generated/OrdersRepository.java");
+
+        assertTrue(Files.exists(usersFile));
+        assertTrue(Files.exists(ordersFile));
+
+        String users = Files.readString(usersFile);
+
+        assertTrue(
+            users.startsWith(
+                "// Code generated by sqlcj. DO NOT EDIT.\n\npackage dev.example.generated;"
+            )
+        );
+        assertTrue(users.contains("public final class UsersRepository {"));
+        assertTrue(users.contains("public GetUserResult getUser(Long id)"));
+
+        String orders = Files.readString(ordersFile);
+
+        assertTrue(
+            orders.startsWith(
+                "// Code generated by sqlcj. DO NOT EDIT.\n\npackage dev.example.generated;"
+            )
+        );
+        assertTrue(orders.contains("public final class OrdersRepository {"));
+        assertTrue(orders.contains("public List<ListOrdersResult> listOrders(LocalDateTime createdAt)"));
+        assertTrue(orders.contains("BigDecimal total"));
+
+        Files.createDirectories(classesDirectory);
+
+        JavaCompiler compilerApi = ToolProvider.getSystemJavaCompiler();
+
+        assertNotNull(compilerApi);
+
+        int compilationResult = compilerApi.run(
+            null,
+            null,
+            null,
+            "-classpath",
+            System.getProperty("java.class.path"),
+            "-d",
+            classesDirectory.toString(),
+            usersFile.toString(),
+            ordersFile.toString()
+        );
+
+        assertEquals(0, compilationResult);
+
+        assertTrue(
+            Files.exists(
+                classesDirectory.resolve(
+                    "dev/example/generated/UsersRepository.class"
+                )
+            )
+        );
+
+        assertTrue(
+            Files.exists(
+                classesDirectory.resolve(
+                    "dev/example/generated/OrdersRepository.class"
+                )
+            )
+        );
+    }
+
+    @Test
+    void shouldGenerateTheSameQueryNameInTwoRepositories() throws IOException {
+        Path usersSchema = tempDir.resolve("users-schema.sql");
+        Path usersQueries = tempDir.resolve("users-queries.sql");
+        Path ordersSchema = tempDir.resolve("orders-schema.sql");
+        Path ordersQueries = tempDir.resolve("orders-queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Files.writeString(
+            usersSchema,
+            """
+                CREATE TABLE users
+                (
+                    id BIGINT NOT NULL
+                );
+                """
+        );
+
+        Files.writeString(
+            usersQueries,
+            """
+                -- name: GetRecord :one
+                SELECT id
+                FROM users
+                WHERE id = $1;
+                """
+        );
+
+        Files.writeString(
+            ordersSchema,
+            """
+                CREATE TABLE orders
+                (
+                    id BIGINT NOT NULL
+                );
+                """
+        );
+
+        Files.writeString(
+            ordersQueries,
+            """
+                -- name: GetRecord :one
+                SELECT id
+                FROM orders
+                WHERE id = $1;
+                """
+        );
+
+        Config config = new Config(
+            List.of(
+                new SqlConfig(
+                    "Users",
+                    usersSchema.toString(),
+                    usersQueries.toString()
+                ),
+                new SqlConfig(
+                    "Orders",
+                    ordersSchema.toString(),
+                    ordersQueries.toString()
+                )
+            ),
+            new JavaConfig(
+                generatedDirectory.toString(),
+                "dev.example.generated"
+            )
+        );
+
+        new SqlcjCompiler().compile(config);
+
+        Path usersRepository = generatedDirectory
+            .resolve("dev/example/generated")
+            .resolve("UsersRepository.java");
+
+        Path ordersRepository = generatedDirectory
+            .resolve("dev/example/generated")
+            .resolve("OrdersRepository.java");
+
+        assertTrue(Files.exists(usersRepository));
+        assertTrue(Files.exists(ordersRepository));
+
+        assertTrue(Files.readString(usersRepository).contains("public GetRecordResult getRecord(Long id)"));
+        assertTrue(Files.readString(ordersRepository).contains("public GetRecordResult getRecord(Long id)"));
+    }
+
+    @Test
+    void shouldReportLateFailureAndLeavePreviousOutputIntact() throws IOException {
+        Path usersSchema = tempDir.resolve("users-schema.sql");
+        Path usersQueries = tempDir.resolve("users-queries.sql");
+        Path ordersSchema = tempDir.resolve("orders-schema.sql");
+        Path ordersQueries = tempDir.resolve("orders-queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Files.writeString(
+            usersSchema,
+            """
+                CREATE TABLE users
+                (
+                    id   BIGINT NOT NULL,
+                    name VARCHAR(255)
+                );
+                """
+        );
+
+        Files.writeString(
+            usersQueries,
+            """
+                -- name: GetUser :one
+                SELECT id
+                FROM users
+                WHERE id = $1;
+                """
+        );
+
+        new SqlcjCompiler().compile(
+            new Config(
+                List.of(new SqlConfig("Users", usersSchema.toString(), usersQueries.toString())),
+                new JavaConfig(generatedDirectory.toString(), "dev.example.generated")
+            )
+        );
+
+        Path generatedFile = generatedDirectory
+            .resolve("dev/example/generated")
+            .resolve("UsersRepository.java");
+
+        String previous = Files.readString(generatedFile);
+
+        assertTrue(previous.contains("resultSet.getObject(1, Long.class)"));
+
+        byte[] previousManifest = Files.readAllBytes(
+            generatedDirectory.resolve("sqlcj-manifest.txt")
+        );
+
+        Files.writeString(
+            usersQueries,
+            """
+                -- name: GetUser :one
+                SELECT name
+                FROM users
+                WHERE id = $1;
+                """
+        );
+
+        Files.writeString(
+            ordersSchema,
+            """
+                CREATE TABLE orders
+                (
+                    id BIGINT NOT NULL
+                );
+                """
+        );
+
+        Files.writeString(
+            ordersQueries,
+            """
+                -- name: ListOrders :many
+                SELECT id
+                FROM orders;
+
+                -- name: GetOrder :one
+                SELECT id
+                FROM orders
+                WHERE id = $2;
+                """
+        );
+
+        Config config = new Config(
+            List.of(
+                new SqlConfig("Users", usersSchema.toString(), usersQueries.toString()),
+                new SqlConfig("Orders", ordersSchema.toString(), ordersQueries.toString())
+            ),
+            new JavaConfig(generatedDirectory.toString(), "dev.example.generated")
+        );
+
+        SqlcjCompiler compiler = new SqlcjCompiler();
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compiler.compile(config)
+        );
+
+        assertEquals(
+            "Invalid query 'GetOrder' in %s at line 5: "
+                .formatted(ordersQueries)
+                + "Placeholder indexes must start at $1 without gaps, but were [2]",
+            exception.getMessage()
+        );
+
+        assertEquals(previous, Files.readString(generatedFile));
+
+        assertArrayEquals(
+            previousManifest,
+            Files.readAllBytes(generatedDirectory.resolve("sqlcj-manifest.txt"))
+        );
+
+        assertFalse(
+            Files.exists(
+                generatedDirectory
+                    .resolve("dev/example/generated")
+                    .resolve("OrdersRepository.java")
+            )
+        );
+    }
+
+    /**
+     * Two entries over one migration directory that both return the complete
+     * row of one table share the single top-level row record the package
+     * generates for it.
+     */
+    @Test
+    void shouldGenerateOneSharedRowRecordForTwoEntries() throws Exception {
+        Path migrations = authorMigrations();
+        Path queriesFile = authorQueries();
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        new SqlcjCompiler().compile(
+            authorAndLibraryConfig(
+                migrations,
+                queriesFile,
+                migrations,
+                queriesFile,
+                generatedDirectory
+            )
+        );
+
+        Path packageDirectory = generatedDirectory.resolve("dev/example/generated");
+
+        assertTrue(Files.exists(packageDirectory.resolve("AuthorRepository.java")));
+        assertTrue(Files.exists(packageDirectory.resolve("LibraryRepository.java")));
+        assertTrue(Files.exists(packageDirectory.resolve("AuthorsRow.java")));
+
+        try (Stream<Path> files = Files.list(packageDirectory)) {
+            assertEquals(3, files.count());
+        }
+
+        assertEquals(
+            "dev/example/generated/AuthorRepository.java\n"
+                + "dev/example/generated/AuthorsRow.java\n"
+                + "dev/example/generated/LibraryRepository.java\n",
+            Files.readString(generatedDirectory.resolve("sqlcj-manifest.txt"))
+        );
+
+        Path classesDirectory = tempDir.resolve("classes");
+
+        assertCompiles(generatedDirectory, classesDirectory);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> row = Class.forName("dev.example.generated.AuthorsRow", true, classLoader);
+
+            assertTrue(row.isRecord());
+            assertNull(row.getEnclosingClass());
+
+            assertEquals(
+                List.of("id", "name", "createdAt"),
+                Arrays.stream(row.getRecordComponents())
+                    .map(RecordComponent::getName)
+                    .toList()
+            );
+
+            for (String repositoryName : List.of("AuthorRepository", "LibraryRepository")) {
+                Class<?> repository = Class.forName(
+                    "dev.example.generated." + repositoryName,
+                    true,
+                    classLoader
+                );
+
+                assertEquals(
+                    row,
+                    repository.getMethod("getAuthor", Long.class).getReturnType()
+                );
+            }
+        }
+    }
+
+    /**
+     * One entry that embeds a table's row in a joined result and another that
+     * returns that table's row whole share the single row record the package
+     * generates for it, so the embedded component and the whole-row method have
+     * one type.
+     */
+    @Test
+    void shouldGenerateOneSharedRowRecordForAnEmbeddedAndAWholeRowEntry() throws Exception {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path authorQueries = tempDir.resolve("author-queries.sql");
+        Path libraryQueries = tempDir.resolve("library-queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE authors
+                (
+                    id   BIGINT NOT NULL,
+                    name VARCHAR(255)
+                );
+
+                CREATE TABLE books
+                (
+                    id        BIGINT NOT NULL,
+                    author_id BIGINT NOT NULL,
+                    title     VARCHAR(255)
+                );
+                """
+        );
+
+        Files.writeString(
+            authorQueries,
+            """
+                -- name: ListBooksWithAuthors :many
+                SELECT b.*, a.*
+                FROM books b
+                JOIN authors a ON a.id = b.author_id;
+                """
+        );
+
+        Files.writeString(
+            libraryQueries,
+            """
+                -- name: GetAuthor :one
+                SELECT *
+                FROM authors
+                WHERE id = $1;
+                """
+        );
+
+        new SqlcjCompiler().compile(
+            authorAndLibraryConfig(
+                schemaFile,
+                authorQueries,
+                schemaFile,
+                libraryQueries,
+                generatedDirectory
+            )
+        );
+
+        Path packageDirectory = generatedDirectory.resolve("dev/example/generated");
+
+        try (Stream<Path> files = Files.list(packageDirectory)) {
+            assertEquals(
+                List.of(
+                    "AuthorRepository.java",
+                    "AuthorsRow.java",
+                    "BooksRow.java",
+                    "LibraryRepository.java"
+                ),
+                files.map(path -> path.getFileName().toString()).sorted().toList()
+            );
+        }
+
+        String authorRepository = Files.readString(
+            packageDirectory.resolve("AuthorRepository.java")
+        );
+
+        assertEquals(
+            List.of("BooksRow b", "AuthorsRow a"),
+            recordComponents(authorRepository, "ListBooksWithAuthorsResult")
+        );
+
+        assertFalse(authorRepository.contains("RowMapper<AuthorsRow>"));
+        assertFalse(authorRepository.contains("RowMapper<BooksRow>"));
+
+        assertTrue(
+            Files.readString(packageDirectory.resolve("LibraryRepository.java"))
+                .contains("private static final RowMapper<AuthorsRow> authorsRowMapper =")
+        );
+
+        Path classesDirectory = tempDir.resolve("classes");
+
+        assertCompiles(generatedDirectory, classesDirectory);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> row = Class.forName("dev.example.generated.AuthorsRow", true, classLoader);
+
+            Class<?> result = Class.forName(
+                "dev.example.generated.AuthorRepository$ListBooksWithAuthorsResult",
+                true,
+                classLoader
+            );
+
+            assertEquals(
+                row,
+                result.getRecordComponents()[1].getType()
+            );
+
+            assertEquals(
+                row,
+                Class.forName("dev.example.generated.LibraryRepository", true, classLoader)
+                    .getMethod("getAuthor", Long.class)
+                    .getReturnType()
+            );
+        }
+    }
+
+    /**
+     * A left-joined wildcard embeds the same row record a whole-row entry
+     * returns, because an embedded row always holds the table's declared
+     * nullability and the absence of the row is carried by the component
+     * instead. The one record is generated once, the guarded construction reads
+     * the row's own range, and both entries compile against it.
+     */
+    @Test
+    void shouldGenerateOneSharedRowRecordForALeftJoinedAndAWholeRowEntry() throws Exception {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path authorQueries = tempDir.resolve("author-queries.sql");
+        Path libraryQueries = tempDir.resolve("library-queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE authors
+                (
+                    id   BIGINT NOT NULL,
+                    name VARCHAR(255)
+                );
+
+                CREATE TABLE books
+                (
+                    id        BIGINT NOT NULL,
+                    author_id BIGINT NOT NULL,
+                    title     VARCHAR(255)
+                );
+                """
+        );
+
+        Files.writeString(
+            authorQueries,
+            """
+                -- name: ListBooksWithAuthors :many
+                SELECT b.*, a.*
+                FROM books b
+                LEFT JOIN authors a ON a.id = b.author_id;
+                """
+        );
+
+        Files.writeString(
+            libraryQueries,
+            """
+                -- name: GetAuthor :one
+                SELECT *
+                FROM authors
+                WHERE id = $1;
+                """
+        );
+
+        new SqlcjCompiler().compile(
+            authorAndLibraryConfig(
+                schemaFile,
+                authorQueries,
+                schemaFile,
+                libraryQueries,
+                generatedDirectory
+            )
+        );
+
+        Path packageDirectory = generatedDirectory.resolve("dev/example/generated");
+
+        try (Stream<Path> files = Files.list(packageDirectory)) {
+            assertEquals(
+                List.of(
+                    "AuthorRepository.java",
+                    "AuthorsRow.java",
+                    "BooksRow.java",
+                    "LibraryRepository.java"
+                ),
+                files.map(path -> path.getFileName().toString()).sorted().toList()
+            );
+        }
+
+        String authorRepository = Files.readString(
+            packageDirectory.resolve("AuthorRepository.java")
+        );
+
+        assertEquals(
+            List.of("BooksRow b", "AuthorsRow a"),
+            recordComponents(authorRepository, "ListBooksWithAuthorsResult")
+        );
+
+        assertTrue(
+            authorRepository.contains("org.sqlcj.runtime.SqlRow.isNull(resultSet, 4, 5)"),
+            authorRepository
+        );
+
+        assertFalse(authorRepository.contains("RowMapper<AuthorsRow>"));
+
+        assertTrue(
+            Files.readString(packageDirectory.resolve("LibraryRepository.java"))
+                .contains("private static final RowMapper<AuthorsRow> authorsRowMapper =")
+        );
+
+        Path classesDirectory = tempDir.resolve("classes");
+
+        assertCompiles(generatedDirectory, classesDirectory);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> row = Class.forName("dev.example.generated.AuthorsRow", true, classLoader);
+
+            Class<?> result = Class.forName(
+                "dev.example.generated.AuthorRepository$ListBooksWithAuthorsResult",
+                true,
+                classLoader
+            );
+
+            assertEquals(
+                row,
+                result.getRecordComponents()[1].getType()
+            );
+
+            assertEquals(
+                row,
+                Class.forName("dev.example.generated.LibraryRepository", true, classLoader)
+                    .getMethod("getAuthor", Long.class)
+                    .getReturnType()
+            );
+        }
+    }
+
+    /** A row record no entry returns any more is deleted on regeneration. */
+    @Test
+    void shouldDeleteTheStaleRowRecordOfARemovedFullRowQuery() throws IOException {
+        Path migrations = authorMigrations();
+        Path queriesFile = authorQueries();
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Config config = new Config(
+            List.of(new SqlConfig("Author", migrations.toString(), queriesFile.toString())),
+            new JavaConfig(generatedDirectory.toString(), "dev.example.generated")
+        );
+
+        new SqlcjCompiler().compile(config);
+
+        Path rowFile = generatedDirectory.resolve("dev/example/generated/AuthorsRow.java");
+
+        assertTrue(Files.exists(rowFile));
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: GetAuthor :one
+                SELECT id
+                FROM authors
+                WHERE id = $1;
+                """
+        );
+
+        new SqlcjCompiler().compile(config);
+
+        assertFalse(Files.exists(rowFile));
+
+        assertEquals(
+            "dev/example/generated/AuthorRepository.java\n",
+            Files.readString(generatedDirectory.resolve("sqlcj-manifest.txt"))
+        );
+    }
+
+    /**
+     * Two entries that return the full row of one table must define it from the
+     * same columns, because the package generates one record.
+     */
+    @Test
+    void shouldReportTwoEntriesThatDefineOneRowDifferently() throws IOException {
+        Path authorSchema = tempDir.resolve("author-schema.sql");
+        Path librarySchema = tempDir.resolve("library-schema.sql");
+        Path queriesFile = authorQueries();
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Files.writeString(
+            authorSchema,
+            """
+                CREATE TABLE authors
+                (
+                    id         BIGINT NOT NULL,
+                    name       VARCHAR(255),
+                    created_at TIMESTAMP
+                );
+                """
+        );
+
+        Files.writeString(
+            librarySchema,
+            """
+                CREATE TABLE authors
+                (
+                    id         BIGINT NOT NULL,
+                    name       VARCHAR(255) NOT NULL,
+                    created_at TIMESTAMP
+                );
+                """
+        );
+
+        Config config = authorAndLibraryConfig(
+            authorSchema,
+            queriesFile,
+            librarySchema,
+            queriesFile,
+            generatedDirectory
+        );
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> new SqlcjCompiler().compile(config)
+        );
+
+        assertEquals(
+            "Invalid query group 'Library' in %s: ".formatted(queriesFile)
+                + "Table 'authors' differs from its definition in query group 'Author', "
+                + "which generates the same row type AuthorsRow",
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    /**
+     * Two entries whose row records are equal ignoring case are rejected across
+     * the package, because those class files are one path on a case-insensitive
+     * filesystem.
+     */
+    @Test
+    void shouldReportRowRecordsOfTwoEntriesThatAreEqualIgnoringCase() throws IOException {
+        Path authorSchema = tempDir.resolve("author-schema.sql");
+        Path librarySchema = tempDir.resolve("library-schema.sql");
+        Path authorQueries = tempDir.resolve("author-queries.sql");
+        Path libraryQueries = tempDir.resolve("library-queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Files.writeString(
+            authorSchema,
+            """
+                CREATE TABLE user_data
+                (
+                    id BIGINT NOT NULL
+                );
+                """
+        );
+
+        Files.writeString(
+            librarySchema,
+            """
+                CREATE TABLE userdata
+                (
+                    id BIGINT NOT NULL
+                );
+                """
+        );
+
+        Files.writeString(
+            authorQueries,
+            """
+                -- name: GetUserData :one
+                SELECT *
+                FROM user_data
+                WHERE id = $1;
+                """
+        );
+
+        Files.writeString(
+            libraryQueries,
+            """
+                -- name: FetchUserdata :one
+                SELECT *
+                FROM userdata
+                WHERE id = $1;
+                """
+        );
+
+        Config config = authorAndLibraryConfig(
+            authorSchema,
+            authorQueries,
+            librarySchema,
+            libraryQueries,
+            generatedDirectory
+        );
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> new SqlcjCompiler().compile(config)
+        );
+
+        assertEquals(
+            "Invalid query group 'Library' in %s: ".formatted(libraryQueries)
+                + "Tables 'user_data' and 'userdata' generate row types that are equal ignoring case: "
+                + "UserDataRow and UserdataRow",
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    /** A migration directory that creates and then alters the table authors. */
+    private Path authorMigrations() throws IOException {
+        Path migrations = Files.createDirectories(tempDir.resolve("migrations"));
+
+        Files.writeString(
+            migrations.resolve("V1__authors.sql"),
+            """
+                CREATE TABLE authors
+                (
+                    id   BIGINT NOT NULL,
+                    name VARCHAR(255)
+                );
+                """
+        );
+
+        Files.writeString(
+            migrations.resolve("V2__created_at.sql"),
+            "ALTER TABLE authors ADD COLUMN created_at TIMESTAMP;\n"
+        );
+
+        return migrations;
+    }
+
+    /** Two queries returning the complete row of the table authors. */
+    private Path authorQueries() throws IOException {
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: GetAuthor :one
+                SELECT *
+                FROM authors
+                WHERE id = $1;
+
+                -- name: ListAuthors :many
+                SELECT *
+                FROM authors;
+                """
+        );
+
+        return queriesFile;
+    }
+
+    /**
+     * Two entries over one migration directory that use one enum type share
+     * the single Java enum the package generates for it, which is listed in the
+     * manifest like every other generated file.
+     */
+    @Test
+    void shouldGenerateOneSharedEnumForTwoEntries() throws Exception {
+        Path migrations = stageMigrations();
+        Path queriesFile = stageQueries();
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        new SqlcjCompiler().compile(
+            authorAndLibraryConfig(
+                migrations,
+                queriesFile,
+                migrations,
+                queriesFile,
+                generatedDirectory
+            )
+        );
+
+        Path packageDirectory = generatedDirectory.resolve("dev/example/generated");
+
+        assertTrue(Files.exists(packageDirectory.resolve("StageSetting.java")));
+
+        assertEquals(
+            "dev/example/generated/AuthorRepository.java\n"
+                + "dev/example/generated/LibraryRepository.java\n"
+                + "dev/example/generated/StageSetting.java\n",
+            Files.readString(generatedDirectory.resolve("sqlcj-manifest.txt"))
+        );
+
+        Path classesDirectory = tempDir.resolve("classes");
+
+        assertCompiles(generatedDirectory, classesDirectory);
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Class<?> stageSetting = Class.forName(
+                "dev.example.generated.StageSetting",
+                true,
+                classLoader
+            );
+
+            assertTrue(stageSetting.isEnum());
+            assertNull(stageSetting.getEnclosingClass());
+
+            for (String repositoryName : List.of("AuthorRepository", "LibraryRepository")) {
+                Class<?> repository = Class.forName(
+                    "dev.example.generated." + repositoryName,
+                    true,
+                    classLoader
+                );
+
+                Method method = repository.getMethod("getStage", stageSetting);
+
+                assertEquals(
+                    stageSetting,
+                    method.getReturnType().getRecordComponents()[1].getType()
+                );
+            }
+        }
+    }
+
+    /** A Java enum no entry uses anymore is deleted on regeneration. */
+    @Test
+    void shouldDeleteTheStaleEnumOfARemovedEnumQuery() throws IOException {
+        Path migrations = stageMigrations();
+        Path queriesFile = stageQueries();
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Config config = new Config(
+            List.of(new SqlConfig("Author", migrations.toString(), queriesFile.toString())),
+            new JavaConfig(generatedDirectory.toString(), "dev.example.generated")
+        );
+
+        new SqlcjCompiler().compile(config);
+
+        Path enumFile = generatedDirectory.resolve("dev/example/generated/StageSetting.java");
+
+        assertTrue(Files.exists(enumFile));
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: GetStage :one
+                SELECT id
+                FROM stages
+                WHERE id = $1;
+                """
+        );
+
+        new SqlcjCompiler().compile(config);
+
+        assertFalse(Files.exists(enumFile));
+
+        assertEquals(
+            "dev/example/generated/AuthorRepository.java\n",
+            Files.readString(generatedDirectory.resolve("sqlcj-manifest.txt"))
+        );
+    }
+
+    /**
+     * Two entries that use one enum type must define its labels alike, because
+     * the package generates one Java enum for it.
+     */
+    @Test
+    void shouldReportTwoEntriesThatDefineOneEnumTypeDifferently() throws IOException {
+        Path authorSchema = tempDir.resolve("author-schema.sql");
+        Path librarySchema = tempDir.resolve("library-schema.sql");
+        Path queriesFile = stageQueries();
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Files.writeString(authorSchema, stageSchema("'indoor', 'outdoor'"));
+        Files.writeString(librarySchema, stageSchema("'indoor'"));
+
+        Config config = authorAndLibraryConfig(
+            authorSchema,
+            queriesFile,
+            librarySchema,
+            queriesFile,
+            generatedDirectory
+        );
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> new SqlcjCompiler().compile(config)
+        );
+
+        assertEquals(
+            "Invalid query group 'Library' in %s: ".formatted(queriesFile)
+                + "Enum type 'stage_setting' differs from its definition in query group 'Author', "
+                + "which generates the same enum type StageSetting",
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    /** A migration directory that declares an enum type and a table using it. */
+    private Path stageMigrations() throws IOException {
+        Path migrations = Files.createDirectories(tempDir.resolve("migrations"));
+
+        Files.writeString(
+            migrations.resolve("V1__stages.sql"),
+            stageSchema("'indoor'")
+        );
+
+        Files.writeString(
+            migrations.resolve("V2__outdoor.sql"),
+            "ALTER TYPE stage_setting ADD VALUE 'outdoor';\n"
+        );
+
+        return migrations;
+    }
+
+    /** A schema declaring the enum type with {@code labels} and its table. */
+    private String stageSchema(String labels) {
+        return """
+            CREATE TYPE stage_setting AS ENUM (%s);
+
+            CREATE TABLE stages
+            (
+                id      BIGINT NOT NULL,
+                setting stage_setting
+            );
+            """
+            .formatted(labels);
+    }
+
+    /** One query reading and binding the enum column of the table stages. */
+    private Path stageQueries() throws IOException {
+        Path queriesFile = tempDir.resolve("stage-queries.sql");
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: GetStage :one
+                SELECT id, setting
+                FROM stages
+                WHERE setting = $1;
+                """
+        );
+
+        return queriesFile;
+    }
+
+    private Config authorAndLibraryConfig(
+        Path authorSchema,
+        Path authorQueries,
+        Path librarySchema,
+        Path libraryQueries,
+        Path generatedDirectory
+    ) {
+        return new Config(
+            List.of(
+                new SqlConfig("Author", authorSchema.toString(), authorQueries.toString()),
+                new SqlConfig("Library", librarySchema.toString(), libraryQueries.toString())
+            ),
+            new JavaConfig(generatedDirectory.toString(), "dev.example.generated")
+        );
+    }
+
+    @Test
+    void shouldDeleteTheStaleRepositoriesOfRenamedAndRemovedGroups() throws IOException {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        compileGroups(generatedDirectory, "dev.example.generated", "Users", "Orders");
+
+        Path packageDirectory = generatedDirectory.resolve("dev/example/generated");
+
+        assertTrue(Files.exists(packageDirectory.resolve("UsersRepository.java")));
+        assertTrue(Files.exists(packageDirectory.resolve("OrdersRepository.java")));
+
+        compileGroups(generatedDirectory, "dev.example.generated", "Customers");
+
+        assertFalse(Files.exists(packageDirectory.resolve("UsersRepository.java")));
+        assertFalse(Files.exists(packageDirectory.resolve("OrdersRepository.java")));
+        assertTrue(Files.exists(packageDirectory.resolve("CustomersRepository.java")));
+
+        assertEquals(
+            "dev/example/generated/CustomersRepository.java\n",
+            Files.readString(generatedDirectory.resolve("sqlcj-manifest.txt"))
+        );
+    }
+
+    /** A changed package leaves the previous package directory in place. */
+    @Test
+    void shouldDeleteTheStaleRepositoryOfAChangedPackage() throws IOException {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        compileGroups(generatedDirectory, "dev.example.generated", "Users");
+
+        Path previousPackageDirectory = generatedDirectory.resolve("dev/example/generated");
+
+        assertTrue(Files.exists(previousPackageDirectory.resolve("UsersRepository.java")));
+
+        compileGroups(generatedDirectory, "dev.other.generated", "Users");
+
+        assertFalse(Files.exists(previousPackageDirectory.resolve("UsersRepository.java")));
+        assertTrue(Files.isDirectory(previousPackageDirectory));
+
+        assertTrue(
+            Files.exists(
+                generatedDirectory.resolve("dev/other/generated/UsersRepository.java")
+            )
+        );
+
+        assertEquals(
+            "dev/other/generated/UsersRepository.java\n",
+            Files.readString(generatedDirectory.resolve("sqlcj-manifest.txt"))
+        );
+    }
+
+    @Test
+    void shouldKeepAFileNoPreviousManifestListed() throws IOException {
+        Path generatedDirectory = tempDir.resolve("generated");
+        Path packageDirectory = generatedDirectory.resolve("dev/example/generated");
+
+        Files.createDirectories(packageDirectory);
+
+        Path staleLookingFile = packageDirectory.resolve("OrdersRepository.java");
+
+        Files.writeString(staleLookingFile, "// written before the first run\n");
+
+        compileGroups(generatedDirectory, "dev.example.generated", "Users");
+
+        assertEquals(
+            "// written before the first run\n",
+            Files.readString(staleLookingFile)
+        );
+
+        Path userFile = packageDirectory.resolve("Helper.java");
+
+        Files.writeString(userFile, "// hand written\n");
+
+        compileGroups(generatedDirectory, "dev.example.generated", "Users");
+
+        assertEquals("// hand written\n", Files.readString(userFile));
+
+        assertEquals(
+            "// written before the first run\n",
+            Files.readString(staleLookingFile)
+        );
+    }
+
+    @Test
+    void shouldGenerateByteIdenticalRepositoriesAndManifestForTwoRuns() throws IOException {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        compileGroups(generatedDirectory, "dev.example.generated", "Users", "Orders");
+
+        Path manifestFile = generatedDirectory.resolve("sqlcj-manifest.txt");
+        Path usersFile = generatedDirectory.resolve("dev/example/generated/UsersRepository.java");
+        Path ordersFile = generatedDirectory.resolve("dev/example/generated/OrdersRepository.java");
+
+        byte[] firstManifest = Files.readAllBytes(manifestFile);
+        byte[] firstUsers = Files.readAllBytes(usersFile);
+        byte[] firstOrders = Files.readAllBytes(ordersFile);
+
+        compileGroups(generatedDirectory, "dev.example.generated", "Users", "Orders");
+
+        assertArrayEquals(firstManifest, Files.readAllBytes(manifestFile));
+        assertArrayEquals(firstUsers, Files.readAllBytes(usersFile));
+        assertArrayEquals(firstOrders, Files.readAllBytes(ordersFile));
+
+        assertEquals(
+            "dev/example/generated/OrdersRepository.java\n"
+                + "dev/example/generated/UsersRepository.java\n",
+            Files.readString(manifestFile)
+        );
+    }
+
+    @Test
+    void shouldReportTheOutputManifestItCannotRead() throws IOException {
+        Path generatedDirectory = tempDir.resolve("generated");
+        Path manifestFile = generatedDirectory.resolve("sqlcj-manifest.txt");
+
+        Files.createDirectories(manifestFile);
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileGroups(generatedDirectory, "dev.example.generated", "Users")
+        );
+
+        assertEquals(
+            "Cannot read output manifest: %s: Is a directory".formatted(manifestFile),
+            exception.getMessage()
+        );
+
+        assertFalse(
+            Files.exists(
+                generatedDirectory.resolve("dev/example/generated/UsersRepository.java")
+            )
+        );
+    }
+
+    @Test
+    void shouldReportTheGeneratedFileItCannotWrite() throws IOException {
+        Path usersSchema = tempDir.resolve("users-schema.sql");
+        Path usersQueries = tempDir.resolve("users-queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Files.writeString(
+            usersSchema,
+            """
+                CREATE TABLE users
+                (
+                    id   BIGINT NOT NULL,
+                    name VARCHAR(255)
+                );
+                """
+        );
+
+        Files.writeString(
+            usersQueries,
+            """
+                -- name: GetUser :one
+                SELECT id
+                FROM users
+                WHERE id = $1;
+                """
+        );
+
+        Path generatedFile = generatedDirectory
+            .resolve("dev/example/generated")
+            .resolve("UsersRepository.java");
+
+        Files.createDirectories(generatedFile);
+
+        Config config = new Config(
+            List.of(new SqlConfig("Users", usersSchema.toString(), usersQueries.toString())),
+            new JavaConfig(generatedDirectory.toString(), "dev.example.generated")
+        );
+
+        SqlcjCompiler compiler = new SqlcjCompiler();
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compiler.compile(config)
+        );
+
+        assertEquals(
+            "Cannot write generated file: %s: Is a directory".formatted(generatedFile),
+            exception.getMessage()
+        );
+    }
+
+    @Test
+    void shouldRejectAnonymousPlaceholderBeforeWriting() {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileUsersQueries(
+                """
+                    -- name: ListUsers :many
+                    SELECT id
+                    FROM users
+                    WHERE id = $1
+                    LIMIT ?;
+                    """,
+                generatedDirectory
+            )
+        );
+
+        assertEquals(
+            "Invalid query 'ListUsers' in %s at line 1: "
+                .formatted(tempDir.resolve("queries.sql"))
+                + "Anonymous '?' parameters are not supported; "
+                + "use an indexed placeholder such as $1",
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    /**
+     * Every statement kind, set operation, projection, {@code RETURNING} item,
+     * join kind, and source outside the supported subset is reported as one
+     * located line in SQL terms, before any file is written.
+     */
+    @ParameterizedTest
+    @MethodSource("rejectedQueries")
+    void shouldRejectUnsupportedQueryBeforeWriting(String type, String sql, String reason) {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileJoinQueries(
+                "-- name: Q %s\n%s;\n".formatted(type, sql),
+                generatedDirectory
+            )
+        );
+
+        assertEquals(
+            "Invalid query 'Q' in %s at line 1: ".formatted(tempDir.resolve("queries.sql")) + reason,
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    private static Stream<Arguments> rejectedQueries() {
+        String setOperation = "UNION, INTERSECT, and EXCEPT are not supported;"
+            + " write one query per SELECT.";
+
+        String statement = "Only SELECT, INSERT, UPDATE, and DELETE statements are supported.";
+
+        return Stream.of(
+            Arguments.of(":many", "SELECT id FROM users UNION SELECT id FROM users", setOperation),
+            Arguments.of(":many", "SELECT id FROM users UNION ALL SELECT id FROM users", setOperation),
+            Arguments.of(":many", "SELECT id FROM users INTERSECT SELECT id FROM users", setOperation),
+            Arguments.of(":many", "(SELECT id FROM users UNION SELECT id FROM users)", setOperation),
+            Arguments.of(":exec", "VALUES (1)", statement),
+            Arguments.of(":many", "TABLE users", statement),
+            Arguments.of(
+                ":exec",
+                "MERGE INTO users u USING profiles p ON p.user_id = u.id"
+                    + " WHEN MATCHED THEN UPDATE SET name = p.nickname",
+                statement
+            ),
+            Arguments.of(":exec", "TRUNCATE TABLE users", statement),
+            Arguments.of(":many", "EXPLAIN SELECT id FROM users", statement),
+            Arguments.of(":exec", "EXECUTE archive_users(1)", statement),
+            Arguments.of(":exec", "CREATE TABLE archived_users (id BIGINT)", statement),
+            Arguments.of(":exec", "SET statement_timeout = 0", statement),
+            Arguments.of(
+                ":many",
+                "SELECT COUNT(*) OVER () AS n FROM users",
+                "Cannot infer the type of COUNT(*) OVER () in SELECT;"
+                    + " state it with a cast and an alias, such as SUM(amount)::numeric AS total"
+            ),
+            Arguments.of(
+                ":many",
+                "SELECT name || 'x' AS n FROM users",
+                "Cannot infer the type of name || 'x' in SELECT;"
+                    + " state it with a cast and an alias, such as SUM(amount)::numeric AS total"
+            ),
+            Arguments.of(
+                ":one",
+                "DELETE FROM users WHERE id = $1 RETURNING lower(name)",
+                "Unsupported RETURNING item lower(name);"
+                    + " return columns of the target table or *"
+            ),
+            Arguments.of(
+                ":many",
+                "SELECT u.id FROM users u RIGHT JOIN profiles p ON p.user_id = u.id",
+                "RIGHT JOIN is not supported; write a LEFT JOIN with the two sources swapped."
+            ),
+            Arguments.of(
+                ":many",
+                "SELECT u.id FROM users u FULL JOIN profiles p ON p.user_id = u.id",
+                "FULL JOIN is not supported."
+            ),
+            Arguments.of(
+                ":many",
+                "SELECT u.id FROM users u JOIN profiles p USING (id)",
+                "JOIN ... USING is not supported; write the join condition with ON."
+            ),
+            Arguments.of(
+                ":many",
+                "SELECT u.id FROM users u NATURAL JOIN profiles p",
+                "NATURAL JOIN is not supported; write the join condition with ON."
+            ),
+            Arguments.of(
+                ":many",
+                "SELECT u.id FROM users u CROSS JOIN profiles p",
+                "CROSS JOIN is not supported; write JOIN ... ON TRUE."
+            ),
+            Arguments.of(
+                ":many",
+                "SELECT u.id FROM users u, profiles p",
+                "A comma-separated FROM list is not supported;"
+                    + " write JOIN ... ON with the join condition."
+            ),
+            Arguments.of(
+                ":many",
+                "SELECT u.id FROM users u"
+                    + " JOIN LATERAL (SELECT p.nickname FROM profiles p WHERE p.user_id = u.id) l"
+                    + " ON TRUE",
+                "LATERAL is not supported."
+            ),
+            Arguments.of(
+                ":many",
+                "SELECT s.id FROM (SELECT id FROM users) AS s(n)",
+                "A column list on s is not supported; alias the columns in its SELECT instead."
+            ),
+            Arguments.of(
+                ":many",
+                "SELECT id FROM (SELECT id FROM users)",
+                "A subquery in FROM requires an alias, such as (SELECT ...) AS recent."
+            ),
+            Arguments.of(
+                ":many",
+                "WITH RECURSIVE recent AS (SELECT id FROM users) SELECT id FROM recent",
+                "WITH RECURSIVE is not supported."
+            ),
+            Arguments.of(
+                ":many",
+                "WITH moved AS (DELETE FROM users WHERE id = $1 RETURNING id)"
+                    + " SELECT id FROM moved",
+                "A data-modifying statement in WITH is not supported;"
+                    + " run it as a query of its own."
+            ),
+            Arguments.of(
+                ":exec",
+                "INSERT INTO users (id, name) SELECT id, nickname FROM profiles"
+                    + " UNION SELECT id, nickname FROM profiles",
+                setOperation
+            ),
+            Arguments.of(
+                ":exec",
+                "INSERT INTO users (id, name) SELECT id FROM profiles",
+                "INSERT column and value counts must match."
+            ),
+            Arguments.of(
+                ":exec",
+                "UPDATE users, profiles SET name = $2 WHERE users.id = $1",
+                "UPDATE of several tables is not supported;"
+                    + " write the other sources in UPDATE ... FROM."
+            ),
+            Arguments.of(
+                ":exec",
+                "UPDATE users u JOIN profiles p ON p.user_id = u.id SET name = $1",
+                "UPDATE of several tables is not supported;"
+                    + " write the other sources in UPDATE ... FROM."
+            ),
+            Arguments.of(
+                ":exec",
+                "DELETE users FROM users JOIN profiles ON profiles.user_id = users.id"
+                    + " WHERE users.id = $1",
+                "A joined DELETE is not supported;"
+                    + " write the other sources in DELETE ... USING."
+            ),
+            Arguments.of(
+                ":many",
+                "UPDATE users u SET name = $1 FROM profiles p WHERE p.user_id = u.id RETURNING *",
+                "RETURNING * is not supported with UPDATE ... FROM or DELETE ... USING;"
+                    + " write RETURNING u.* for the target's row."
+            )
+        );
+    }
+
+    /**
+     * An unexpected failure of the schema step is reported as one located
+     * internal-error line that carries neither the message nor the class of the
+     * failure.
+     */
+    @Test
+    void shouldReportAnUnexpectedSchemaFailureAsAnInternalError() {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileSeamQueries(
+                (schema, sql) -> {
+                    throw new IllegalStateException("secret");
+                },
+                defaultQueryAnalysis(),
+                JavaCodeGenerator::new,
+                generatedDirectory
+            )
+        );
+
+        assertInternalError(
+            "Internal error while parsing schema source %s".formatted(tempDir.resolve("schema.sql")),
+            "IllegalStateException",
+            exception,
+            generatedDirectory
+        );
+    }
+
+    /**
+     * An unexpected failure of the analysis step is reported as one located
+     * internal-error line, including a failure of the types a diagnostic uses
+     * that carries no message and a subclass of those types.
+     */
+    @ParameterizedTest
+    @MethodSource("unexpectedAnalysisFailures")
+    void shouldReportAnUnexpectedAnalysisFailureAsAnInternalError(RuntimeException failure) {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileSeamQueries(
+                new DefaultSchemaParser(),
+                (query, schema) -> {
+                    throw failure;
+                },
+                JavaCodeGenerator::new,
+                generatedDirectory
+            )
+        );
+
+        assertInternalError(
+            "Internal error while analyzing query 'GetUser' in %s at line 1"
+                .formatted(tempDir.resolve("queries.sql")),
+            failure.getClass().getSimpleName(),
+            exception,
+            generatedDirectory
+        );
+    }
+
+    private static Stream<RuntimeException> unexpectedAnalysisFailures() {
+        return Stream.of(
+            new NullPointerException("secret"),
+            new UnsupportedOperationException("   "),
+            new NumberFormatException("secret")
+        );
+    }
+
+    /**
+     * An unexpected failure of the generation step is reported as one located
+     * internal-error line naming the query group.
+     */
+    @Test
+    void shouldReportAnUnexpectedGenerationFailureAsAnInternalError() {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileSeamQueries(
+                new DefaultSchemaParser(),
+                defaultQueryAnalysis(),
+                packageName -> new FailingCodeGenerator(
+                    new JavaCodeGenerator(packageName),
+                    new ClassCastException("secret"),
+                    null
+                ),
+                generatedDirectory
+            )
+        );
+
+        assertInternalError(
+            "Internal error while generating query group 'Users' in %s"
+                .formatted(tempDir.resolve("queries.sql")),
+            "ClassCastException",
+            exception,
+            generatedDirectory
+        );
+    }
+
+    /**
+     * An unexpected failure of the shared row records and enum types, which
+     * belong to no query group, is reported as one internal-error line naming
+     * the package.
+     */
+    @Test
+    void shouldReportAnUnexpectedSharedGenerationFailureAsAnInternalError() {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileSeamQueries(
+                new DefaultSchemaParser(),
+                defaultQueryAnalysis(),
+                packageName -> new FailingCodeGenerator(
+                    new JavaCodeGenerator(packageName),
+                    null,
+                    new ClassCastException("secret")
+                ),
+                generatedDirectory
+            )
+        );
+
+        assertInternalError(
+            "Internal error while generating the shared row records and enums"
+                + " of package 'generated'",
+            "ClassCastException",
+            exception,
+            generatedDirectory
+        );
+    }
+
+    /**
+     * Requires the one internal-error line of one compilation step, which
+     * carries neither the message nor the class of the failure it reports and
+     * leaves no generated output.
+     */
+    private void assertInternalError(
+        String step,
+        String failureClass,
+        CompilationException exception,
+        Path generatedDirectory
+    ) {
+        assertEquals(step + "; please report this sqlcj defect", exception.getMessage());
+
+        assertFalse(exception.getMessage().contains("secret"));
+        assertFalse(exception.getMessage().contains(failureClass));
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    /** The compiler's own parse and analysis of one query. */
+    private static BiFunction<Query, Schema, QueryModel> defaultQueryAnalysis() {
+        SqlParser sqlParser = new SqlParser();
+        QueryAnalyzer queryAnalyzer = new QueryAnalyzer();
+
+        return (query, schema) -> queryAnalyzer.analyze(
+            query,
+            sqlParser.parse(query.sql()),
+            schema
+        );
+    }
+
+    /** A code generator whose generation steps fail instead of generating. */
+    private record FailingCodeGenerator(
+        CodeGenerator delegate,
+        RuntimeException generateFailure,
+        RuntimeException generateRowsFailure
+    ) implements CodeGenerator {
+
+        @Override
+        public GeneratedFile generate(QueryGroupModel group) {
+            if (generateFailure != null) {
+                throw generateFailure;
+            }
+
+            return delegate.generate(group);
+        }
+
+        @Override
+        public List<GeneratedFile> generateRows() {
+            if (generateRowsFailure != null) {
+                throw generateRowsFailure;
+            }
+
+            return delegate.generateRows();
+        }
+
+        @Override
+        public List<GeneratedFile> generateEnums() {
+            return delegate.generateEnums();
+        }
+    }
+
+    /**
+     * An untyped placeholder is reported as one located line that names the
+     * placeholder, the expression the query writes it in, and the cast that
+     * types it, even when that expression spans lines in the source.
+     */
+    @Test
+    void shouldRejectUntypedPlaceholderBeforeWriting() {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileUsersQueries(
+                """
+                    -- name: ListUsers :many
+                    SELECT id
+                    FROM users
+                    WHERE lower(name) =
+                        :name;
+                    """,
+                generatedDirectory
+            )
+        );
+
+        assertEquals(
+            "Invalid query 'ListUsers' in %s at line 1: "
+                .formatted(tempDir.resolve("queries.sql"))
+                + "Cannot infer the type of :name in lower(name) = :name; "
+                + "state it with a cast, such as :name::text",
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    @Test
+    void shouldRejectRepeatedRepositoryMethodBeforeWriting() throws IOException {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileUsersQueries(
+                """
+                    -- name: Get.User :one
+                    SELECT id
+                    FROM users
+                    WHERE id = $1;
+
+                    -- name: Get-User :one
+                    SELECT name
+                    FROM users
+                    WHERE id = $1;
+                    """,
+                generatedDirectory
+            )
+        );
+
+        assertEquals(
+            "Invalid query group 'Users' in %s: ".formatted(tempDir.resolve("queries.sql"))
+                + "Queries 'Get.User' and 'Get-User' generate the same repository method 'getUser'",
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    /**
+     * Nested result types that differ only by case compile to class files that
+     * share one path on a case-insensitive filesystem.
+     */
+    @Test
+    void shouldRejectRepositoryResultTypesThatDifferOnlyByCaseBeforeWriting() throws IOException {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileUsersQueries(
+                """
+                    -- name: GetUser :one
+                    SELECT id
+                    FROM users
+                    WHERE id = $1;
+
+                    -- name: getuser :one
+                    SELECT name
+                    FROM users
+                    WHERE id = $1;
+                    """,
+                generatedDirectory
+            )
+        );
+
+        assertEquals(
+            "Invalid query group 'Users' in %s: ".formatted(tempDir.resolve("queries.sql"))
+                + "Queries 'GetUser' and 'getuser' generate result types that differ only by case: "
+                + "GetUserResult and GetuserResult",
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    @Test
+    void shouldRejectDuplicateRepositoryBeforeWriting() throws IOException {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileUsersGroups("Users", "Users", generatedDirectory)
+        );
+
+        assertEquals(
+            "Duplicate generated file for repositories 'Users' and 'Users': "
+                + Path.of("generated", "UsersRepository.java"),
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    /**
+     * Two group names that differ only by the case of their first character
+     * generate one repository name, so they collide as a duplicate path.
+     */
+    @Test
+    void shouldRejectRepositoryNamesThatDifferOnlyByTheirFirstCharacterCase() throws IOException {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileUsersGroups("Users", "users", generatedDirectory)
+        );
+
+        assertEquals(
+            "Duplicate generated file for repositories 'Users' and 'users': "
+                + Path.of("generated", "UsersRepository.java"),
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    @Test
+    void shouldRejectRepositoryPathsThatDifferOnlyByCaseBeforeWriting() throws IOException {
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> compileUsersGroups("UserData", "Userdata", generatedDirectory)
+        );
+
+        assertEquals(
+            "Generated file paths for repositories 'UserData' and 'Userdata' differ only by case: "
+                + Path.of("generated", "UserDataRepository.java")
+                + " and "
+                + Path.of("generated", "UserdataRepository.java"),
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    @Test
+    void shouldGenerateCompilableJavaForQuotedSqlIdentifiers() throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+        Path classesDirectory = tempDir.resolve("classes");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE "user data"
+                (
+                    "user id" BIGINT NOT NULL,
+                    "class"   VARCHAR(255)
+                );
+                """
+        );
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: ListUserData :many
+                SELECT "user id", "class"
+                FROM "user data"
+                WHERE "class" = $1;
+                """
+        );
+
+        Config config = new Config(
+            List.of(
+                new SqlConfig(
+                    "Users",
+                    schemaFile.toString(),
+                    queriesFile.toString()
+                )
+            ),
+            new JavaConfig(
+                generatedDirectory.toString(),
+                "generated"
+            )
+        );
+
+        new SqlcjCompiler().compile(config);
+
+        Path generatedFile = generatedDirectory
+            .resolve("generated")
+            .resolve("UsersRepository.java");
+
+        String source = Files.readString(generatedFile);
+
+        assertTrue(source.contains("Long userId"));
+        assertTrue(source.contains("String class_"));
+        assertTrue(source.contains("resultSet.getObject(1, Long.class)"));
+        assertTrue(source.contains("resultSet.getObject(2, String.class)"));
+        assertTrue(source.contains("listUserData(String class_)"));
+        assertTrue(source.contains("WHERE \"class\" = ?"));
+
+        Files.createDirectories(classesDirectory);
+
+        JavaCompiler compilerApi = ToolProvider.getSystemJavaCompiler();
+
+        assertNotNull(compilerApi);
+
+        assertEquals(
+            0,
+            compilerApi.run(
+                null,
+                null,
+                null,
+                "-classpath",
+                System.getProperty("java.class.path"),
+                "-d",
+                classesDirectory.toString(),
+                generatedFile.toString()
+            )
+        );
+    }
+
+    /**
+     * A returning write reuses the typed result record, positional row mapper,
+     * and result-producing executor call of a read, so the generated Java for
+     * every returning write kind is verified by compiling it.
+     */
+    @Test
+    void shouldGenerateCompilableJavaForReturningWrites() throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+        Path classesDirectory = tempDir.resolve("classes");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE users
+                (
+                    id     BIGINT NOT NULL,
+                    name   VARCHAR(255),
+                    active BOOLEAN
+                );
+                """
+        );
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: InsertUser :one
+                INSERT INTO users (id, name)
+                VALUES ($1, $2)
+                RETURNING *;
+
+                -- name: UpdateUser :one
+                UPDATE users
+                SET name = $2
+                WHERE id = $1
+                RETURNING name, id;
+
+                -- name: DeleteUsers :many
+                DELETE FROM users
+                WHERE active = $1
+                RETURNING id, name;
+                """
+        );
+
+        Config config = new Config(
+            List.of(
+                new SqlConfig(
+                    "Users",
+                    schemaFile.toString(),
+                    queriesFile.toString()
+                )
+            ),
+            new JavaConfig(
+                generatedDirectory.toString(),
+                "generated"
+            )
+        );
+
+        new SqlcjCompiler().compile(config);
+
+        Path repositoryFile = generatedDirectory.resolve("generated/UsersRepository.java");
+
+        String repository = Files.readString(repositoryFile);
+
+        assertTrue(
+            Files.readString(generatedDirectory.resolve("generated/UsersRow.java"))
+                .contains("public record UsersRow(")
+        );
+
+        assertFalse(repository.contains("public record UsersRow("));
+        assertFalse(repository.contains("InsertUserResult"));
+        assertTrue(repository.contains("Long id"));
+        assertTrue(repository.contains("String name"));
+        assertTrue(repository.contains("Boolean active"));
+        assertTrue(repository.contains("public UsersRow insertUser(Long id, String name)"));
+        assertTrue(repository.contains("private static final RowMapper<UsersRow> usersRowMapper"));
+        assertTrue(repository.contains("return executor.queryOne("));
+        assertTrue(repository.contains("VALUES (?, ?)"));
+        assertTrue(repository.contains("RETURNING *"));
+
+        assertTrue(repository.contains("public UpdateUserResult updateUser(Long id, String name)"));
+        assertTrue(repository.contains("resultSet.getObject(1, String.class)"));
+        assertTrue(repository.contains("resultSet.getObject(2, Long.class)"));
+        assertTrue(repository.contains("java.util.Arrays.asList(name, id)"));
+        assertTrue(repository.contains("RETURNING name, id"));
+
+        assertTrue(repository.contains("public List<DeleteUsersResult> deleteUsers(Boolean active)"));
+        assertTrue(repository.contains("return executor.queryMany("));
+        assertTrue(repository.contains("RETURNING id, name"));
+
+        assertCompiles(generatedDirectory, classesDirectory);
+
+        assertTrue(Files.exists(classesDirectory.resolve("generated/UsersRepository.class")));
+    }
+
+    /**
+     * An alias on a returned column names the result record's component, for
+     * every returning write kind, and the executed SQL keeps the alias.
+     */
+    @Test
+    void shouldGenerateCompilableJavaForAliasedReturningWrites() throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+        Path classesDirectory = tempDir.resolve("classes");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE users
+                (
+                    id     BIGINT NOT NULL,
+                    name   VARCHAR(255),
+                    active BOOLEAN
+                );
+                """
+        );
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: InsertUser :one
+                INSERT INTO users (id, name)
+                VALUES ($1, $2)
+                RETURNING id AS user_id, name;
+
+                -- name: UpdateUser :one
+                UPDATE users
+                SET name = $2
+                WHERE id = $1
+                RETURNING id new_id;
+
+                -- name: DeleteUsers :many
+                DELETE FROM users u
+                WHERE u.active = $1
+                RETURNING u.id AS uid, u.name AS full_name;
+                """
+        );
+
+        Config config = new Config(
+            List.of(
+                new SqlConfig(
+                    "Users",
+                    schemaFile.toString(),
+                    queriesFile.toString()
+                )
+            ),
+            new JavaConfig(
+                generatedDirectory.toString(),
+                "generated"
+            )
+        );
+
+        new SqlcjCompiler().compile(config);
+
+        String repository = Files.readString(
+            generatedDirectory.resolve("generated/UsersRepository.java")
+        );
+
+        assertTrue(repository.contains("public InsertUserResult insertUser(Long id, String name)"));
+
+        assertEquals(
+            List.of("Long userId", "String name"),
+            recordComponents(repository, "InsertUserResult")
+        );
+
+        assertTrue(repository.contains("RETURNING id AS user_id, name"));
+
+        assertTrue(repository.contains("public UpdateUserResult updateUser(Long id, String name)"));
+
+        assertEquals(
+            List.of("Long newId"),
+            recordComponents(repository, "UpdateUserResult")
+        );
+
+        assertTrue(repository.contains("RETURNING id new_id"));
+
+        assertTrue(repository.contains("public List<DeleteUsersResult> deleteUsers(Boolean active)"));
+
+        assertEquals(
+            List.of("Long uid", "String fullName"),
+            recordComponents(repository, "DeleteUsersResult")
+        );
+
+        assertTrue(repository.contains("RETURNING u.id AS uid, u.name AS full_name"));
+
+        assertCompiles(generatedDirectory, classesDirectory);
+
+        assertTrue(Files.exists(classesDirectory.resolve("generated/UsersRepository.class")));
+    }
+
+    /** Compiles one query source against the joined users schema. */
+    private void compileJoinQueries(String queries, Path generatedDirectory) throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(schemaFile, JOIN_SCHEMA);
+        Files.writeString(queriesFile, queries);
+
+        new SqlcjCompiler().compile(usersConfig(schemaFile, queriesFile, generatedDirectory));
+    }
+
+    /**
+     * Compiles one supported query through a compiler whose schema parser,
+     * query analysis, and code generators are the given ones, so that an
+     * unexpected failure of one step can be injected.
+     */
+    private void compileSeamQueries(
+        SchemaParser schemaParser,
+        BiFunction<Query, Schema, QueryModel> queryAnalysis,
+        Function<String, CodeGenerator> codeGenerators,
+        Path generatedDirectory
+    ) throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE users
+                (
+                    id   BIGINT NOT NULL,
+                    name VARCHAR(255)
+                );
+                """
+        );
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: GetUser :one
+                SELECT *
+                FROM users
+                WHERE id = $1;
+                """
+        );
+
+        new SqlcjCompiler(schemaParser, queryAnalysis, codeGenerators)
+            .compile(usersConfig(schemaFile, queriesFile, generatedDirectory));
+    }
+
+    /** The one {@code Users} entry of one schema and query source. */
+    private Config usersConfig(Path schemaFile, Path queriesFile, Path generatedDirectory) {
+        return new Config(
+            List.of(
+                new SqlConfig(
+                    "Users",
+                    schemaFile.toString(),
+                    queriesFile.toString()
+                )
+            ),
+            new JavaConfig(
+                generatedDirectory.toString(),
+                "generated"
+            )
+        );
+    }
+
+    private void compileUsersQueries(String queries, Path generatedDirectory) throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE users
+                (
+                    id   BIGINT NOT NULL,
+                    name VARCHAR(255)
+                );
+                """
+        );
+
+        Files.writeString(queriesFile, queries);
+
+        Config config = new Config(
+            List.of(
+                new SqlConfig(
+                    "Users",
+                    schemaFile.toString(),
+                    queriesFile.toString()
+                )
+            ),
+            new JavaConfig(
+                generatedDirectory.toString(),
+                "generated"
+            )
+        );
+
+        new SqlcjCompiler().compile(config);
+    }
+
+    /**
+     * Compiles the named query groups of one shared users schema and query
+     * source into one configured package.
+     */
+    private void compileGroups(
+        Path generatedDirectory,
+        String packageName,
+        String... groupNames
+    ) throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE users
+                (
+                    id   BIGINT NOT NULL,
+                    name VARCHAR(255)
+                );
+                """
+        );
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: GetUser :one
+                SELECT id, name
+                FROM users
+                WHERE id = $1;
+                """
+        );
+
+        List<SqlConfig> sql = new ArrayList<>(groupNames.length);
+
+        for (String groupName : groupNames) {
+            sql.add(
+                new SqlConfig(
+                    groupName,
+                    schemaFile.toString(),
+                    queriesFile.toString()
+                )
+            );
+        }
+
+        new SqlcjCompiler().compile(
+            new Config(
+                List.copyOf(sql),
+                new JavaConfig(generatedDirectory.toString(), packageName)
+            )
+        );
+    }
+
+    /** Compiles two configured groups that share one schema and query source. */
+    private void compileUsersGroups(
+        String firstGroup,
+        String secondGroup,
+        Path generatedDirectory
+    ) throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE users
+                (
+                    id   BIGINT NOT NULL,
+                    name VARCHAR(255)
+                );
+                """
+        );
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: GetUser :one
+                SELECT id, name
+                FROM users
+                WHERE id = $1;
+                """
+        );
+
+        Config config = new Config(
+            List.of(
+                new SqlConfig(firstGroup, schemaFile.toString(), queriesFile.toString()),
+                new SqlConfig(secondGroup, schemaFile.toString(), queriesFile.toString())
+            ),
+            new JavaConfig(
+                generatedDirectory.toString(),
+                "generated"
+            )
+        );
+
+        new SqlcjCompiler().compile(config);
+    }
+
+    private Path generateAndCompile(String queries) throws IOException {
+        return generateAndCompile(
+            """
+                CREATE TABLE users
+                (
+                    id     BIGINT NOT NULL,
+                    name   VARCHAR(255),
+                    active BOOLEAN
+                );
+                """,
+            queries
+        );
+    }
+
+    /**
+     * A migration directory and the single snapshot of the same tables describe
+     * one schema, so they generate the same repository source.
+     */
+    @Test
+    void shouldGenerateTheSameRepositoryFromAMigrationDirectoryAndASnapshot()
+        throws IOException {
+        String users = """
+            CREATE TABLE users
+            (
+                id   BIGINT NOT NULL,
+                name VARCHAR(255)
+            );
+            """;
+
+        String orders = """
+            CREATE TABLE orders
+            (
+                id      BIGINT NOT NULL,
+                user_id BIGINT NOT NULL,
+                total   DECIMAL(10, 2)
+            );
+            """;
+
+        Path migrations = Files.createDirectories(tempDir.resolve("migrations"));
+
+        Files.writeString(migrations.resolve("V2__orders.sql"), orders);
+        Files.writeString(migrations.resolve("V1__users.sql"), users);
+
+        Path snapshotFile = tempDir.resolve("schema.sql");
+
+        Files.writeString(snapshotFile, users + "\n" + orders);
+
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: ListUsers :many
+                SELECT id, name
+                FROM users;
+
+                -- name: ListOrders :many
+                SELECT *
+                FROM orders
+                WHERE user_id = $1;
+                """
+        );
+
+        Path fromDirectory = generateUsersRepository(
+            List.of(migrations.toString()),
+            queriesFile,
+            tempDir.resolve("generated-directory")
+        );
+
+        Path fromSnapshot = generateUsersRepository(
+            List.of(snapshotFile.toString()),
+            queriesFile,
+            tempDir.resolve("generated-snapshot")
+        );
+
+        assertArrayEquals(
+            Files.readAllBytes(fromSnapshot),
+            Files.readAllBytes(fromDirectory)
+        );
+
+        assertCompiles(
+            tempDir.resolve("generated-directory"),
+            tempDir.resolve("classes")
+        );
+    }
+
+    /**
+     * A later migration alters the tables the earlier ones created, so the
+     * migration directory and the snapshot of the altered tables describe one
+     * schema and generate the same repository source.
+     */
+    @Test
+    void shouldGenerateTheSameRepositoryFromAlteringMigrationsAndASnapshot()
+        throws IOException {
+        Path migrations = Files.createDirectories(tempDir.resolve("migrations"));
+
+        Files.writeString(
+            migrations.resolve("V1__users.sql"),
+            """
+                CREATE TABLE users
+                (
+                    id    BIGINT NOT NULL,
+                    email VARCHAR(255),
+                    name  VARCHAR(255) NOT NULL,
+                    note  TEXT
+                );
+                """
+        );
+
+        Files.writeString(
+            migrations.resolve("V2__orders.sql"),
+            """
+                CREATE TABLE orders
+                (
+                    id      BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    total   DECIMAL(10, 2)
+                );
+                """
+        );
+
+        Files.writeString(
+            migrations.resolve("V3__alter_users.sql"),
+            """
+                ALTER TABLE users RENAME COLUMN email TO email_address;
+                ALTER TABLE users ADD COLUMN active BOOLEAN NOT NULL;
+                ALTER TABLE users DROP COLUMN note;
+                ALTER TABLE users ALTER COLUMN id TYPE INT4;
+                ALTER TABLE users ALTER COLUMN name DROP NOT NULL;
+                ALTER TABLE orders ALTER COLUMN total SET NOT NULL;
+                """
+        );
+
+        Path snapshotFile = tempDir.resolve("schema.sql");
+
+        Files.writeString(
+            snapshotFile,
+            """
+                CREATE TABLE users
+                (
+                    id            INT4 NOT NULL,
+                    email_address VARCHAR(255),
+                    name          VARCHAR(255),
+                    active        BOOLEAN NOT NULL
+                );
+
+                CREATE TABLE orders
+                (
+                    id      BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    total   DECIMAL(10, 2) NOT NULL
+                );
+                """
+        );
+
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: ListUsers :many
+                SELECT *
+                FROM users;
+
+                -- name: FindOrder :optional
+                SELECT *
+                FROM orders
+                WHERE id = $1;
+
+                -- name: ListActiveUsers :many
+                SELECT id, email_address
+                FROM users
+                WHERE active = $1;
+                """
+        );
+
+        Path fromDirectory = generateUsersRepository(
+            List.of(migrations.toString()),
+            queriesFile,
+            tempDir.resolve("generated-directory")
+        );
+
+        Path fromSnapshot = generateUsersRepository(
+            List.of(snapshotFile.toString()),
+            queriesFile,
+            tempDir.resolve("generated-snapshot")
+        );
+
+        assertArrayEquals(
+            Files.readAllBytes(fromSnapshot),
+            Files.readAllBytes(fromDirectory)
+        );
+
+        assertCompiles(
+            tempDir.resolve("generated-directory"),
+            tempDir.resolve("classes")
+        );
+    }
+
+    /**
+     * A migration that alters a table no earlier migration created names the
+     * file that refers to it.
+     */
+    @Test
+    void shouldReportTheMigrationFileThatAltersAMissingTable() throws IOException {
+        Path migrations = Files.createDirectories(tempDir.resolve("migrations"));
+
+        Files.writeString(
+            migrations.resolve("V1__users.sql"),
+            """
+                CREATE TABLE users
+                (
+                    id BIGINT NOT NULL
+                );
+                """
+        );
+
+        Path missingReference = migrations.resolve("V2__payments.sql");
+
+        Files.writeString(
+            missingReference,
+            "ALTER TABLE payments ADD COLUMN total DECIMAL(10, 2);\n"
+        );
+
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: ListUsers :many
+                SELECT id
+                FROM users;
+                """
+        );
+
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> generateUsersRepository(
+                List.of(migrations.toString()),
+                queriesFile,
+                generatedDirectory
+            )
+        );
+
+        assertEquals(
+            "Invalid schema source %s: ".formatted(missingReference)
+                + "Table not found in schema: payments",
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    /**
+     * A migration whose ignored statements load names the file and the line of
+     * the first statement sqlcj does not accept.
+     */
+    @Test
+    void shouldReportTheMigrationFileAndLineOfAnUnsupportedStatement() throws IOException {
+        Path migrations = Files.createDirectories(tempDir.resolve("migrations"));
+
+        Files.writeString(
+            migrations.resolve("V1__users.sql"),
+            """
+                CREATE TABLE users
+                (
+                    id BIGINT NOT NULL
+                );
+                """
+        );
+
+        Path unsupported = migrations.resolve("V2__views.sql");
+
+        Files.writeString(
+            unsupported,
+            """
+                CREATE INDEX users_id_idx ON users (id);
+
+                CREATE VIEW active_users AS
+                SELECT id
+                FROM users;
+
+                ALTER FOREIGN TABLE users ADD COLUMN name TEXT;
+                """
+        );
+
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: ListUsers :many
+                SELECT id
+                FROM users;
+                """
+        );
+
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> generateUsersRepository(
+                List.of(migrations.toString()),
+                queriesFile,
+                generatedDirectory
+            )
+        );
+
+        assertEquals(
+            "Invalid schema source %s: ".formatted(unsupported)
+                + "Unsupported schema statement: ALTER FOREIGN TABLE at line 7",
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    /** A schema failure names the migration file that contains it. */
+    @Test
+    void shouldReportTheMigrationFileThatFailsToParse() throws IOException {
+        Path migrations = Files.createDirectories(tempDir.resolve("migrations"));
+
+        Files.writeString(
+            migrations.resolve("V1__users.sql"),
+            """
+                CREATE TABLE users
+                (
+                    id BIGINT NOT NULL
+                );
+                """
+        );
+
+        Path broken = migrations.resolve("V2__orders.sql");
+
+        Files.writeString(
+            broken,
+            """
+                CREATE TABLE orders (
+                 id BIGINT NOT NULL,
+                 user_id BIGINT NOT NULL
+                ;
+                """
+        );
+
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: ListUsers :many
+                SELECT id
+                FROM users;
+                """
+        );
+
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> generateUsersRepository(
+                List.of(migrations.toString()),
+                queriesFile,
+                generatedDirectory
+            )
+        );
+
+        assertEquals(
+            "Invalid schema source %s: ".formatted(broken)
+                + "Encountered unexpected token: \";\" "
+                + "at line 4, column 1",
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    /**
+     * A column of a type sqlcj cannot map loads with the schema, so only the
+     * query that reads it fails, naming the query, its file and line, the
+     * column, and the recorded type.
+     */
+    @Test
+    void shouldReportTheQueryThatReadsAnUnsupportedTypeColumn() throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE users
+                (
+                    id   BIGINT NOT NULL,
+                    tags JSONB[]
+                );
+                """
+        );
+
+        Path queriesFile = tempDir.resolve("queries.sql");
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: ListUsers :many
+                SELECT id
+                FROM users;
+
+                -- name: ListTags :many
+                SELECT tags
+                FROM users;
+                """
+        );
+
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        CompilationException exception = assertThrows(
+            CompilationException.class,
+            () -> generateUsersRepository(
+                List.of(schemaFile.toString()),
+                queriesFile,
+                generatedDirectory
+            )
+        );
+
+        assertEquals(
+            "Invalid query 'ListTags' in %s at line 5: ".formatted(queriesFile)
+                + "Column 'tags' has unsupported type JSONB[]",
+            exception.getMessage()
+        );
+
+        assertFalse(Files.exists(generatedDirectory));
+    }
+
+    /**
+     * A query that uses none of the recorded columns of its table generates a
+     * repository that compiles.
+     */
+    @Test
+    void shouldGenerateCompilableRepositoryBesideUnsupportedTypeColumns() throws IOException {
+        generateAndCompile(
+            """
+                CREATE TABLE users
+                (
+                    id       BIGINT NOT NULL,
+                    name     VARCHAR(255),
+                    tags     JSONB[],
+                    metadata XML
+                );
+                """,
+            """
+                -- name: ListUsers :many
+                SELECT id, name
+                FROM users
+                WHERE name = $1;
+
+                -- name: UpdateUserName :exec
+                UPDATE users
+                SET name = $1
+                WHERE id = $2;
+                """
+        );
+    }
+
+    /**
+     * A repository generated from cast placeholders outside the clauses that
+     * name a parameter compiles: a projected cast, a dynamic sort, a cast page,
+     * a group predicate, and a subquery each contribute one typed method
+     * parameter, in the logical order of their placeholders.
+     */
+    @Test
+    void shouldGenerateCompilableRepositoryForCastPlaceholdersOfEveryClause() throws IOException {
+        generateAndCompile(
+            """
+                CREATE TABLE users
+                (
+                    id   BIGINT NOT NULL,
+                    name VARCHAR(255)
+                );
+
+                CREATE TABLE orders
+                (
+                    id      BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    total   DECIMAL(10, 2)
+                );
+                """,
+            """
+                -- name: ListUsers :many
+                SELECT :label::text AS label, id, name
+                FROM users
+                WHERE id = :id
+                ORDER BY CASE WHEN :sort::text = 'name' THEN name END
+                LIMIT :pageSize::int OFFSET :skip::int;
+
+                -- name: CountUsersByName :many
+                SELECT name, COUNT(*) AS total
+                FROM users
+                GROUP BY name
+                HAVING COUNT(*) > :minimum::bigint;
+
+                -- name: ListBuyers :many
+                SELECT id, name
+                FROM users
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM orders
+                    WHERE orders.user_id = users.id
+                      AND orders.total = :total::numeric
+                )
+                ORDER BY id;
+                """
+        );
+
+        String repository = Files.readString(
+            tempDir
+                .resolve("generated")
+                .resolve("generated")
+                .resolve("UsersRepository.java")
+        );
+
+        assertTrue(
+            repository.contains(
+                "public List<ListUsersResult> listUsers("
+                    + "String label, Long id, String sort, Integer pageSize, Integer skip)"
+            ),
+            repository
+        );
+
+        assertEquals(
+            List.of("String label", "Long id", "String name"),
+            recordComponents(repository, "ListUsersResult")
+        );
+
+        assertTrue(
+            repository.contains(
+                "public List<CountUsersByNameResult> countUsersByName(Long minimum)"
+            ),
+            repository
+        );
+
+        assertTrue(
+            repository.contains(
+                "public List<ListBuyersResult> listBuyers(BigDecimal total)"
+            ),
+            repository
+        );
+    }
+
+    /**
+     * A common table expression and a subquery source generate compilable Java
+     * whose result components carry the types their bodies state, with the
+     * columns of a left-joined derived source nullable.
+     */
+    @Test
+    void shouldGenerateCompilableJavaForDerivedSources() throws IOException {
+        generateAndCompile(
+            JOIN_SCHEMA,
+            """
+                -- name: ListUserOrderTotals :many
+                WITH totals AS (SELECT user_id, SUM(total)::numeric AS amount
+                                FROM orders
+                                WHERE total = $1
+                                GROUP BY user_id)
+                SELECT u.name, totals.amount
+                FROM users u
+                LEFT JOIN totals ON totals.user_id = u.id;
+
+                -- name: ListRecentOrders :many
+                SELECT recent.id, recent.total
+                FROM (SELECT id, total
+                      FROM orders
+                      WHERE user_id = $1
+                      ORDER BY id DESC
+                      LIMIT $2) recent;
+                """
+        );
+
+        String source = Files.readString(
+            tempDir.resolve("generated/generated/UsersRepository.java")
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<ListUserOrderTotalsResult> listUserOrderTotals(BigDecimal total)"
+            ),
+            source
+        );
+
+        assertEquals(
+            List.of("String name", "BigDecimal amount"),
+            recordComponents(source, "ListUserOrderTotalsResult")
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<ListRecentOrdersResult> listRecentOrders(Long userId, Integer limit)"
+            ),
+            source
+        );
+
+        assertEquals(
+            List.of("Long id", "BigDecimal total"),
+            recordComponents(source, "ListRecentOrdersResult")
+        );
+    }
+
+    /**
+     * A predicate subquery types its own and its correlated placeholders
+     * without a cast, so an {@code EXISTS}, a {@code NOT EXISTS}, and an
+     * {@code IN} membership check generate compilable Java whose method
+     * parameters come from the subquery's columns.
+     */
+    @Test
+    void shouldGenerateCompilableJavaForPredicateSubqueries() throws IOException {
+        generateAndCompile(
+            JOIN_SCHEMA,
+            """
+                -- name: ListUsersWithOrder :many
+                SELECT u.id, u.name
+                FROM users u
+                WHERE EXISTS (SELECT 1
+                              FROM orders o
+                              WHERE o.user_id = u.id
+                                AND o.total = $1);
+
+                -- name: ListUsersWithoutProfile :many
+                SELECT u.id, u.name
+                FROM users u
+                WHERE NOT EXISTS (SELECT 1
+                                  FROM profiles p
+                                  WHERE p.user_id = u.id
+                                    AND p.nickname = $1);
+
+                -- name: ListOrderingUsers :many
+                SELECT id, name
+                FROM users
+                WHERE id IN (SELECT user_id
+                             FROM orders
+                             WHERE total = :total);
+                """
+        );
+
+        String source = Files.readString(
+            tempDir.resolve("generated/generated/UsersRepository.java")
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<ListUsersWithOrderResult> listUsersWithOrder(BigDecimal total)"
+            ),
+            source
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<ListUsersWithoutProfileResult> listUsersWithoutProfile(String nickname)"
+            ),
+            source
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<ListOrderingUsersResult> listOrderingUsers(BigDecimal total)"
+            ),
+            source
+        );
+    }
+
+    /**
+     * Several {@code VALUES} rows, an insert's {@code SELECT} without
+     * {@code FROM}, and an insert over a common table expression and a join
+     * generate compilable Java whose method parameters are typed from the
+     * written columns, while a returning insert keeps the target's shared row
+     * record.
+     */
+    @Test
+    void shouldGenerateCompilableJavaForMultiRowAndSelectSourcedInserts() throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Files.writeString(schemaFile, JOIN_SCHEMA);
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: CreateTwoProfiles :exec
+                INSERT INTO profiles (id, user_id, nickname)
+                VALUES (:firstId, :userId, :firstNickname),
+                       (:secondId, :userId, :secondNickname);
+
+                -- name: CreateUserProfiles :many
+                INSERT INTO profiles (id, user_id)
+                SELECT :profileId, unnest(:userIds::bigint[])
+                ON CONFLICT (id) DO NOTHING
+                RETURNING *;
+
+                -- name: CopyRecentOrderProfiles :exec
+                WITH recent AS (SELECT o.id, o.user_id
+                                FROM orders o
+                                WHERE o.total = :total)
+                INSERT INTO profiles (id, user_id, nickname)
+                SELECT recent.id, recent.user_id, u.name
+                FROM recent
+                JOIN users u ON u.id = recent.user_id;
+                """
+        );
+
+        String source = Files.readString(
+            generateUsersRepository(
+                List.of(schemaFile.toString()),
+                queriesFile,
+                generatedDirectory
+            )
+        );
+
+        assertTrue(
+            source.contains(
+                "public int createTwoProfiles(Long firstId, Long userId, String firstNickname,"
+                    + " Long secondId, String secondNickname)"
+            ),
+            source
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<ProfilesRow> createUserProfiles(Long profileId, List<Long> userIds)"
+            ),
+            source
+        );
+
+        assertTrue(
+            source.contains("public int copyRecentOrderProfiles(BigDecimal total)"),
+            source
+        );
+
+        assertCompiles(generatedDirectory, tempDir.resolve("classes"));
+    }
+
+    /**
+     * A joined update and a {@code USING} delete generate compilable Java whose
+     * method parameters are typed from the columns of their added sources,
+     * whose returned columns of a left-joined source are nullable, and whose
+     * {@code RETURNING <target>.*} keeps the target's shared row record.
+     */
+    @Test
+    void shouldGenerateCompilableJavaForJoinedWrites() throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Files.writeString(schemaFile, JOIN_SCHEMA);
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: RenameProfiledUsers :many
+                UPDATE users u
+                SET name = :name
+                FROM profiles p
+                WHERE p.user_id = u.id
+                  AND p.nickname = :nickname
+                RETURNING u.*;
+
+                -- name: ListRenamedOrderTotals :many
+                UPDATE users u
+                SET name = :name
+                FROM profiles p
+                LEFT JOIN orders o ON o.user_id = p.user_id
+                    AND o.total = :total
+                WHERE p.user_id = u.id
+                RETURNING u.id, o.id AS order_id, o.total;
+
+                -- name: DeleteOrderingUsers :many
+                WITH top_orders AS (SELECT user_id, total
+                                    FROM orders
+                                    WHERE total = :total)
+                DELETE FROM users u
+                USING top_orders
+                WHERE top_orders.user_id = u.id
+                RETURNING u.name, top_orders.total;
+                """
+        );
+
+        String source = Files.readString(
+            generateUsersRepository(
+                List.of(schemaFile.toString()),
+                queriesFile,
+                generatedDirectory
+            )
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<UsersRow> renameProfiledUsers(String name, String nickname)"
+            ),
+            source
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<ListRenamedOrderTotalsResult> listRenamedOrderTotals(String name,"
+                    + " BigDecimal total)"
+            ),
+            source
+        );
+
+        assertEquals(
+            List.of("Long id", "Long orderId", "BigDecimal total"),
+            recordComponents(source, "ListRenamedOrderTotalsResult")
+        );
+
+        assertTrue(
+            source.contains(
+                "public List<DeleteOrderingUsersResult> deleteOrderingUsers(BigDecimal total)"
+            ),
+            source
+        );
+
+        assertEquals(
+            List.of("String name", "BigDecimal total"),
+            recordComponents(source, "DeleteOrderingUsersResult")
+        );
+
+        assertCompiles(generatedDirectory, tempDir.resolve("classes"));
+    }
+
+    /**
+     * A list predicate generates one {@code List} method parameter of the
+     * compared column's element type, bound as one server array, in compilable
+     * Java.
+     */
+    @Test
+    void shouldGenerateCompilableRepositoryForAListPredicate() throws IOException {
+        generateAndCompile(
+            """
+                CREATE TABLE users
+                (
+                    id   BIGINT NOT NULL,
+                    name VARCHAR(255)
+                );
+                """,
+            """
+                -- name: ListUsersByIds :many
+                SELECT id, name
+                FROM users
+                WHERE id = ANY($1)
+                ORDER BY id;
+                """
+        );
+
+        String repository = Files.readString(
+            tempDir
+                .resolve("generated")
+                .resolve("generated")
+                .resolve("UsersRepository.java")
+        );
+
+        assertTrue(
+            repository.contains(
+                "public List<ListUsersByIdsResult> listUsersByIds(List<Long> id)"
+            )
+        );
+
+        assertTrue(repository.contains("WHERE id = ANY(?)"));
+
+        assertTrue(
+            repository.contains(
+                "java.util.Arrays.asList(new org.sqlcj.runtime.SqlArray(\"int8\", id))"
+            )
+        );
+    }
+
+    /**
+     * A table whose columns come from a {@code LIKE} and a partition whose
+     * columns come from its parent are modeled with those columns, so a
+     * {@code SELECT *} over either of them generates a row record and a
+     * repository that compile. The parent's later added column reaches its
+     * partition but not the independent {@code LIKE} copy.
+     */
+    @Test
+    void shouldGenerateCompilableRepositoriesOverCopiedTableColumns() throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+
+        Files.writeString(
+            schemaFile,
+            """
+                CREATE TABLE events
+                (
+                    id      BIGINT NOT NULL,
+                    tenant  VARCHAR(64) NOT NULL,
+                    payload TEXT
+                );
+
+                CREATE TABLE events_copy (LIKE events INCLUDING ALL);
+
+                CREATE TABLE events_recent PARTITION OF events
+                    FOR VALUES FROM (1) TO (100);
+
+                ALTER TABLE events ADD COLUMN note TEXT;
+                """
+        );
+
+        Files.writeString(
+            queriesFile,
+            """
+                -- name: ListCopiedEvents :many
+                SELECT *
+                FROM events_copy
+                WHERE tenant = $1;
+
+                -- name: ListRecentEvents :many
+                SELECT *
+                FROM events_recent
+                WHERE tenant = $1;
+                """
+        );
+
+        generateUsersRepository(
+            List.of(schemaFile.toString()),
+            queriesFile,
+            generatedDirectory
+        );
+
+        assertEquals(
+            List.of("Long id", "String tenant", "String payload"),
+            recordComponents(
+                Files.readString(generatedDirectory.resolve("generated/EventsCopyRow.java")),
+                "EventsCopyRow"
+            )
+        );
+
+        assertEquals(
+            List.of("Long id", "String tenant", "String payload", "String note"),
+            recordComponents(
+                Files.readString(generatedDirectory.resolve("generated/EventsRecentRow.java")),
+                "EventsRecentRow"
+            )
+        );
+
+        assertCompiles(generatedDirectory, tempDir.resolve("classes"));
+    }
+
+    /** Generates the one repository of the {@code Users} group. */
+    private Path generateUsersRepository(
+        List<String> schema,
+        Path queriesFile,
+        Path generatedDirectory
+    ) {
+        Config config = new Config(
+            List.of(
+                new SqlConfig(
+                    "Users",
+                    schema,
+                    queriesFile.toString()
+                )
+            ),
+            new JavaConfig(
+                generatedDirectory.toString(),
+                "generated"
+            )
+        );
+
+        new SqlcjCompiler().compile(config);
+
+        return generatedDirectory
+            .resolve("generated")
+            .resolve("UsersRepository.java");
+    }
+
+    /** Generates and compiles the one repository of the {@code Users} group. */
+    private Path generateAndCompile(String schema, String queries) throws IOException {
+        Path schemaFile = tempDir.resolve("schema.sql");
+        Path queriesFile = tempDir.resolve("queries.sql");
+        Path generatedDirectory = tempDir.resolve("generated");
+        Path classesDirectory = tempDir.resolve("classes");
+
+        Files.writeString(schemaFile, schema);
+
+        Files.writeString(queriesFile, queries);
+
+        Config config = new Config(
+            List.of(
+                new SqlConfig(
+                    "Users",
+                    schemaFile.toString(),
+                    queriesFile.toString()
+                )
+            ),
+            new JavaConfig(
+                generatedDirectory.toString(),
+                "generated"
+            )
+        );
+
+        new SqlcjCompiler().compile(config);
+
+        Path generatedFile = generatedDirectory.resolve("generated").resolve("UsersRepository.java");
+
+        assertTrue(Files.exists(generatedFile));
+
+        Files.createDirectories(classesDirectory);
+
+        JavaCompiler compilerApi = ToolProvider.getSystemJavaCompiler();
+
+        assertNotNull(compilerApi);
+
+        int compilationResult = compilerApi.run(
+            null,
+            null,
+            null,
+            "-classpath",
+            System.getProperty("java.class.path"),
+            "-d",
+            classesDirectory.toString(),
+            generatedFile.toString()
+        );
+
+        assertEquals(0, compilationResult);
+
+        return classesDirectory;
+    }
+
+    /** Compiles every generated source of one output directory together. */
+    private void assertCompiles(Path generatedDirectory, Path classesDirectory) throws IOException {
+        Files.createDirectories(classesDirectory);
+
+        JavaCompiler compilerApi = ToolProvider.getSystemJavaCompiler();
+
+        assertNotNull(compilerApi);
+
+        List<String> arguments = new ArrayList<>(
+            List.of(
+                "-classpath",
+                System.getProperty("java.class.path"),
+                "-d",
+                classesDirectory.toString()
+            )
+        );
+
+        try (Stream<Path> generatedFiles = Files.walk(generatedDirectory)) {
+            generatedFiles
+                .map(Path::toString)
+                .filter(path -> path.endsWith(".java"))
+                .sorted()
+                .forEach(arguments::add);
+        }
+
+        assertEquals(
+            0,
+            compilerApi.run(
+                null,
+                null,
+                null,
+                arguments.toArray(new String[0])
+            )
+        );
+    }
+
+    private URLClassLoader classLoader(Path classesDirectory) throws IOException {
+        return new URLClassLoader(
+            new URL[] { classesDirectory.toUri().toURL() },
+            getClass().getClassLoader()
+        );
+    }
+
+    private JdbcDataSource usersDataSource() throws Exception {
+        JdbcDataSource dataSource = new JdbcDataSource();
+
+        dataSource.setURL(
+            "jdbc:h2:mem:" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1"
+        );
+
+        try (
+            Connection connection = dataSource.getConnection();
+            Statement statement = connection.createStatement()
+        ) {
+            statement.execute("""
+                CREATE TABLE users (
+                    id BIGINT PRIMARY KEY,
+                    name VARCHAR(255),
+                    active BOOLEAN
+                )
+                """);
+
+            statement.execute("""
+                INSERT INTO users (id, name, active)
+                VALUES
+                    (1, 'Alice', TRUE),
+                    (2, 'Bob', FALSE)
+                """);
+        }
+
+        return dataSource;
+    }
+
+    private JdbcDataSource joinDataSource() throws Exception {
+        JdbcDataSource dataSource = new JdbcDataSource();
+
+        dataSource.setURL(
+            "jdbc:h2:mem:" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1"
+        );
+
+        try (
+            Connection connection = dataSource.getConnection();
+            Statement statement = connection.createStatement()
+        ) {
+            statement.execute("""
+                CREATE TABLE users (
+                    id BIGINT PRIMARY KEY,
+                    name VARCHAR(255)
+                )
+                """);
+
+            statement.execute("""
+                CREATE TABLE profiles (
+                    id BIGINT PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    nickname VARCHAR(255)
+                )
+                """);
+
+            statement.execute("""
+                CREATE TABLE orders (
+                    id BIGINT PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    total DECIMAL(10, 2)
+                )
+                """);
+
+            statement.execute("""
+                INSERT INTO users (id, name)
+                VALUES (1, 'Alice'), (2, 'Bob')
+                """);
+
+            statement.execute("""
+                INSERT INTO profiles (id, user_id, nickname)
+                VALUES (10, 1, 'ali'), (20, 2, 'bob')
+                """);
+
+            statement.execute("""
+                INSERT INTO orders (id, user_id, total)
+                VALUES (100, 1, 15.50), (200, 2, 20.00)
+                """);
+        }
+
+        return dataSource;
+    }
+
+    /** The declared components of one generated record, in declared order. */
+    private List<String> recordComponents(String source, String recordName) {
+        int start = source.indexOf("public record " + recordName + "(");
+
+        assertTrue(start >= 0);
+
+        return source.substring(start, source.indexOf(") {", start))
+            .lines()
+            .skip(1)
+            .map(String::strip)
+            .filter(component -> !component.isEmpty())
+            .map(
+                component -> component.endsWith(",")
+                    ? component.substring(0, component.length() - 1)
+                    : component
+            )
+            .toList();
+    }
+
+    private Object getRecordComponent(Object record, String componentName) throws Exception {
+        return record
+            .getClass()
+            .getMethod(componentName)
+            .invoke(record);
+    }
+}

@@ -6,7 +6,7 @@ sqlcj is a pre-1.0 project and currently has no supported release line. Security
 
 ## Reporting a Vulnerability
 
-Report suspected security vulnerabilities privately through [GitHub private vulnerability reporting](https://github.com/sqlcj-dev/sqlcj/security/advisories/new). Do not disclose vulnerabilities through public issues, pull requests, or discussions.
+Report suspected security vulnerabilities privately through [GitHub private vulnerability reporting](https://github.com/sqlcj/sqlcj/security/advisories/new). Do not disclose vulnerabilities through public issues, pull requests, or discussions.
 
 Please include, where applicable:
 

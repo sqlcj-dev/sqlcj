@@ -4,10 +4,10 @@ import com.example.app.db.AuthorRepository;
 import com.example.app.db.AuthorsRow;
 import com.example.app.db.BookFormat;
 import com.example.app.db.BooksRow;
-import dev.sqlcj.runtime.JdbcQueryExecutor;
-import dev.sqlcj.runtime.QueryCardinalityException;
-import dev.sqlcj.runtime.QueryExecutor;
 import org.postgresql.ds.PGSimpleDataSource;
+import org.sqlcj.runtime.JdbcQueryExecutor;
+import org.sqlcj.runtime.QueryCardinalityException;
+import org.sqlcj.runtime.QueryExecutor;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
