@@ -128,10 +128,14 @@ configuration entry.
 - Every `WITH` clause of every statement is analyzed in the order the query
   writes it, whether or not a source reads it, so its placeholders are typed by
   its own clause rules. A clause sees the clauses written before it in its own
-  list and those of every enclosing query, so a clause named like a table reads
-  that table inside its own body. `MATERIALIZED` and `NOT MATERIALIZED` are
-  accepted, while `WITH RECURSIVE` is rejected as
-  `WITH RECURSIVE is not supported.` and a data-modifying body as
+  list and those of every enclosing query, so in a list without `RECURSIVE` a
+  clause named like a table reads that table inside its own body. In a
+  `RECURSIVE` list the clause's own name reads the clause itself, in its
+  recursive term, and is rejected everywhere else, as
+  [Recursive CTEs](#recursive-ctes) states. `MATERIALIZED` and
+  `NOT MATERIALIZED` are accepted, while a `SEARCH` or a `CYCLE` clause is
+  rejected as `SEARCH and CYCLE clauses are not supported.` and a
+  data-modifying body as
   `A data-modifying statement in WITH is not supported; run it as a query of its
   own.`
 - sqlcj models one namespace, so a source resolves by its unqualified name:
@@ -685,6 +689,68 @@ LIMIT $1;
 - A placeholder repeated across branches is one parameter whose occurrences
   must agree in type, and every parameter binds in the textual order of the
   statement, branch by branch.
+
+### Recursive CTEs
+
+A `WITH RECURSIVE` list walks a hierarchy or builds a series, on a read and on
+a write alike:
+
+```sql
+-- name: ListCategoryTree :many
+WITH RECURSIVE tree AS (SELECT id, parent_id, name
+                        FROM categories
+                        WHERE id = :rootId
+                        UNION ALL
+                        SELECT c.id, c.parent_id, c.name
+                        FROM categories c
+                                 JOIN tree t ON c.parent_id = t.id)
+SELECT id, name
+FROM tree
+ORDER BY id;
+```
+
+- `RECURSIVE` covers the whole list, as it does in PostgreSQL, so a list
+  written with it is a **recursive list** wherever the keyword stands. A
+  clause of one is **recursive** when its body, inside its parentheses, is a
+  set operation whose last operator is `UNION` or `UNION ALL` and whose last
+  branch names the clause itself, unqualified, as its `FROM` source or a joined
+  source. Every other clause of the list, recursive keyword or not, is analyzed
+  exactly as [Sources](#sources) states.
+- In a recursive list, a source may read neither the clause's own name, outside
+  its own recursive term, nor the name of a clause declared after it. A source
+  naming one, at any depth — a subquery, a predicate, or a nested `WITH` body —
+  is rejected as
+  `WITH RECURSIVE <name> may read itself only as a FROM or JOIN source of the
+  branch after its last UNION or UNION ALL.` and
+  `WITH clause <name> is read before its declaration; declare it before the
+  clause that reads it.`, rather than read as the table of that name. A `WITH`
+  list nested inside declares that name anew, so it shadows the clause as it
+  shadows any other, and a schema-qualified name still names a table.
+- The branches before the last are the clause's **first term**, analyzed by the
+  [set operation](#set-operations) rules, and they give the clause's columns,
+  which a column list on the `WITH` name renames as [Sources](#sources) states.
+  The **recursive term**, the last branch, reads those columns through the
+  clause, so a placeholder compared with one of them is typed from it.
+- A plain `SELECT` of the first term, written in parentheses or not, may omit
+  `FROM`, which is how a series' seed row is written. A `SELECT` without `FROM`
+  anywhere else keeps the source rejection [Sources](#sources) states.
+- Each column of the recursive term must resolve, by the set operation type
+  rules, to the type the first term states, as PostgreSQL requires. A column
+  that resolves to another type is rejected as
+  `Recursive WITH clause levels column level has type integer in its first term
+  but bigint overall; cast it in the first term, such as level::bigint`, so the
+  cast is written in the first term.
+- A column is nullable when either term's is. A column the recursive term alone
+  makes nullable makes **every** column of the clause nullable, because the
+  recursive term read them all before that was known.
+- `SEARCH` and `CYCLE` are rejected on every `WITH` clause, recursive or not,
+  as `SEARCH and CYCLE clauses are not supported.`, because each adds a column
+  the clause's own `SELECT` does not state.
+- The body's branch count, its operators, its `ORDER BY`, and its `LIMIT` and
+  `OFFSET` follow the [set operation](#set-operations) rules, `MINUS` included.
+  Where the recursive term may read the clause — once, outside a subquery, and
+  not on the nullable side of an outer join — and whether a recursive body may
+  be ordered or paged stay PostgreSQL's own checks.
 
 ## Writes
 
@@ -1451,9 +1517,13 @@ query name, and its header line.
   its body returns, and a derived source two of whose columns expose one name,
   each with the diagnostic [Sources](#sources) states.
 - A `WITH` clause outside the subset, on a read and on a write alike: a
-  `WITH RECURSIVE` clause and a data-modifying body, each with the diagnostic
-  [Sources](#sources) states. Both are rejected whether or not a source reads
-  the clause, because every body is analyzed.
+  data-modifying body and a `SEARCH` or `CYCLE` clause, each with the
+  diagnostic [Sources](#sources) states, and, in a recursive list, a read of
+  the clause itself outside its recursive term, a read of a clause declared
+  later, and a recursive term whose column type the first term does not state,
+  each with the diagnostic [Recursive CTEs](#recursive-ctes) states. Each is
+  rejected whether or not a source reads the clause, because every body is
+  analyzed.
 - A join kind outside a plain inner or left join, each with the diagnostic
   [Sources](#sources) states, which says what to write instead for `RIGHT`,
   `CROSS`, `NATURAL`, `USING`, and a comma-separated `FROM` list, and a join
@@ -1903,6 +1973,38 @@ Reads:
   executes a joined `WITH` clause whose column list renames its grouped column
   and names an unaliased `count(*)`, and a shorter list whose unrenamed column
   keeps its body's name.
+- `QueryAnalyzerTest.shouldAnalyzeARecursiveCommonTableExpression`,
+  `QueryAnalyzerTest.shouldNameRecursiveCommonTableExpressionColumnsByItsColumnList`,
+  `QueryAnalyzerTest.shouldAnalyzeARecursiveFirstTermWithoutFrom`,
+  `QueryAnalyzerTest.shouldResolveARecursiveFirstTermOfSeveralBranches`,
+  `QueryAnalyzerTest.shouldAcceptARecursiveTermNarrowerThanItsFirstTerm`,
+  `QueryAnalyzerTest.shouldReadARecursiveColumnNullableInEitherTerm`,
+  `QueryAnalyzerTest.shouldMakeEveryRecursiveColumnNullableWhenTheRecursiveTermAddsOne`,
+  `QueryAnalyzerTest.shouldAnalyzeAnItemOfARecursiveListThatDoesNotReadItself`,
+  `QueryAnalyzerTest.shouldAnalyzeARecursiveCommonTableExpressionOfAWrite`,
+  `QueryAnalyzerTest.shouldAnalyzeARecursiveListInsideASubquerySource`,
+  `QueryAnalyzerTest.shouldRejectARecursiveTermOutsideItsFirstTermType`, and
+  `QueryAnalyzerTest.shouldRejectAnExcludedRecursiveForm` cover the recursive
+  clauses: a hierarchy walk whose recursive term joins the clause and types a
+  placeholder from one of its columns in textual binding order, a column list
+  naming an unaliased cast of the first term, a first term without `FROM`, a
+  first term of several branches, a recursive term narrower than its first
+  term, a column nullable in either term and the recursive term's own nullable
+  column that makes every column nullable, the items of a recursive list that
+  read themselves not at all, a recursive `DELETE` and `UPDATE`, a recursive
+  list inside a subquery source, and every rejection: the clause read in its
+  first term, in a plain body, in a subquery of the last branch, and in an
+  `INTERSECT`-ended body, a clause read before its declaration, `SEARCH`,
+  `CYCLE`, `MINUS`, a recursive term of another column count, the first-term
+  type diagnostic, and the `FROM`-less body outside a first term that keeps the
+  source rejection;
+  `PostgresIntegrationTest.shouldExecuteGeneratedRecursiveCtesAgainstPostgres`
+  executes a hierarchy walk over a self-referencing table and a `FROM`-less
+  seed series against PostgreSQL 16 and confirms that PostgreSQL itself rejects
+  an `integer` first term with a `bigint` recursive term, and
+  `ReferenceServiceIntegrationTest.shouldExecuteTheGeneratedRecursiveQuery`
+  executes the reference service's recursive level series against its migrated
+  database.
 - `QueryAnalyzerTest.shouldTypePredicateSubqueryPlaceholderFromItsOwnColumn`,
   `QueryAnalyzerTest.shouldTypePredicateSubqueryPlaceholderOfAJoinCondition`,
   `QueryAnalyzerTest.shouldTypePredicateSubqueryPlaceholderOfAnUpdate`,
@@ -2182,19 +2284,20 @@ Unsupported queries and internal errors:
   `EXPLAIN`, `EXECUTE`, `CREATE TABLE`, and `SET` statements, a window and a
   concatenation projection, a computed `RETURNING` item, the `RIGHT`, `FULL`,
   `USING`, `NATURAL`, `CROSS`, comma, and `LATERAL` joins, a column list on a
-  subquery alias, a subquery source without an alias, a `WITH RECURSIVE`
-  clause, a data-modifying `WITH` body, a set operation as an insert's row
-  source, an insert whose `SELECT` writes fewer values than its column list,
-  a comma-joined and a join-joined multi-table `UPDATE`, a joined `DELETE`,
-  and a bare `RETURNING *` on a joined update, while
+  subquery alias, a subquery source without an alias, a recursive `WITH` clause
+  read in its own first term, a data-modifying `WITH` body, a set operation as
+  an insert's row source, an insert whose `SELECT` writes fewer values than its
+  column list, a comma-joined and a join-joined multi-table `UPDATE`, a joined
+  `DELETE`, and a bare `RETURNING *` on a joined update, while
   `QueryAnalyzerTest.shouldRejectUnsupportedAggregateProjectionForm`,
   `QueryAnalyzerTest.shouldRejectUnsupportedJoinModifier`,
   `QueryAnalyzerTest.shouldRejectUnsupportedReturningItem`,
   `QueryAnalyzerTest.shouldRejectExcludedReturningWriteForm`,
-  `QueryAnalyzerTest.shouldRejectExcludedDerivedSourceForm`, and
+  `QueryAnalyzerTest.shouldRejectExcludedDerivedSourceForm`,
+  `QueryAnalyzerTest.shouldRejectAnExcludedRecursiveForm`, and
   `QueryAnalyzerTest.shouldRejectAnInsertRowSourceOutsideTheSubset` cover the
-  projection, join, derived-source, and write rejections per form, including
-  the modifiers that keep the general join rejection, and
+  projection, join, derived-source, recursive, and write rejections per form,
+  including the modifiers that keep the general join rejection, and
   `QueryAnalyzerTest.shouldAnalyzeParenthesizedSelectAsTheQueryItEncloses`,
   `QueryAnalyzerTest.shouldAnalyzeInsertWhoseValuesRowIsParenthesized`, and
   `QueryAnalyzerTest.shouldAnalyzeParenthesizedValuesRowsAtAnyDepth` cover
@@ -2374,8 +2477,8 @@ Reference service:
 - `ReferenceServiceIntegrationTest.shouldRejectEachUnsupportedCatalogueQuery`
   covers the whole located diagnostic line, and the absence of generated
   output, of every entry of the reference service's unsupported query
-  catalogue: the two set operations, the `RIGHT`, `FULL`, `USING`, `NATURAL`,
-  `CROSS`, comma, and `LATERAL` joins, a recursive and a data-modifying CTE, an
-  uncast `lower(:email)`, and a placeholder beside a subscripted column, and
+  catalogue: the `RIGHT`, `FULL`, `USING`, `NATURAL`, `CROSS`, comma, and
+  `LATERAL` joins, a data-modifying CTE, an uncast `lower(:email)`, and a
+  placeholder beside a subscripted column, and
   `ReferenceServiceIntegrationTest.shouldCatalogueExactlyTheUnsupportedQueryFiles`
   covers that the catalogue directory holds exactly those queries.
