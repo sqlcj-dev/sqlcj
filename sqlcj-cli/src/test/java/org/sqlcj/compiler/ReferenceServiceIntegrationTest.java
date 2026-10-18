@@ -136,11 +136,6 @@ class ReferenceServiceIntegrationTest {
             "LATERAL is not supported."
         ),
         new UnsupportedQuery(
-            "recursive_cte.sql",
-            "ListPriorityLevels",
-            "WITH RECURSIVE is not supported."
-        ),
-        new UnsupportedQuery(
             "data_modifying_cte.sql",
             "DeleteDoneTasks",
             "A data-modifying statement in WITH is not supported; "
@@ -1165,6 +1160,29 @@ class ReferenceServiceIntegrationTest {
         return componentsOf(rows, "title").stream()
             .filter("Shared Title"::equals)
             .count();
+    }
+
+    /**
+     * The generated repository executes the reference service's recursive query
+     * against the migrated database: a series whose first term selects its seed
+     * row without reading a table and whose recursive term counts up to five.
+     */
+    @Test
+    void shouldExecuteTheGeneratedRecursiveQuery() throws Exception {
+        Path generatedDirectory = tempDir.resolve("generated-recursive");
+
+        generate(List.of(migrations().toString()), generatedDirectory);
+
+        Path classesDirectory = compile(generatedDirectory, tempDir.resolve("classes-recursive"));
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            assertEquals(
+                List.of(1, 2, 3, 4, 5),
+                componentsOf((List<?>) invoke(repository, "listPriorityLevels"), "level")
+            );
+        }
     }
 
     /**

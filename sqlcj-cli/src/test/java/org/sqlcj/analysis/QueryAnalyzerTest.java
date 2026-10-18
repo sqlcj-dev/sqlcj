@@ -8507,8 +8507,7 @@ class QueryAnalyzerTest {
 
     /**
      * The derived-source forms outside this subset are rejected with their own
-     * diagnostic: a recursive and a data-modifying {@code WITH} item, with or
-     * without a column list, which is read after the recursive rejection, a
+     * diagnostic: a data-modifying {@code WITH} item, a
      * subquery source without an alias, a column list on a subquery alias, a
      * body that states no supported query at all, which is classified inside
      * its own parentheses, a {@code LATERAL} source, which is classified first,
@@ -8523,10 +8522,6 @@ class QueryAnalyzerTest {
         delimiter = '|',
         quoteCharacter = '"',
         value = {
-            "MANY|WITH RECURSIVE recent AS (SELECT id FROM users) SELECT id FROM recent"
-                + "|WITH RECURSIVE is not supported.",
-            "MANY|WITH RECURSIVE recent (n) AS (SELECT id FROM users) SELECT n FROM recent"
-                + "|WITH RECURSIVE is not supported.",
             "MANY|WITH moved AS (UPDATE users SET name = $1 WHERE id = $2 RETURNING id)"
                 + " SELECT id FROM moved"
                 + "|A data-modifying statement in WITH is not supported;"
@@ -10636,6 +10631,498 @@ class QueryAnalyzerTest {
     )
     void shouldRejectAnExcludedNestedSetOperation(QueryType type, String sql, String message) {
         Query query = new Query("ReadUsers", type, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, setOperationSchema)
+        );
+
+        assertEquals(message, exception.getMessage());
+    }
+
+    /**
+     * A recursive {@code WITH} clause walks a self-referencing table: its first
+     * term selects the root row, and its recursive term joins the clause
+     * itself, reading the columns the first term gives it, so a placeholder
+     * compared with one of them is typed from that column and every placeholder
+     * binds in the textual order the query writes it in. A column is nullable
+     * where either term's is.
+     */
+    @Test
+    void shouldAnalyzeARecursiveCommonTableExpression() {
+        String sql = """
+            WITH RECURSIVE tree AS (SELECT id, parent_id
+                                    FROM users
+                                    WHERE id = :rootId
+                                    UNION ALL
+                                    SELECT u.id, u.parent_id
+                                    FROM users u
+                                             JOIN tree t ON u.parent_id = t.id
+                                    WHERE t.id < :maxDepth)
+            SELECT id, parent_id
+            FROM tree
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListTree", QueryType.MANY, sql),
+            parser.parse(sql),
+            setOperationSchema
+        );
+
+        assertEquals("tree", model.table());
+        assertNull(model.rowTable());
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, false),
+                new QueryColumn("parent_id", ColumnType.BIGINT, true)
+            ),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "rootId", ColumnType.BIGINT),
+                new QueryParameter(2, "maxDepth", ColumnType.BIGINT)
+            ),
+            model.parameters()
+        );
+
+        assertEquals(List.of(1, 2), model.bindingParameterIndexes());
+    }
+
+    /**
+     * A column list on a recursive {@code WITH} name names the columns its
+     * first term gives, so a cast of the first term written at a listed
+     * position needs no alias of its own, and the recursive term reads that
+     * column under the listed name.
+     */
+    @Test
+    void shouldNameRecursiveCommonTableExpressionColumnsByItsColumnList() {
+        String sql = """
+            WITH RECURSIVE levels (level) AS (SELECT CAST(1 AS integer)
+                                              UNION ALL
+                                              SELECT CAST(level + 1 AS integer)
+                                              FROM levels
+                                              WHERE level < 5)
+            SELECT level
+            FROM levels
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListLevels", QueryType.MANY, sql),
+            parser.parse(sql),
+            setOperationSchema
+        );
+
+        assertEquals("levels", model.table());
+
+        assertEquals(
+            List.of(new QueryColumn("level", ColumnType.INTEGER, true)),
+            model.columns()
+        );
+    }
+
+    /**
+     * A plain {@code SELECT} of a recursive clause's first term may omit
+     * {@code FROM}, which is how a series' seed row is written, so it reads no
+     * source at all and names its own columns.
+     */
+    @Test
+    void shouldAnalyzeARecursiveFirstTermWithoutFrom() {
+        String sql = """
+            WITH RECURSIVE levels AS (SELECT CAST(1 AS integer) AS level
+                                      UNION ALL
+                                      SELECT CAST(level + 1 AS integer)
+                                      FROM levels
+                                      WHERE level < 5)
+            SELECT level
+            FROM levels
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListLevels", QueryType.MANY, sql),
+            parser.parse(sql),
+            setOperationSchema
+        );
+
+        assertEquals("levels", model.table());
+
+        assertEquals(
+            List.of(new QueryColumn("level", ColumnType.INTEGER, true)),
+            model.columns()
+        );
+    }
+
+    /**
+     * The branches before the last are the clause's first term, so a first term
+     * of several branches resolves its columns by the set operation rules
+     * before the recursive term reads them.
+     */
+    @Test
+    void shouldResolveARecursiveFirstTermOfSeveralBranches() {
+        String sql = """
+            WITH RECURSIVE tree AS (SELECT id
+                                    FROM users
+                                    WHERE id = $1
+                                    UNION
+                                    SELECT parent_id
+                                    FROM users
+                                    UNION ALL
+                                    SELECT t.id
+                                    FROM tree t
+                                             JOIN users u ON u.parent_id = t.id)
+            SELECT id
+            FROM tree
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListTree", QueryType.MANY, sql),
+            parser.parse(sql),
+            setOperationSchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("id", ColumnType.BIGINT, true)),
+            model.columns()
+        );
+    }
+
+    /**
+     * A recursive term whose column resolves to the type the first term states
+     * is accepted, as PostgreSQL accepts a recursive term it converts to the
+     * first term's type.
+     */
+    @Test
+    void shouldAcceptARecursiveTermNarrowerThanItsFirstTerm() {
+        String sql = """
+            WITH RECURSIVE tree AS (SELECT id
+                                    FROM users
+                                    UNION ALL
+                                    SELECT u.visits
+                                    FROM users u
+                                             JOIN tree t ON u.parent_id = t.id)
+            SELECT id
+            FROM tree
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListTree", QueryType.MANY, sql),
+            parser.parse(sql),
+            setOperationSchema
+        );
+
+        assertEquals(
+            List.of(new QueryColumn("id", ColumnType.BIGINT, true)),
+            model.columns()
+        );
+    }
+
+    /**
+     * A column of a recursive clause is nullable where either term's is, and a
+     * column both terms declare non-null stays non-null.
+     */
+    @Test
+    void shouldReadARecursiveColumnNullableInEitherTerm() {
+        String sql = """
+            WITH RECURSIVE tree AS (SELECT parent_id AS value, id
+                                    FROM users
+                                    UNION ALL
+                                    SELECT t.value, u.id
+                                    FROM users u
+                                             JOIN tree t ON u.parent_id = t.id)
+            SELECT value, id
+            FROM tree
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListTree", QueryType.MANY, sql),
+            parser.parse(sql),
+            setOperationSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("value", ColumnType.BIGINT, true),
+                new QueryColumn("id", ColumnType.BIGINT, false)
+            ),
+            model.columns()
+        );
+    }
+
+    /**
+     * A column the recursive term alone makes nullable makes every column of
+     * the clause nullable, because the recursive term read them all before that
+     * was known.
+     */
+    @Test
+    void shouldMakeEveryRecursiveColumnNullableWhenTheRecursiveTermAddsOne() {
+        String sql = """
+            WITH RECURSIVE tree AS (SELECT id, id AS parent
+                                    FROM users
+                                    UNION ALL
+                                    SELECT u.id, u.parent_id
+                                    FROM users u
+                                             JOIN tree t ON u.parent_id = t.id)
+            SELECT id, parent
+            FROM tree
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListTree", QueryType.MANY, sql),
+            parser.parse(sql),
+            setOperationSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryColumn("id", ColumnType.BIGINT, true),
+                new QueryColumn("parent", ColumnType.BIGINT, true)
+            ),
+            model.columns()
+        );
+    }
+
+    /**
+     * An item of a recursive list that does not read itself is analyzed exactly
+     * as it is outside one, so a set-operation body keeps the widened type and
+     * the operator nullability of the set operation rules, and a plain body,
+     * with or without a column list, keeps its own columns.
+     */
+    @Test
+    void shouldAnalyzeAnItemOfARecursiveListThatDoesNotReadItself() {
+        String combined = """
+            WITH RECURSIVE combined AS (SELECT id AS value
+                                        FROM users
+                                        UNION
+                                        SELECT visits
+                                        FROM users)
+            SELECT value
+            FROM combined
+            """;
+
+        assertEquals(
+            List.of(new QueryColumn("value", ColumnType.BIGINT, true)),
+            analyzer.analyze(
+                new Query("ListCombined", QueryType.MANY, combined),
+                parser.parse(combined),
+                setOperationSchema
+            ).columns()
+        );
+
+        String plain = "WITH RECURSIVE recent AS (SELECT id FROM users) SELECT id FROM recent";
+
+        assertEquals(
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            analyzer.analyze(
+                new Query("ListRecent", QueryType.MANY, plain),
+                parser.parse(plain),
+                setOperationSchema
+            ).columns()
+        );
+
+        String listed = "WITH RECURSIVE recent (n) AS (SELECT id FROM users) SELECT n FROM recent";
+
+        assertEquals(
+            List.of(new QueryColumn("n", ColumnType.BIGINT, false)),
+            analyzer.analyze(
+                new Query("ListRecent", QueryType.MANY, listed),
+                parser.parse(listed),
+                setOperationSchema
+            ).columns()
+        );
+    }
+
+    /**
+     * A write declares a recursive {@code WITH} clause as a read does, and its
+     * predicates read that clause, with the placeholders of both terms bound in
+     * textual order before the write's own.
+     */
+    @Test
+    void shouldAnalyzeARecursiveCommonTableExpressionOfAWrite() {
+        String delete = """
+            WITH RECURSIVE tree AS (SELECT id
+                                    FROM users
+                                    WHERE id = :rootId
+                                    UNION ALL
+                                    SELECT u.id
+                                    FROM users u
+                                             JOIN tree t ON u.parent_id = t.id)
+            DELETE
+            FROM users
+            WHERE id IN (SELECT id FROM tree)
+            """;
+
+        QueryModel deleteModel = analyzer.analyze(
+            new Query("DeleteTree", QueryType.EXEC, delete),
+            parser.parse(delete),
+            setOperationSchema
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "rootId", ColumnType.BIGINT)),
+            deleteModel.parameters()
+        );
+
+        String update = """
+            WITH RECURSIVE tree AS (SELECT id
+                                    FROM users
+                                    WHERE id = :rootId
+                                    UNION ALL
+                                    SELECT u.id
+                                    FROM users u
+                                             JOIN tree t ON u.parent_id = t.id)
+            UPDATE users
+            SET name = :name
+            WHERE id IN (SELECT id FROM tree)
+            """;
+
+        QueryModel updateModel = analyzer.analyze(
+            new Query("RenameTree", QueryType.EXEC, update),
+            parser.parse(update),
+            setOperationSchema
+        );
+
+        assertEquals(
+            List.of(
+                new QueryParameter(1, "rootId", ColumnType.BIGINT),
+                new QueryParameter(2, "name", ColumnType.VARCHAR)
+            ),
+            updateModel.parameters()
+        );
+
+        assertEquals(List.of(1, 2), updateModel.bindingParameterIndexes());
+    }
+
+    /**
+     * A recursive list declared inside a subquery source is analyzed there, so
+     * the subquery exposes the columns the recursive clause gives it.
+     */
+    @Test
+    void shouldAnalyzeARecursiveListInsideASubquerySource() {
+        String sql = """
+            SELECT s.id
+            FROM (WITH RECURSIVE tree AS (SELECT id
+                                          FROM users
+                                          WHERE id = $1
+                                          UNION ALL
+                                          SELECT u.id
+                                          FROM users u
+                                                   JOIN tree t ON u.parent_id = t.id)
+                  SELECT id
+                  FROM tree) s
+            """;
+
+        QueryModel model = analyzer.analyze(
+            new Query("ListTree", QueryType.MANY, sql),
+            parser.parse(sql),
+            setOperationSchema
+        );
+
+        assertEquals("s", model.table());
+
+        assertEquals(
+            List.of(new QueryColumn("id", ColumnType.BIGINT, false)),
+            model.columns()
+        );
+
+        assertEquals(
+            List.of(new QueryParameter(1, "id", ColumnType.BIGINT)),
+            model.parameters()
+        );
+    }
+
+    /**
+     * A recursive term whose column resolves to a type its first term does not
+     * state is rejected naming the cast the first term writes, because
+     * PostgreSQL gives the column the first term's type.
+     */
+    @Test
+    void shouldRejectARecursiveTermOutsideItsFirstTermType() {
+        String sql = """
+            WITH RECURSIVE tree AS (SELECT visits
+                                    FROM users
+                                    UNION ALL
+                                    SELECT u.id
+                                    FROM users u
+                                             JOIN tree t ON u.visits = t.visits)
+            SELECT visits
+            FROM tree
+            """;
+        Query query = new Query("ListTree", QueryType.MANY, sql);
+        ParsedSql parsedSql = parser.parse(sql);
+
+        UnsupportedOperationException exception = assertThrows(
+            UnsupportedOperationException.class,
+            () -> analyzer.analyze(query, parsedSql, setOperationSchema)
+        );
+
+        assertEquals(
+            "Recursive WITH clause tree column visits has type integer in its first term"
+                + " but bigint overall; cast it in the first term, such as visits::bigint",
+            exception.getMessage()
+        );
+    }
+
+    /**
+     * The recursive forms outside this subset are rejected with their own
+     * diagnostic: a clause of a recursive list read anywhere but as a source of
+     * its own recursive term — in its first term, in a body that states no set
+     * operation at all, in a subquery of the last branch, and in a body whose
+     * last operator is not {@code UNION} — a clause declared after the one
+     * reading it, a {@code SEARCH} and a {@code CYCLE} clause, a {@code MINUS}
+     * of a recursive body, and a recursive term selecting another number of
+     * columns than its first term. A body without {@code FROM} outside a first
+     * term keeps the source rejection every read states.
+     */
+    @ParameterizedTest
+    @CsvSource(
+        delimiter = '|',
+        quoteCharacter = '"',
+        value = {
+            "MANY|WITH RECURSIVE tree AS (SELECT t.id FROM tree t"
+                + " UNION ALL SELECT u.id FROM users u JOIN tree r ON u.parent_id = r.id)"
+                + " SELECT id FROM tree"
+                + "|WITH RECURSIVE tree may read itself only as a FROM or JOIN source"
+                + " of the branch after its last UNION or UNION ALL.",
+            "MANY|WITH RECURSIVE tree AS (SELECT t.id FROM tree t) SELECT id FROM tree"
+                + "|WITH RECURSIVE tree may read itself only as a FROM or JOIN source"
+                + " of the branch after its last UNION or UNION ALL.",
+            "MANY|WITH RECURSIVE tree AS (SELECT id FROM users"
+                + " UNION ALL SELECT x.id FROM (SELECT id FROM tree) x) SELECT id FROM tree"
+                + "|WITH RECURSIVE tree may read itself only as a FROM or JOIN source"
+                + " of the branch after its last UNION or UNION ALL.",
+            "MANY|WITH RECURSIVE tree AS (SELECT id FROM users"
+                + " INTERSECT SELECT t.id FROM tree t) SELECT id FROM tree"
+                + "|WITH RECURSIVE tree may read itself only as a FROM or JOIN source"
+                + " of the branch after its last UNION or UNION ALL.",
+            "MANY|WITH RECURSIVE roots AS (SELECT id FROM tree),"
+                + " tree AS (SELECT id FROM users UNION ALL SELECT t.id FROM tree t)"
+                + " SELECT id FROM roots"
+                + "|WITH clause tree is read before its declaration;"
+                + " declare it before the clause that reads it.",
+            "MANY|WITH RECURSIVE tree AS (SELECT id FROM users"
+                + " UNION ALL SELECT t.id FROM tree t) SEARCH DEPTH FIRST BY id SET ord"
+                + " SELECT id FROM tree"
+                + "|SEARCH and CYCLE clauses are not supported.",
+            "MANY|WITH RECURSIVE tree AS (SELECT id FROM users"
+                + " UNION ALL SELECT t.id FROM tree t) CYCLE id SET is_cycle USING path"
+                + " SELECT id FROM tree"
+                + "|SEARCH and CYCLE clauses are not supported.",
+            "MANY|WITH RECURSIVE tree AS (SELECT id FROM users MINUS SELECT parent_id FROM users"
+                + " UNION ALL SELECT t.id FROM tree t) SELECT id FROM tree"
+                + "|MINUS is not supported; write EXCEPT.",
+            "MANY|WITH RECURSIVE tree AS (SELECT id FROM users"
+                + " UNION ALL SELECT t.id, t.id FROM tree t) SELECT id FROM tree"
+                + "|Every branch of a set operation must select the same number of columns;"
+                + " the first selects 1 and branch 2 selects 2.",
+            "MANY|WITH levels AS (SELECT CAST(1 AS integer) AS level) SELECT level FROM levels"
+                + "|Only table sources are supported."
+        }
+    )
+    void shouldRejectAnExcludedRecursiveForm(QueryType type, String sql, String message) {
+        Query query = new Query("ReadTree", type, sql);
         ParsedSql parsedSql = parser.parse(sql);
 
         UnsupportedOperationException exception = assertThrows(

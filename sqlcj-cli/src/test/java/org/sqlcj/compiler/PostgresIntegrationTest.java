@@ -33,6 +33,7 @@ import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -209,6 +210,19 @@ class PostgresIntegrationTest {
             taken_on    DATE,
             taken_at    TIMESTAMP,
             recorded_at TIMESTAMPTZ
+        );
+        """;
+
+    /**
+     * A snapshot of a table that refers to itself, which a recursive query
+     * walks from a root row down its children.
+     */
+    private static final String CATEGORY_SCHEMA = """
+        CREATE TABLE categories
+        (
+            id        BIGINT PRIMARY KEY,
+            parent_id BIGINT,
+            name      VARCHAR(100) NOT NULL
         );
         """;
 
@@ -663,6 +677,7 @@ class PostgresIntegrationTest {
         execute("DROP TABLE IF EXISTS teams");
         execute("DROP TABLE IF EXISTS measurements");
         execute("DROP TABLE IF EXISTS readings");
+        execute("DROP TABLE IF EXISTS categories");
         execute("DROP TABLE IF EXISTS documents");
         execute("DROP TABLE IF EXISTS user_aliases");
         execute("DROP TABLE IF EXISTS users");
@@ -3940,6 +3955,113 @@ class PostgresIntegrationTest {
         ) {
             return resultSet.getMetaData().getColumnTypeName(1);
         }
+    }
+
+    /**
+     * Covers recursive {@code WITH} clauses end to end: a clause that walks a
+     * self-referencing table from the root row its parameter names down its
+     * children, and one whose first term selects its seed row without reading a
+     * table and whose column list names that unaliased cast, both generated,
+     * compiled, and executed against PostgreSQL.
+     *
+     * <p>PostgreSQL itself requires the first term to state each column's type,
+     * which is why a recursive term of a wider type is rejected rather than
+     * widened, so the same query is run directly against the server.
+     */
+    @Test
+    void shouldExecuteGeneratedRecursiveCtesAgainstPostgres() throws Exception {
+        execute(CATEGORY_SCHEMA);
+
+        Path classesDirectory = generateAndCompile(
+            CATEGORY_SCHEMA,
+            """
+                -- name: ListCategoryTree :many
+                WITH RECURSIVE tree AS (SELECT id, parent_id, name
+                                        FROM categories
+                                        WHERE id = :rootId
+                                        UNION ALL
+                                        SELECT c.id, c.parent_id, c.name
+                                        FROM categories c
+                                                 JOIN tree t ON c.parent_id = t.id)
+                SELECT id, name
+                FROM tree
+                ORDER BY id;
+
+                -- name: ListDepths :many
+                WITH RECURSIVE depths (depth) AS (SELECT CAST(1 AS integer)
+                                                  UNION ALL
+                                                  SELECT CAST(depth + 1 AS integer)
+                                                  FROM depths
+                                                  WHERE depth < 3)
+                SELECT depth
+                FROM depths;
+                """
+        );
+
+        execute(
+            """
+                INSERT INTO categories (id, parent_id, name)
+                VALUES (1, NULL, 'root'), (2, 1, 'child'), (3, 2, 'leaf'), (4, NULL, 'other')
+                """
+        );
+
+        try (URLClassLoader classLoader = classLoader(classesDirectory)) {
+            Object repository = newRepository(classLoader);
+
+            List<?> tree = (List<?>) repository.getClass()
+                .getMethod("listCategoryTree", Long.class)
+                .invoke(repository, 1L);
+
+            assertEquals(List.of("id", "name"), recordComponentNames(tree.get(0)));
+
+            assertEquals(
+                List.of("root", "child", "leaf"),
+                components(tree, "name"),
+                "the recursive term walks the children of the root row alone"
+            );
+
+            assertEquals(List.of(1L, 2L, 3L), components(tree, "id"));
+
+            assertEquals(
+                List.of(1, 2, 3),
+                components(
+                    (List<?>) repository.getClass().getMethod("listDepths").invoke(repository),
+                    "depth"
+                ),
+                "a first term without FROM seeds the series"
+            );
+        }
+
+        SQLException widened = assertThrows(
+            SQLException.class,
+            () -> execute(
+                """
+                    WITH RECURSIVE counted AS (SELECT CAST(1 AS integer) AS n
+                                               UNION ALL
+                                               SELECT CAST(n + 1 AS bigint)
+                                               FROM counted
+                                               WHERE n < 3)
+                    SELECT n
+                    FROM counted
+                    """
+            )
+        );
+
+        assertTrue(
+            widened.getMessage().contains("in non-recursive term but type bigint overall"),
+            widened.getMessage()
+        );
+    }
+
+    /** The values of one component of the rows a generated query returned. */
+    private List<Object> components(List<?> rows, String componentName) throws Exception {
+        List<Object> values = new ArrayList<>();
+
+        for (Object row : rows) {
+            values.add(component(row, componentName));
+        }
+
+        return values;
     }
 
     /**

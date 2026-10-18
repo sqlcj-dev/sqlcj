@@ -2770,8 +2770,11 @@ class SqlcjCompilerIntegrationTest {
             ),
             Arguments.of(
                 ":many",
-                "WITH RECURSIVE recent AS (SELECT id FROM users) SELECT id FROM recent",
-                "WITH RECURSIVE is not supported."
+                "WITH RECURSIVE tree AS (SELECT t.id FROM tree t"
+                    + " UNION ALL SELECT u.id FROM users u JOIN tree r ON r.id = u.id)"
+                    + " SELECT id FROM tree",
+                "WITH RECURSIVE tree may read itself only as a FROM or JOIN source"
+                    + " of the branch after its last UNION or UNION ALL."
             ),
             Arguments.of(
                 ":many",
