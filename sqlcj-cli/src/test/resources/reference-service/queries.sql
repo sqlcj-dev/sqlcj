@@ -292,3 +292,12 @@ FROM projects
 UNION ALL
 SELECT title
 FROM tasks;
+
+-- name: ListPriorityLevels :many
+WITH RECURSIVE levels AS (SELECT CAST(1 AS integer) AS level
+                          UNION ALL
+                          SELECT CAST(level + 1 AS integer)
+                          FROM levels
+                          WHERE level < 5)
+SELECT level
+FROM levels;

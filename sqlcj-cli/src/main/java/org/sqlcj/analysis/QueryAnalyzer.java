@@ -54,6 +54,7 @@ import net.sf.jsqlparser.statement.select.Select;
 import net.sf.jsqlparser.statement.select.SelectItem;
 import net.sf.jsqlparser.statement.select.SetOperation;
 import net.sf.jsqlparser.statement.select.SetOperationList;
+import net.sf.jsqlparser.statement.select.UnionOp;
 import net.sf.jsqlparser.statement.select.Values;
 import net.sf.jsqlparser.statement.select.WithItem;
 import net.sf.jsqlparser.statement.update.ParenthesedUpdate;
@@ -250,8 +251,40 @@ public final class QueryAnalyzer {
     private static final String DERIVED_SOURCE_COLUMN_NAME_REJECTION = """
         Derived source %s has more than one column named %s; give each a distinct alias.""";
 
-    /** The rejection of a recursive {@code WITH} clause. */
-    private static final String RECURSIVE_WITH_REJECTION = "WITH RECURSIVE is not supported.";
+    /**
+     * The rejection of a read of a recursive {@code WITH} clause outside its
+     * own recursive term, which is the one branch of its body that may read
+     * it, as PostgreSQL requires of a recursive query.
+     */
+    private static final String RECURSIVE_SELF_REFERENCE_REJECTION = """
+        WITH RECURSIVE %s may read itself only as a FROM or JOIN source of the branch after \
+        its last UNION or UNION ALL.""";
+
+    /**
+     * The rejection of a read of a {@code WITH} clause of a recursive list that
+     * is declared after the clause reading it, which PostgreSQL resolves and
+     * this subset does not.
+     */
+    private static final String FORWARD_WITH_REFERENCE_REJECTION = """
+        WITH clause %s is read before its declaration; declare it before the clause that \
+        reads it.""";
+
+    /**
+     * The rejection of a {@code SEARCH} or {@code CYCLE} clause, which adds
+     * columns to a {@code WITH} clause's rows that its own {@code SELECT} does
+     * not state.
+     */
+    private static final String WITH_SEARCH_OR_CYCLE_REJECTION = """
+        SEARCH and CYCLE clauses are not supported.""";
+
+    /**
+     * The rejection of one column of a recursive {@code WITH} clause whose two
+     * terms resolve to a type the first term does not state, which PostgreSQL
+     * requires the first term to state, so the cast belongs there.
+     */
+    private static final String RECURSIVE_COLUMN_TYPE_REJECTION = """
+        Recursive WITH clause %s column %s has type %s in its first term but %s overall; \
+        cast it in the first term, such as %s::%s""";
 
     /** The rejection of a {@code WITH} body that writes rows. */
     private static final String DATA_MODIFYING_WITH_REJECTION = """
@@ -409,13 +442,38 @@ public final class QueryAnalyzer {
      * <p>A derived source — a common table expression or a subquery source —
      * carries the result columns of its own {@code SELECT} under its exposed
      * name instead of a schema table's columns.
+     *
+     * <p>A name of a recursive {@code WITH} list that no source there may read
+     * stands in the scope as an unreadable source instead: it carries the
+     * diagnostic a source naming it is rejected with, and no table at all, so
+     * that the name shadows the schema table of that name exactly as a
+     * readable clause does.
      */
     private record Source(
         String name,
         org.sqlcj.schema.Table table,
         boolean derived,
-        boolean leftJoined
+        boolean leftJoined,
+        String unreadable
     ) {
+
+        /** One readable source, which every analyzed query resolves against. */
+        private Source(
+            String name,
+            org.sqlcj.schema.Table table,
+            boolean derived,
+            boolean leftJoined
+        ) {
+            this(name, table, derived, leftJoined, null);
+        }
+
+        /**
+         * One name in scope that no source may read, under the diagnostic that
+         * states why.
+         */
+        private static Source unreadable(String name, String rejection) {
+            return new Source(name, null, true, false, rejection);
+        }
 
         /**
          * The schema's declared name of the table whose complete row this
@@ -757,7 +815,8 @@ public final class QueryAnalyzer {
                 analysis,
                 analyzeCommonTableExpressions(selects, analysis, List.of()),
                 true,
-                0
+                0,
+                false
             ),
             analysis.placeholders()
         );
@@ -857,7 +916,8 @@ public final class QueryAnalyzer {
             analysis,
             analyzeCommonTableExpressions(selects, analysis, commonTableExpressions),
             true,
-            listedColumns
+            listedColumns,
+            false
         );
     }
 
@@ -911,15 +971,23 @@ public final class QueryAnalyzer {
      * leading columns a column list on the derived source this {@code SELECT}
      * is the body of renames, which are the positions this projection need not
      * name, and {@code 0} elsewhere.
+     *
+     * <p>{@code fromOptional} states whether this {@code SELECT} may omit
+     * {@code FROM}, which only a first-term branch of a recursive {@code WITH}
+     * clause may. Such a {@code SELECT} has no source at all, so it names no
+     * source and returns no table's complete row.
      */
     private AnalyzedSelect analyzePlainSelect(
         PlainSelect plainSelect,
         Analysis analysis,
         List<Source> commonTableExpressions,
         boolean namesResultColumns,
-        int listedColumns
+        int listedColumns,
+        boolean fromOptional
     ) {
-        List<Source> sources = resolveSources(plainSelect, analysis, commonTableExpressions, null);
+        List<Source> sources = fromOptional && plainSelect.getFromItem() == null
+            ? List.of()
+            : resolveSources(plainSelect, analysis, commonTableExpressions, null);
 
         Scope scope = Scope.of(sources, commonTableExpressions);
 
@@ -932,6 +1000,10 @@ public final class QueryAnalyzer {
         );
 
         resolveBindingParameters(plainSelect, scope, analysis);
+
+        if (sources.isEmpty()) {
+            return new AnalyzedSelect(null, projection, null);
+        }
 
         return new AnalyzedSelect(
             declaredSourceName(plainSelect.getFromItem(), sources.get(0)),
@@ -988,7 +1060,8 @@ public final class QueryAnalyzer {
                     analysis,
                     commonTableExpressions,
                     namesResultColumns && index == 0,
-                    index == 0 ? listedColumns : 0
+                    index == 0 ? listedColumns : 0,
+                    false
                 )
             );
         }
@@ -1018,14 +1091,18 @@ public final class QueryAnalyzer {
      *
      * <p>{@code listedColumns} is the number of leading columns a column list
      * renames, which this branch is given only where it is the naming
-     * projection of the renamed derived source.
+     * projection of the renamed derived source. {@code fromOptional} states
+     * whether a plain {@code SELECT} of this branch, parenthesized or not, may
+     * omit {@code FROM}, which only a first-term branch of a recursive
+     * {@code WITH} clause may.
      */
     private AnalyzedSelect analyzeSetOperationBranch(
         Select branch,
         Analysis analysis,
         List<Source> commonTableExpressions,
         boolean namesResultColumns,
-        int listedColumns
+        int listedColumns,
+        boolean fromOptional
     ) {
         List<Select> selects = parenthesisLevels(branch);
 
@@ -1043,7 +1120,8 @@ public final class QueryAnalyzer {
                 analysis,
                 branchCommonTableExpressions,
                 namesResultColumns,
-                listedColumns
+                listedColumns,
+                fromOptional
             );
         }
 
@@ -1544,9 +1622,7 @@ public final class QueryAnalyzer {
                 continue;
             }
 
-            for (WithItem<?> withItem : withItems) {
-                scope.add(analyzeCommonTableExpression(withItem, analysis, List.copyOf(scope)));
-            }
+            analyzeWithItems(withItems, analysis, scope);
         }
 
         return List.copyOf(scope);
@@ -1567,48 +1643,366 @@ public final class QueryAnalyzer {
 
         List<Source> scope = new ArrayList<>();
 
-        for (WithItem<?> withItem : withItems) {
-            scope.add(analyzeCommonTableExpression(withItem, analysis, List.copyOf(scope)));
-        }
+        analyzeWithItems(withItems, analysis, scope);
 
         return List.copyOf(scope);
     }
 
     /**
+     * Analyzes one {@code WITH} list, in the order the query writes it, adding
+     * the derived source each item declares to the scope the items after it
+     * see.
+     *
+     * <p>{@code RECURSIVE} covers the whole list, as it does in PostgreSQL, so
+     * a list any item of which the parser reports as recursive is a recursive
+     * list. In one, an item's own name and the name of every item declared
+     * after it stand in that item's own scope as unreadable names, because a
+     * source there may read neither: its own name only its recursive term may
+     * read, and a name declared later this subset does not resolve at all. A
+     * {@code WITH} list nested inside the body still declares that name anew,
+     * so it shadows the unreadable one as it shadows any other.
+     */
+    private void analyzeWithItems(
+        List<WithItem<?>> withItems,
+        Analysis analysis,
+        List<Source> scope
+    ) {
+        boolean recursive = withItems.stream().anyMatch(WithItem::isRecursive);
+
+        for (int index = 0; index < withItems.size(); index++) {
+            WithItem<?> withItem = withItems.get(index);
+
+            scope.add(
+                analyzeCommonTableExpression(
+                    withItem,
+                    analysis,
+                    recursive
+                        ? withUnreadableNames(scope, withItems, index)
+                        : List.copyOf(scope),
+                    recursive
+                )
+            );
+        }
+    }
+
+    /**
+     * The scope one item of a recursive {@code WITH} list is analyzed in: the
+     * clauses declared before it, followed by one unreadable name per name no
+     * source of its body may read — its own, which only its recursive term may
+     * read, and the name of every item declared after it.
+     */
+    private List<Source> withUnreadableNames(
+        List<Source> scope,
+        List<WithItem<?>> withItems,
+        int index
+    ) {
+        List<Source> names = new ArrayList<>(scope);
+
+        names.add(
+            Source.unreadable(
+                withItems.get(index).getUnquotedAliasName(),
+                RECURSIVE_SELF_REFERENCE_REJECTION
+            )
+        );
+
+        for (int later = index + 1; later < withItems.size(); later++) {
+            names.add(
+                Source.unreadable(
+                    withItems.get(later).getUnquotedAliasName(),
+                    FORWARD_WITH_REFERENCE_REJECTION
+                )
+            );
+        }
+
+        return List.copyOf(names);
+    }
+
+    /**
      * Analyzes one {@code WITH} item into the derived source it declares, whose
      * columns are its body's result columns, renamed by the item's column list
-     * where it writes one. A recursive item reads itself, and a data-modifying
-     * one writes rows, neither of which this subset models.
+     * where it writes one. A data-modifying body writes rows, which this subset
+     * does not model.
      *
      * <p>The number of names the list writes is the number of leading columns
      * the body itself need not name, so it is known before the body is
      * analyzed, while the renaming itself reads the columns that analysis
      * resolves.
+     *
+     * <p>An item of a recursive list whose body states the recursive form is
+     * analyzed as a recursive clause; every other item, in a recursive list or
+     * not, is analyzed as the query its body states.
      */
     private Source analyzeCommonTableExpression(
         WithItem<?> withItem,
         Analysis analysis,
-        List<Source> commonTableExpressions
+        List<Source> commonTableExpressions,
+        boolean recursiveList
     ) {
-        if (withItem.isRecursive()) {
-            throw new UnsupportedOperationException(RECURSIVE_WITH_REJECTION);
-        }
+        requireNoSearchOrCycleClause(withItem);
 
         Select body = requireSelectBody(withItem);
         String name = withItem.getUnquotedAliasName();
         List<SelectItem<?>> columnList = withItem.getWithItemList();
+        int listedColumns = columnList == null ? 0 : columnList.size();
+
+        List<Select> levels = parenthesisLevels(body);
+
+        if (recursiveList && readsItselfRecursively(levels, name)) {
+            return analyzeRecursiveCommonTableExpression(
+                name,
+                columnList,
+                levels,
+                analysis,
+                commonTableExpressions
+            );
+        }
 
         AnalyzedSelect analyzed = analyzeNestedSelect(
             body,
             analysis,
             commonTableExpressions,
-            columnList == null ? 0 : columnList.size()
+            listedColumns
         );
 
         return toDerivedSource(
             name,
             renamedDerivedColumns(name, columnList, analyzed.columns()),
             false
+        );
+    }
+
+    /**
+     * Rejects a {@code SEARCH} or a {@code CYCLE} clause on a {@code WITH}
+     * item, recursive or not, because each adds a column to that clause's rows
+     * that its own {@code SELECT} does not state.
+     */
+    private void requireNoSearchOrCycleClause(WithItem<?> withItem) {
+        if (withItem.getSearchClause() != null || withItem.getCycleClause() != null) {
+            throw new UnsupportedOperationException(WITH_SEARCH_OR_CYCLE_REJECTION);
+        }
+    }
+
+    /**
+     * Reports whether one item of a recursive {@code WITH} list states the
+     * recursive form PostgreSQL defines: its body, inside its parentheses, is a
+     * set operation whose last operator is {@code UNION} or {@code UNION ALL},
+     * and whose last branch reads the clause itself as a {@code FROM} or
+     * {@code JOIN} source.
+     *
+     * <p>Only an unqualified name of that branch's own sources reads the
+     * clause, as a source names a clause in scope, so a schema-qualified name
+     * and a read at any other depth state no recursive term; a body that is not
+     * this form is analyzed as the query it states, where the item's own name
+     * is unreadable.
+     */
+    private boolean readsItselfRecursively(List<Select> levels, String name) {
+        if (!(levels.get(levels.size() - 1) instanceof SetOperationList setOperation)) {
+            return false;
+        }
+
+        List<SetOperation> operators = setOperation.getOperations();
+
+        if (!(operators.get(operators.size() - 1) instanceof UnionOp)) {
+            return false;
+        }
+
+        List<Select> branches = setOperation.getSelects();
+        List<Select> branchLevels = parenthesisLevels(branches.get(branches.size() - 1));
+
+        if (!(branchLevels.get(branchLevels.size() - 1) instanceof PlainSelect plainSelect)) {
+            return false;
+        }
+
+        if (namesSource(plainSelect.getFromItem(), name)) {
+            return true;
+        }
+
+        List<Join> joins = plainSelect.getJoins();
+
+        if (joins == null) {
+            return false;
+        }
+
+        return joins.stream().anyMatch(join -> namesSource(join.getRightItem(), name));
+    }
+
+    /**
+     * Reports whether one source names the given {@code WITH} clause, which an
+     * unqualified table name does, compared ignoring case as a source resolves
+     * a clause in scope.
+     */
+    private boolean namesSource(FromItem fromItem, String name) {
+        return fromItem instanceof Table table
+            && table.getSchemaName() == null
+            && table.getUnquotedName().equalsIgnoreCase(name);
+    }
+
+    /**
+     * Analyzes one recursive {@code WITH} item into the derived source it
+     * declares.
+     *
+     * <p>The branches before the last are the clause's first term, analyzed by
+     * the set operation rules against the scope around the clause, where its
+     * own name is unreadable. Their columns, renamed by the item's column list,
+     * are the columns the clause exposes, so the recursive term — the last
+     * branch — reads them through a provisional source of that name appended to
+     * the scope. A plain {@code SELECT} of the first term may omit {@code FROM}
+     * there, as a series' seed row is written.
+     *
+     * <p>Each column of the recursive term must resolve to the type the first
+     * term states, as PostgreSQL requires, so the cast that states one type for
+     * both terms belongs to the first term. A column is nullable when either
+     * term's is, and a column the recursive term alone makes nullable makes
+     * every column of the clause nullable, because the recursive term read them
+     * before that was known.
+     *
+     * <p>The body's own {@code ORDER BY}, {@code LIMIT}, and {@code OFFSET} are
+     * the list's own clauses, resolved as they are for any set operation.
+     */
+    private Source analyzeRecursiveCommonTableExpression(
+        String name,
+        List<SelectItem<?>> columnList,
+        List<Select> levels,
+        Analysis analysis,
+        List<Source> commonTableExpressions
+    ) {
+        SetOperationList setOperation = (SetOperationList) levels.get(levels.size() - 1);
+
+        requireSupportedSetOperators(setOperation);
+
+        List<Source> scope = analyzeCommonTableExpressions(levels, analysis, commonTableExpressions);
+
+        List<Select> branches = setOperation.getSelects();
+        int last = branches.size() - 1;
+
+        List<AnalyzedSelect> firstTerm = new ArrayList<>();
+
+        for (int index = 0; index < last; index++) {
+            firstTerm.add(
+                analyzeSetOperationBranch(
+                    branches.get(index),
+                    analysis,
+                    scope,
+                    index == 0,
+                    index == 0 && columnList != null ? columnList.size() : 0,
+                    true
+                )
+            );
+        }
+
+        List<org.sqlcj.schema.Column> firstColumns = renamedDerivedColumns(
+            name,
+            columnList,
+            firstTerm.size() == 1
+                ? firstTerm.get(0).columns()
+                : resolveSetOperationColumns(
+                    firstTerm,
+                    setOperation.getOperations().subList(0, last - 1)
+                )
+        );
+
+        List<Source> recursiveScope = new ArrayList<>(scope);
+
+        recursiveScope.add(toDerivedSource(name, firstColumns, false));
+
+        AnalyzedSelect recursiveTerm = analyzeSetOperationBranch(
+            branches.get(last),
+            analysis,
+            List.copyOf(recursiveScope),
+            false,
+            0,
+            false
+        );
+
+        List<AnalyzedSelect> allBranches = new ArrayList<>(firstTerm);
+
+        allBranches.add(recursiveTerm);
+
+        requireSameSetOperationColumnCounts(allBranches);
+
+        List<org.sqlcj.schema.Column> columns = resolveRecursiveColumns(
+            name,
+            firstColumns,
+            recursiveTerm.columns()
+        );
+
+        requireResultColumnOrdering(setOperation, columns);
+
+        resolvePaginationParameters(setOperation, analysis.placeholders());
+
+        return toDerivedSource(name, columns, false);
+    }
+
+    /**
+     * Resolves the columns of a recursive {@code WITH} clause from its first
+     * term's columns and its recursive term's: each column keeps the first
+     * term's name and type, which the recursive term's column must resolve to,
+     * and is nullable when either term's is or when the recursive term alone
+     * makes any column nullable.
+     */
+    private List<org.sqlcj.schema.Column> resolveRecursiveColumns(
+        String name,
+        List<org.sqlcj.schema.Column> firstTerm,
+        List<org.sqlcj.schema.Column> recursiveTerm
+    ) {
+        boolean allNullable = false;
+
+        for (int index = 0; index < firstTerm.size(); index++) {
+            org.sqlcj.schema.Column first = firstTerm.get(index);
+            org.sqlcj.schema.Column recursive = recursiveTerm.get(index);
+
+            requireRecursiveColumnType(name, first, recursive);
+
+            allNullable = allNullable || (recursive.nullable() && !first.nullable());
+        }
+
+        List<org.sqlcj.schema.Column> columns = new ArrayList<>();
+
+        for (int index = 0; index < firstTerm.size(); index++) {
+            org.sqlcj.schema.Column first = firstTerm.get(index);
+
+            columns.add(
+                new org.sqlcj.schema.Column(
+                    first.name(),
+                    first.type(),
+                    allNullable || first.nullable() || recursiveTerm.get(index).nullable(),
+                    null,
+                    first.enumType(),
+                    first.array(),
+                    first.blankPadded()
+                )
+            );
+        }
+
+        return List.copyOf(columns);
+    }
+
+    /**
+     * Requires the type both terms of a recursive {@code WITH} clause resolve
+     * one column to, by the set operation rules, to be the type its first term
+     * states, which is the type PostgreSQL gives that column, naming the cast
+     * the first term writes otherwise.
+     */
+    private void requireRecursiveColumnType(
+        String name,
+        org.sqlcj.schema.Column first,
+        org.sqlcj.schema.Column recursive
+    ) {
+        org.sqlcj.schema.Column resolved = resolveSetOperationColumnType(first, first, recursive);
+
+        if (isSameResultType(resolved, first)) {
+            return;
+        }
+
+        throw new UnsupportedOperationException(
+            RECURSIVE_COLUMN_TYPE_REJECTION.formatted(
+                name,
+                first.name(),
+                sqlType(first),
+                sqlType(resolved),
+                first.name(),
+                sqlType(resolved)
+            )
         );
     }
 
@@ -2828,6 +3222,8 @@ public final class QueryAnalyzer {
         Source commonTableExpression = findCommonTableExpression(table, commonTableExpressions);
 
         if (commonTableExpression != null) {
+            requireReadableCommonTableExpression(commonTableExpression);
+
             return toDerivedSource(
                 table.getAlias() == null
                     ? commonTableExpression.name()
@@ -2838,6 +3234,21 @@ public final class QueryAnalyzer {
         }
 
         return toSource(table, analysis.schema(), leftJoined);
+    }
+
+    /**
+     * Rejects a source that names a name of a recursive {@code WITH} list no
+     * source may read there: the clause's own name outside its recursive term,
+     * and the name of a clause declared after it. The name shadows the schema
+     * table of that name, as a readable clause does, so it is reported with its
+     * own diagnostic rather than read as a table.
+     */
+    private void requireReadableCommonTableExpression(Source commonTableExpression) {
+        if (commonTableExpression.unreadable() != null) {
+            throw new UnsupportedOperationException(
+                commonTableExpression.unreadable().formatted(commonTableExpression.name())
+            );
+        }
     }
 
     /**
